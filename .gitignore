@@ -5,3 +5,6 @@ dist
 playwright-report
 test-results
 .vite
+/relay/webtor-relay
+/relay/tcp-seeder
+/relay/dist

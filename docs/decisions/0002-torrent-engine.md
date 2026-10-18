@@ -42,5 +42,5 @@ maintained BitTorrent-over-WebRTC implementation.
 
 Most magnets copied from public torrent sites will find **no peers** and cannot play. This is a hard
 limit of "no backend", not a bug, and the UI must say so plainly. webtor.io itself works because it
-downloads on its own servers. A user-supplied gateway could lift the limit later, but would be a
-product decision, not part of this design.
+downloads on its own servers. A user-run gateway lifts the limit as an opt-in:
+[0006](0006-regular-peers-relay.md).
