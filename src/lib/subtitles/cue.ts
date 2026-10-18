@@ -6,6 +6,11 @@ export interface SubtitleCue {
   text: string;
   /** WebVTT cue settings (`align`, `line`, `position`, `size`, `vertical`), when the source had them. */
   settings?: Record<string, string>;
+  /**
+   * Embedded ASS/SSA: the block payload as Matroska stores it (`ReadOrder,Layer,Style,…,Text`), for
+   * the styled renderer (libass `processChunk`); `text` is its plain-text fallback.
+   */
+  assChunk?: string;
 }
 
 // A tag: `<i>`, `</b>`, `<v Bob>`, `<c.loud>`, `<font color="…">`; or a WebVTT timestamp `<00:01.000>`.

@@ -146,11 +146,13 @@ test('embedded MKV tracks are listed; English shows at 2 s, also after seeking a
   await seekTo(page, 2);
   await expect.poll(() => shownCues(page)).toEqual(['Hello from English SRT']);
 
-  // ASS is shown as plain text (override tags dropped) until styled rendering lands.
+  // ASS is drawn on the JASSUB overlay instead of the text track (e2e/ass.spec.ts).
   await select.selectOption({ label: 'Russian · ASS' });
+  await expect(page.getByTestId('ass-canvas')).toBeVisible({ timeout: 20_000 });
   await seekTo(page, 3);
-  await expect.poll(() => shownCues(page)).toEqual(['Привет из ASS']);
+  expect(await shownCues(page)).toEqual([]);
   await select.selectOption({ label: 'Off' });
+  await expect(page.getByTestId('ass-canvas')).toHaveCount(0);
   await expect.poll(() => shownCues(page)).toEqual([]);
   await expect(page.getByTestId('error')).toHaveCount(0);
   await expect(page.locator('[data-testid="notice"][data-code="subtitle-failed"]')).toHaveCount(0);

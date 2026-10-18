@@ -23,8 +23,11 @@ import { relaySettings } from '../torrent/relay-settings.svelte';
 import { SubtitleManager } from '../subtitles/manager.svelte';
 import {
   EmbeddedSubtitleScan,
+  assHeaderOf,
+  embeddedKey,
   embeddedTrackInfo,
   readEmbeddedHeader,
+  readFontAttachments,
 } from '../subtitles/mkv/embedded';
 import { isTorrentId } from '../torrent/trackers';
 import { rememberAudioLanguage } from './audio-preference';
@@ -268,8 +271,16 @@ export class PlayerController {
       },
     });
     this.embedded = scan;
-    this.subtitles.addEmbedded(header.subtitleTracks.map(embeddedTrackInfo), (key) =>
-      scan.setActive(key !== null),
+    const headers = new Map<string, string>();
+    for (const track of header.subtitleTracks) {
+      const ass = assHeaderOf(track);
+      if (ass !== null) headers.set(embeddedKey(track.number), ass);
+    }
+    let fonts: Promise<Uint8Array[]> | null = null;
+    this.subtitles.addEmbedded(
+      header.subtitleTracks.map(embeddedTrackInfo),
+      (key) => scan.setActive(key !== null),
+      { headers, fonts: () => (fonts ??= readFontAttachments(source, header)) },
     );
   }
 
