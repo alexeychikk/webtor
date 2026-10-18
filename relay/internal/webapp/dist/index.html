@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="webtor-relay-placeholder" content="1" />
+    <title>webtor-relay</title>
+    <style>
+      body {
+        font: 16px/1.5 system-ui, sans-serif;
+        max-width: 40rem;
+        margin: 4rem auto;
+        padding: 0 1rem;
+        color: #222;
+      }
+      a {
+        color: #0a58ca;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>webtor-relay is running</h1>
+    <p>
+      This relay was built without the web app. Open the app on
+      <a id="hosted" href="https://alexeychikk.github.io/webtor/">alexeychikk.github.io/webtor</a>
+      and paste the relay URL that webtor-relay printed into its relay setting.
+    </p>
+    <script>
+      // Carry the #relay=<url> setting over to the hosted app.
+      if (location.hash) document.getElementById('hosted').href += location.hash;
+    </script>
+  </body>
+</html>

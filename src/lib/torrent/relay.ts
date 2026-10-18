@@ -37,7 +37,10 @@ export function checkRelayUrl(input: string, pageProtocol: string): RelayUrlChec
 export interface RelayEndpoints {
   /** `GET` → `{name: 'webtor-relay', version, api: 1}`. */
   info: string;
-  /** `GET` → .torrent (info dict only) once the swarm delivered it; 504 after ~90 s without. */
+  /**
+   * `GET` → .torrent (info dict only) once the swarm delivered it; 504 after ~90 s without; 429
+   * `{error, maxTorrents}` when the relay already has its maximum of torrents open.
+   */
   metainfo: string;
   /** `GET` → `[{index, path, length, webseedPath}]` (503 before metainfo). */
   files: string;

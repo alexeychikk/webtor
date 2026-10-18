@@ -2,16 +2,31 @@
 
 Go module `github.com/alexeychikk/webtor/relay`; Go version comes from the root `mise.toml`. API
 contract and rationale: `docs/decisions/0006-regular-peers-relay.md`. The TS side of the URL
-contract is `src/lib/torrent/relay.ts`: change both together.
+contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviour: `README.md`
+(keep its flag table in sync with `cmd/webtor-relay/main.go`).
 
 - Checks: `gofmt -l .` (must print nothing), `go vet ./...`, `go test ./...`. Builds must stay
   `CGO_ENABLED=0` (static binaries for every OS).
-- `internal/relay`: HTTP handlers over one `*torrent.Client`. Every URL starts with `/<token>/v1/`.
-  CORS is `*`, because the token is the access control. Keep handlers thin and put decisions
-  (path mapping, limits) in pure functions with table tests (`paths.go`).
+- `internal/relay`: HTTP handlers over one `*torrent.Client`. The handler checks the first path
+  segment against the token (constant time) and strips it, so API routes are `/v1/...` and request
+  logging never sees the token. Everything else goes to `Options.App` (`internal/webapp`).
+  CORS is `*` on the API only, because the token is the access control. Keep handlers thin and
+  put decisions (path mapping, ranges, links) in pure functions with table tests.
+- Every request takes a torrent with `acquire`/`existing` (counts it as active) and gives it back
+  with `release`. Torrents with an active request are never dropped; the janitor drops idle ones.
+- Storage: `relay.NewStorage` (per-infohash dir, hashed file names, in-memory piece completion), so
+  deleting `TorrentDir` after a drop is always safe.
+- Don't `slog.SetDefault` to a debug logger: anacrolix storage logs to the default logger, and its
+  debug output (lines per piece read/write) slows streaming down several times.
+- `watchStall` (per web seed request) re-requests pieces through `nudge` when neither the request
+  nor the torrent got data for `stallCheck` (3 s). It toggles download off and on, the only public
+  call that cancels the stuck requests (toggling upload or closing connections doesn't help);
+  `progressReader` retries the "downloading disabled" read error that this causes meanwhile.
 - The web seed path follows WebTorrent's `lib/webconn.js`: the bare URL for single-file torrents,
-  `URL + "<name>/<path>"` (not percent-encoded) for multi-file ones.
-- Tests that need a swarm use `internal/seedtest` (TCP-only loopback seeder) with the magnet's
-  `x.pe=`. Never depend on the public internet in tests; the platform sandbox only allows outbound
-  TCP 80/443 (`scripts/measure.sh` is for real networks).
+  `URL + "<name>/<path>"` (not percent-encoded) for multi-file ones. See `ResolveWebseedPath`.
+- Tests that need a swarm use `internal/seedtest` (TCP-only loopback seeder, file or directory)
+  with the magnet's `x.pe=`. Never depend on the public internet in tests; the platform sandbox only
+  allows outbound TCP 80/443 (`scripts/measure.sh` is for real networks).
+- `scripts/bench-webtorrent.mjs` measures loopback throughput through WebTorrent in Chromium (see
+  the root Playwright setup).
 - No GitHub Actions (root `CLAUDE.md`).
