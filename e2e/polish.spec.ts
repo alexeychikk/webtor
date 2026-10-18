@@ -153,10 +153,11 @@ test('keyboard shortcuts: space, arrows, m, c, f — and their help', async ({ p
 
   const select = page.getByTestId('subtitles');
   await expect(select).toHaveValue('');
-  await page.keyboard.press('c');
-  await expect(select).toHaveValue(/^sidecar:/);
-  await page.keyboard.press('c');
-  await expect(select).toHaveValue('');
+  // Selector order: the embedded English SRT and Russian ASS, the sidecar, then Off.
+  for (const value of ['embedded:4', 'embedded:5', /^sidecar:/, '']) {
+    await page.keyboard.press('c');
+    await expect(select).toHaveValue(value);
+  }
 
   await page.keyboard.press('f');
   await expect
