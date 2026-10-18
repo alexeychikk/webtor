@@ -30,16 +30,30 @@ export class SubtitleParseError extends Error {
   override name = 'SubtitleParseError';
 }
 
+export interface ParsedSubtitleFile {
+  format: SubtitleFormat;
+  /** Decoded text (for ASS/SSA: the script the styled renderer reads). */
+  text: string;
+  cues: SubtitleCue[];
+}
+
 /**
  * Decodes and parses a subtitle file. The content decides over the extension when they disagree
  * (a `.srt` that is really WebVTT). Throws `SubtitleParseError` when no cue could be read.
  */
-export function parseSubtitleFile(bytes: Uint8Array, name: string): SubtitleCue[] {
+export function readSubtitleFile(bytes: Uint8Array, name: string): ParsedSubtitleFile {
   const { text } = decodeSubtitleBytes(bytes);
   const format = sniffFormat(text) ?? subtitleFormatOf(name);
   if (!format) throw new SubtitleParseError(`unrecognised subtitle format: ${name}`);
   const cues =
     format === 'vtt' ? parseVtt(text) : format === 'srt' ? parseSrt(text) : parseAssAsText(text);
   if (!cues.length) throw new SubtitleParseError(`no cues in ${name}`);
-  return cues;
+  return { format, text, cues };
 }
+
+/** `readSubtitleFile`, cues only. */
+export function parseSubtitleFile(bytes: Uint8Array, name: string): SubtitleCue[] {
+  return readSubtitleFile(bytes, name).cues;
+}
+
+export const isAssFormat = (format: SubtitleFormat | null) => format === 'ass' || format === 'ssa';

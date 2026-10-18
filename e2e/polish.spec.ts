@@ -159,10 +159,11 @@ test('keyboard shortcuts: space, arrows, m, c, f — and their help', async ({ p
     await expect(select).toHaveValue(value);
   }
 
+  // Like the fullscreen button: the player container, so the ASS overlay stays over the video.
   await page.keyboard.press('f');
   await expect
     .poll(() => page.evaluate(() => document.fullscreenElement?.getAttribute('data-testid')))
-    .toBe('video');
+    .toBe('screen');
   await page.keyboard.press('f');
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
 

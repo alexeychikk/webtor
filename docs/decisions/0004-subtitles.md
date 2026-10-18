@@ -42,11 +42,16 @@ SRT and ASS tracks don't appear in `getTracks()`). So we keep a small EBML reade
   and clear its cues instead.
 - **ASS/SSA** → **JASSUB `^2.5`** (libass wasm, worker + OffscreenCanvas; falls back to single-thread
   without cross-origin isolation), lazy-loaded with Vite `?worker&url` / `?url` imports. Feed it the
-  `CodecPrivate` header (or the sidecar file) and add dialogue events as the scanner finds them. Fonts
-  come from MKV attachments plus JASSUB's bundled default. The canvas overlays the video inside the
-  player container, so our fullscreen button fullscreens the container. Native `<video>` fullscreen
-  would hide the overlay. Where only the video element can go fullscreen (iOS Safari), render ASS as
-  text instead: strip `{\…}` tags and use VTTCue.
+  `CodecPrivate` header (or the sidecar file) and add dialogue events as the scanner finds them, as
+  raw Matroska block payloads through libass's `processChunk` (which drops duplicates by ReadOrder).
+  Fonts come from MKV attachments plus JASSUB's bundled default (Liberation Sans, preloaded, so the
+  first frame drawn while paused already has glyphs); no local or Google font queries. The canvas
+  overlays the video inside the player container, so our fullscreen button fullscreens the
+  container, and the native control's fullscreen button is hidden (`controlslist="nofullscreen"`).
+  Native `<video>` fullscreen would hide the overlay. Where only the video element can go
+  fullscreen (iOS Safari), render ASS as text instead: strip `{\…}` tags and use VTTCue. The same
+  text track is shown while the bare video is fullscreen anyway (a browser's own control), and if
+  JASSUB fails to load.
 - **Sidecar / upload decoding:** BOM if present → UTF-8 (fatal) → windows-1251 if the text scores as
   Cyrillic → windows-1252. Own small SRT/VTT parsers (unit-tested); no dependency.
 - **Sidecar matching:** files whose basename starts with the video's basename come first, then the rest

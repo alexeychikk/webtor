@@ -4,12 +4,24 @@
  * selection and rendered as `VTTCue`s in one `TextTrack` per source. Text tracks can't be removed
  * from a `<video>`, so on `reset()` they are emptied, disabled and reused for a later source with
  * the same label and language.
+ *
+ * ASS/SSA tracks are drawn by JASSUB on a canvas over the video (`AssOverlay`) when
+ * `assRenderMode` allows it; otherwise (iOS, the bare video fullscreen, JASSUB failing) their
+ * plain-text cues show in the text track as usual.
  */
 import { PlaybackError } from '../player/errors';
+import {
+  assRenderMode,
+  detectDisplayCapabilities,
+  isVideoFullscreen,
+  onFullscreenChange,
+  type DisplayCapabilities,
+} from '../player/fullscreen';
+import { AssOverlay } from './ass-overlay';
 import type { SubtitleFileEntry, SubtitleTrackInfo } from '../player/types';
 import { shiftCues, SUBTITLE_DELAY_STEP_S, type SubtitleCue } from './cue';
 import { guessLanguageFromFilename, isForcedFilename } from './language';
-import { parseSubtitleFile, subtitleFormatOf } from './parse';
+import { isAssFormat, readSubtitleFile, subtitleFormatOf } from './parse';
 import {
   defaultSubtitleKey,
   nextSubtitleKey,
@@ -20,16 +32,43 @@ import {
 const PREFERENCE_KEY = 'webtor:subtitle-language';
 /** Text subtitles are tiny; anything bigger is not a subtitle file. */
 export const MAX_SUBTITLE_BYTES = 20 * 1024 * 1024;
+/** The styled renderer starts without the attached fonts if they take longer (they follow later). */
+const FONT_WAIT_MS = 15_000;
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface Source {
   info: SubtitleTrackInfo;
-  load: () => Promise<SubtitleCue[]>;
+  load: (source: Source) => Promise<SubtitleCue[]>;
   cues?: Promise<SubtitleCue[]>;
   track?: TextTrack;
   /** The delay the track's cues are shifted by. */
   trackDelay?: number;
   /** Embedded tracks: every cue found so far; more arrive through `appendCues`. */
   live?: SubtitleCue[];
+  /**
+   * ASS/SSA the styled renderer can draw: the whole script (files, set when loaded) or the
+   * CodecPrivate header (embedded, whose events come as cues with `assChunk`).
+   */
+  assScript?: string;
+  /** Fonts for the styled renderer (embedded: the file's attachments). */
+  fonts?: () => Promise<Uint8Array[]>;
+  /** JASSUB could not run for this source: plain text from now on. */
+  styledFailed?: boolean;
+}
+
+/** Styled options for embedded tracks, from the file's header. */
+export interface EmbeddedAssOptions {
+  /** Track key → its ASS/SSA header (CodecPrivate). */
+  headers: ReadonlyMap<string, string>;
+  /** The file's attached fonts (read once, on first use). */
+  fonts: () => Promise<Uint8Array[]>;
+}
+
+interface OverlayEntry {
+  key: string;
+  /** `null` while JASSUB loads. */
+  overlay: AssOverlay | null;
 }
 
 export class SubtitleManager {
@@ -52,16 +91,33 @@ export class SubtitleManager {
   private listening: AbortController | null = null;
   /** Told which embedded track is selected (`null`: none), so its scanner runs only then. */
   private onEmbeddedSelect: ((key: string | null) => void) | null = null;
+  /** The styled renderer of the selected ASS/SSA source, if it has one. */
+  private overlay: OverlayEntry | null = null;
+  private capabilities: DisplayCapabilities | null = null;
+  private videoFullscreen = false;
 
-  attach(video: HTMLVideoElement) {
+  attach(video: HTMLVideoElement, capabilities = detectDisplayCapabilities()) {
     if (this.video === video) return;
     this.listening?.abort();
+    this.destroyOverlay();
     this.video = video;
+    this.capabilities = capabilities;
     this.listening = new AbortController();
+    const { signal } = this.listening;
     // The native controls' captions menu can change modes too: follow it.
-    video.textTracks.addEventListener('change', () => this.syncFromNative(), {
-      signal: this.listening.signal,
-    });
+    video.textTracks.addEventListener('change', () => this.syncFromNative(), { signal });
+    // The bare video going fullscreen hides the overlay: show ASS as text while it is.
+    onFullscreenChange(
+      video,
+      () => {
+        const fullscreen = isVideoFullscreen(video);
+        if (fullscreen === this.videoFullscreen) return;
+        this.videoFullscreen = fullscreen;
+        const source = this.selectedSource();
+        if (source?.track && this.loading === null) void this.refresh(source);
+      },
+      signal,
+    );
   }
 
   /** Drops every source (a new torrent or file is loading). */
@@ -73,6 +129,7 @@ export class SubtitleManager {
       this.pool.push(source.track);
     }
     this.sources.clear();
+    this.destroyOverlay();
     this.onEmbeddedSelect = null;
     this.tracks = [];
     this.selected = null;
@@ -81,11 +138,16 @@ export class SubtitleManager {
     this.delay = 0;
   }
 
-  /** Shifts the subtitles by `delay` seconds; the showing track is redrawn at once. */
+  /**
+   * Shifts the subtitles by `delay` seconds: the text track is refilled with shifted cues and the
+   * styled overlay renders with a time offset.
+   */
   async setDelay(delay: number): Promise<void> {
     this.delay = Math.round(delay * 1000) / 1000;
-    const source = this.selected === null ? undefined : this.sources.get(this.selected);
-    if (!source?.track) return;
+    const source = this.selectedSource();
+    if (!source) return;
+    if (this.overlay?.key === source.info.key) this.overlay.overlay?.setDelay(this.delay);
+    if (!source.track) return;
     // Embedded: refill from every cue found so far (the scan keeps appending to `live`).
     if (source.live) return this.fillTrack(source, source.live);
     if (!source.cues) return;
@@ -113,14 +175,16 @@ export class SubtitleManager {
         {
           key: `sidecar:${entry.index}`,
           kind: 'sidecar',
-          renderer: 'text', // ASS/SSA as plain text until the JASSUB renderer lands.
+          renderer: isAssFormat(subtitleFormatOf(entry.name)) ? 'ass' : 'text',
           language: guessLanguageFromFilename(entry.name),
           label: entry.name,
           forced: isForcedFilename(entry.name),
         },
-        async () => {
+        async (source) => {
           if (entry.length > MAX_SUBTITLE_BYTES) throw new Error(`${entry.name} is too large`);
-          return parseSubtitleFile(await read(entry), entry.name);
+          const file = readSubtitleFile(await read(entry), entry.name);
+          if (isAssFormat(file.format)) source.assScript = file.text;
+          return file.cues;
         },
       );
     }
@@ -131,9 +195,18 @@ export class SubtitleManager {
    * Lists the playing file's embedded tracks and applies the default selection. Their cues arrive
    * over time through `appendCues`; `onSelect` hears the selected embedded key (or `null`).
    */
-  addEmbedded(infos: readonly SubtitleTrackInfo[], onSelect: (key: string | null) => void) {
+  addEmbedded(
+    infos: readonly SubtitleTrackInfo[],
+    onSelect: (key: string | null) => void,
+    ass?: EmbeddedAssOptions,
+  ) {
     for (const info of infos) {
       const source: Source = { info, load: () => Promise.resolve(source.live!), live: [] };
+      const header = ass?.headers.get(info.key);
+      if (header !== undefined) {
+        source.assScript = header;
+        source.fonts = ass!.fonts;
+      }
       this.sources.set(info.key, source);
     }
     this.tracks = [...this.tracks, ...infos];
@@ -148,10 +221,12 @@ export class SubtitleManager {
     const source = this.sources.get(key);
     if (!source?.live) return;
     source.live.push(...cues);
-    // Drawn with the delay the track is filled with; a later `setDelay` refills from `live`.
+    // Drawn with the delay the track is filled with; a later `setDelay` refills from `live`. The
+    // overlay takes them unshifted: it applies the delay as its time offset.
     if (source.track && source.trackDelay !== undefined) {
-      for (const cue of shiftCues(cues, source.trackDelay)) source.track.addCue(toVttCue(cue));
+      addCues(source.track, shiftCues(cues, source.trackDelay));
     }
+    if (this.overlay?.key === key) this.overlay.overlay?.addChunks(cues);
   }
 
   /** The embedded scan failed: cues found so far stay, the user is told the rest is missing. */
@@ -170,9 +245,9 @@ export class SubtitleManager {
       return;
     }
     const generation = this.generation;
-    let cues: SubtitleCue[];
+    let parsed: ReturnType<typeof readSubtitleFile>;
     try {
-      cues = parseSubtitleFile(new Uint8Array(await file.arrayBuffer()), file.name);
+      parsed = readSubtitleFile(new Uint8Array(await file.arrayBuffer()), file.name);
     } catch (err) {
       console.warn('subtitles:', err);
       if (generation === this.generation) {
@@ -182,16 +257,18 @@ export class SubtitleManager {
     }
     if (generation !== this.generation) return;
     const key = `upload:${++this.uploads}`;
+    const ass = isAssFormat(parsed.format);
     this.add(
       {
         key,
         kind: 'upload',
-        renderer: 'text',
+        renderer: ass ? 'ass' : 'text',
         language: guessLanguageFromFilename(file.name),
         label: file.name,
       },
-      () => Promise.resolve(cues),
+      () => Promise.resolve(parsed.cues),
     );
+    if (ass) this.sources.get(key)!.assScript = parsed.text;
     await this.select(key);
   }
 
@@ -205,6 +282,7 @@ export class SubtitleManager {
     this.onEmbeddedSelect?.(source?.info.kind === 'embedded' ? key : null);
     // Hide the previous track right away, even if the new one still has to load.
     for (const s of this.sources.values()) if (s !== source && s.track) s.track.mode = 'disabled';
+    if (this.overlay && this.overlay.key !== key) this.destroyOverlay();
     if (!source) {
       this.loading = null;
       return;
@@ -213,7 +291,7 @@ export class SubtitleManager {
     this.loading = key;
     let cues: SubtitleCue[];
     try {
-      source.cues ??= source.load();
+      source.cues ??= source.load(source);
       cues = await source.cues;
     } catch (err) {
       console.warn('subtitles:', err);
@@ -225,17 +303,89 @@ export class SubtitleManager {
       return;
     }
     if (generation !== this.generation || this.selected !== key) return;
-    this.loading = null;
+    // Embedded: the cues found by now, including any that arrived while this awaited. The text
+    // track is made for ASS too: it is the fallback when the overlay can't be seen.
     source.track ??= this.createTrack(source.info);
-    if (!source.track) return;
-    // Embedded: the cues found by now, including any that arrived while this awaited.
-    this.fillTrack(source, source.live ?? cues);
-    source.track.mode = 'showing';
+    if (source.track) this.fillTrack(source, source.live ?? cues);
+    if (this.styled(source)) await this.showOverlay(source);
+    if (generation !== this.generation || this.selected !== key) return;
+    this.loading = null;
+    this.render(source);
   }
 
-  private add(info: SubtitleTrackInfo, load: () => Promise<SubtitleCue[]>) {
+  private add(info: SubtitleTrackInfo, load: (source: Source) => Promise<SubtitleCue[]>) {
     this.sources.set(info.key, { info, load });
     this.tracks = [...this.tracks, info];
+  }
+
+  private selectedSource(): Source | undefined {
+    return this.selected === null ? undefined : this.sources.get(this.selected);
+  }
+
+  /** Should `source` be drawn by the styled renderer right now? */
+  private styled(source: Source): boolean {
+    return (
+      source.assScript !== undefined &&
+      !source.styledFailed &&
+      this.capabilities !== null &&
+      assRenderMode(this.capabilities, this.videoFullscreen) === 'styled'
+    );
+  }
+
+  /** Shows the selected, loaded `source` as overlay or text track, whichever applies now. */
+  private render(source: Source) {
+    const styled = this.styled(source) && this.overlay?.key === source.info.key;
+    this.overlay?.overlay?.setVisible(styled);
+    if (source.track) source.track.mode = styled ? 'disabled' : 'showing';
+  }
+
+  /** `render`, creating the overlay first when the source turned styled (fullscreen left). */
+  private async refresh(source: Source) {
+    if (this.styled(source) && this.overlay?.key !== source.info.key) {
+      await this.showOverlay(source);
+      if (this.selectedSource() !== source || this.loading !== null) return;
+    }
+    this.render(source);
+  }
+
+  /** Creates the overlay of `source` if it has none; on failure it falls back to text for good. */
+  private async showOverlay(source: Source): Promise<void> {
+    const video = this.video;
+    if (!video || this.overlay?.key === source.info.key) return;
+    this.destroyOverlay();
+    const entry: OverlayEntry = { key: source.info.key, overlay: null };
+    this.overlay = entry;
+    let overlay: AssOverlay;
+    const fonts = (source.fonts?.() ?? Promise.resolve([])).catch((err: unknown) => {
+      console.warn('subtitles: attached fonts unavailable:', err);
+      return [];
+    });
+    let late = false;
+    try {
+      // Attachments usually sit at the end of the file: a slow swarm must not hold the subtitles.
+      const ready = await Promise.race([fonts, delay(FONT_WAIT_MS).then(() => null)]);
+      if (this.overlay !== entry) return;
+      late = ready === null;
+      overlay = await AssOverlay.create(video, { script: source.assScript!, fonts: ready ?? [] });
+    } catch (err) {
+      console.warn('subtitles: styled ASS unavailable, showing plain text:', err);
+      source.styledFailed = true;
+      if (this.overlay === entry) this.overlay = null;
+      return;
+    }
+    if (this.overlay !== entry) {
+      overlay.destroy();
+      return;
+    }
+    entry.overlay = overlay;
+    overlay.setDelay(this.delay);
+    overlay.addChunks(source.live ?? []);
+    if (late) void fonts.then((f) => this.overlay === entry && overlay.addFonts(f));
+  }
+
+  private destroyOverlay() {
+    this.overlay?.overlay?.destroy();
+    this.overlay = null;
   }
 
   private async applyDefault() {
@@ -248,7 +398,7 @@ export class SubtitleManager {
     const track = source.track;
     if (!track || source.trackDelay === this.delay) return;
     clearTrack(track, track.mode);
-    for (const cue of shiftCues(cues, this.delay)) track.addCue(toVttCue(cue));
+    addCues(track, shiftCues(cues, this.delay));
     source.trackDelay = this.delay;
   }
 
@@ -269,14 +419,23 @@ export class SubtitleManager {
   private syncFromNative() {
     const showing = [...this.sources.values()].find((s) => s.track?.mode === 'showing');
     for (const t of this.pool) if (t.mode === 'showing') t.mode = 'disabled';
+    const current = this.selectedSource();
+    const overlaid =
+      current !== undefined && this.overlay?.key === current.info.key && this.styled(current);
     if (showing) {
-      if (showing.info.key !== this.selected) void this.select(showing.info.key);
+      if (showing !== current) void this.select(showing.info.key);
+      // Picked in the native menu while the overlay draws it: don't show it twice.
+      else if (overlaid && this.loading === null) this.render(current);
       return;
     }
-    const current = this.selected === null ? undefined : this.sources.get(this.selected);
-    // Still loading (no track yet) is not "turned off".
-    if (current?.track && this.loading === null) void this.select(null);
+    // Still loading (no track yet) is not "turned off", nor is a track the overlay draws.
+    if (current?.track && this.loading === null && !overlaid) void this.select(null);
   }
+}
+
+/** ASS drawings have no plain text: they are left out of the text track. */
+function addCues(track: TextTrack, cues: readonly SubtitleCue[]) {
+  for (const cue of cues) if (cue.text) track.addCue(toVttCue(cue));
 }
 
 /** Removes every cue, then sets `mode`. A disabled track's `cues` is null, so unhide it first. */

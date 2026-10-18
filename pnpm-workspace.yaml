@@ -3,6 +3,7 @@
 allowBuilds:
   bufferutil: false
   ip-set: false
+  lfa-ponyfill: false
   node-datachannel: false
   utf-8-validate: false
   utp-native: false

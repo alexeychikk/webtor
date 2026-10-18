@@ -6,8 +6,14 @@
 import type { ByteSource, SubtitleTrackInfo } from '../../player/types';
 import type { SubtitleCue } from '../cue';
 import { normalizeLanguage } from '../language';
-import { readMkvHeader, type MkvHeader, type MkvSubtitleTrack } from './header';
-import { ByteReader } from './reader';
+import {
+  readAttachments,
+  readMkvHeader,
+  type MkvAttachment,
+  type MkvHeader,
+  type MkvSubtitleTrack,
+} from './header';
+import { ByteReader, readRange } from './reader';
 import { ClusterScanner } from './scanner';
 
 /** How far ahead of the playhead cues are read (seconds). */
@@ -40,13 +46,55 @@ export function embeddedTrackInfo(track: MkvSubtitleTrack): SubtitleTrackInfo {
   return {
     key: embeddedKey(track.number),
     kind: 'embedded',
-    renderer: 'text', // ASS/SSA as plain text until the JASSUB renderer lands.
+    renderer: track.format === 'ass' || track.format === 'ssa' ? 'ass' : 'text',
     language: normalizeLanguage(track.language),
     label: track.name || FORMAT_LABELS[track.codecId] || track.codecId || 'Subtitles',
     isDefault: track.isDefault,
     forced: track.forced,
     ...(track.format ? {} : { unsupported: true }),
   };
+}
+
+/**
+ * The ASS/SSA script header (`[Script Info]`, styles, `[Events]` format) of a styled track, from
+ * its `CodecPrivate`; `null` for other tracks or when it is missing.
+ */
+export function assHeaderOf(track: MkvSubtitleTrack): string | null {
+  if ((track.format !== 'ass' && track.format !== 'ssa') || !track.codecPrivate?.length) {
+    return null;
+  }
+  const text = new TextDecoder('utf-8').decode(track.codecPrivate).replace(/\0+$/, '');
+  return /\[Script Info\]|\[V4\+? Styles\]/i.test(text) ? text : null;
+}
+
+/** All attached fonts together may take this much; a file with more gets the first ones. */
+export const MAX_FONT_BYTES = 64 * 1024 * 1024;
+
+const FONT_EXTENSION = /\.(ttf|otf|ttc|otc|woff2?)$/i;
+
+/** Is an attachment a font (by MIME type, or by extension for `application/octet-stream`)? */
+export function isFontAttachment(att: Pick<MkvAttachment, 'name' | 'mimeType'>): boolean {
+  const mime = att.mimeType.toLowerCase();
+  return (
+    mime.startsWith('font/') ||
+    /^application\/(x-)?(truetype-font|font-[a-z]+|vnd\.ms-opentype|x-font-[a-z]+)$/.test(mime) ||
+    FONT_EXTENSION.test(att.name)
+  );
+}
+
+/** Reads the file's attached fonts (for the ASS renderer), up to `MAX_FONT_BYTES` in total. */
+export async function readFontAttachments(
+  source: ByteSource,
+  header: MkvHeader,
+): Promise<Uint8Array[]> {
+  const fonts: Uint8Array[] = [];
+  let total = 0;
+  for (const att of await readAttachments(new ByteReader(source), header)) {
+    if (!isFontAttachment(att) || total + att.size > MAX_FONT_BYTES) continue;
+    total += att.size;
+    fonts.push(await readRange(source, att.dataStart, att.dataStart + att.size));
+  }
+  return fonts;
 }
 
 /** Reads a Matroska/WebM file's header; `null` for other containers or no Tracks. */
