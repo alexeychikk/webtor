@@ -8,3 +8,7 @@ test-results
 /relay/webtor-relay
 /relay/tcp-seeder
 /relay/dist
+# The relay embeds the built app; only its placeholder index.html is committed.
+!/relay/internal/webapp/dist/
+/relay/internal/webapp/dist/*
+!/relay/internal/webapp/dist/index.html
