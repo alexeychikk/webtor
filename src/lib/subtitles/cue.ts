@@ -43,3 +43,23 @@ export function cleanCueText(text: string): string {
 export function finishCues(cues: SubtitleCue[]): SubtitleCue[] {
   return cues.filter((c) => c.text !== '' && c.end > c.start).sort((a, b) => a.start - b.start);
 }
+
+/** Subtitle delay steps (the ± buttons). */
+export const SUBTITLE_DELAY_STEP_S = 0.5;
+
+/**
+ * Cues moved by `delay` seconds (positive = later, for subtitles that show too early). Cues that
+ * would end before 0 are dropped; one that would start before 0 starts at 0.
+ */
+export function shiftCues(cues: readonly SubtitleCue[], delay: number): SubtitleCue[] {
+  if (delay === 0) return [...cues];
+  return cues
+    .filter((c) => c.end + delay > 0)
+    .map((c) => ({ ...c, start: Math.max(0, c.start + delay), end: c.end + delay }));
+}
+
+/** `+0.5 s`, `−1.0 s`, `0.0 s` for the delay readout. */
+export function formatSubtitleDelay(delay: number): string {
+  const sign = delay > 0 ? '+' : delay < 0 ? '−' : '';
+  return `${sign}${Math.abs(delay).toFixed(1)} s`;
+}

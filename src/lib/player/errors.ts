@@ -19,6 +19,7 @@ export type PlaybackErrorCode =
   | 'subtitle-failed'
   | 'relay-unreachable'
   | 'relay-no-metadata'
+  | 'relay-busy'
   | 'relay-error';
 
 export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
@@ -54,6 +55,8 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'relay-no-metadata':
     'Your relay found no peers that could send this torrent’s info in time. The torrent may be dead, ' +
     'or the relay’s network blocks BitTorrent traffic.',
+  'relay-busy':
+    'Your relay is already streaming its maximum number of torrents. Stop one or raise -max-torrents.',
   'relay-error': 'Your relay could not load this torrent.',
 };
 

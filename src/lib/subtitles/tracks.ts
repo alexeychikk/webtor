@@ -44,3 +44,19 @@ export function defaultSubtitleKey(
     (preference !== 'off' ? embedded.find((t) => t.isDefault) : undefined);
   return pick?.key ?? null;
 }
+
+/**
+ * The `c` shortcut: the next selectable track in selector order after `selected`, then Off
+ * (`null`), then the first again. An unknown `selected` counts as Off.
+ */
+export function nextSubtitleKey(
+  tracks: readonly SubtitleTrackInfo[],
+  selected: string | null,
+): string | null {
+  const keys = groupSubtitleTracks(tracks)
+    .flatMap((g) => g.tracks)
+    .filter((t) => !t.unsupported)
+    .map((t) => t.key);
+  const i = selected === null ? -1 : keys.indexOf(selected);
+  return keys[i + 1] ?? null;
+}

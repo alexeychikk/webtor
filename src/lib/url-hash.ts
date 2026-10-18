@@ -58,3 +58,12 @@ export function takeRelayFromHash(hash: string): { relayUrl: string | null; hash
   const rest = parts.filter(Boolean).join('&');
   return { relayUrl, hash: rest ? `#${rest}` : '' };
 }
+
+/** The link "Copy share link" copies: this page, with the playing torrent and file in the hash. */
+export function shareUrl(
+  location: Pick<Location, 'origin' | 'pathname' | 'search'>,
+  torrentId: string,
+  fileIndex: number | null,
+): string {
+  return `${location.origin}${location.pathname}${location.search}${magnetHash(torrentId, fileIndex)}`;
+}

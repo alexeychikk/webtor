@@ -136,13 +136,18 @@ export type RelayFailure =
   /** 200, but not what a webtor-relay sends (e.g. the URL points at some other web server). */
   | { kind: 'bad-response' };
 
-export type RelayErrorCode = 'relay-unreachable' | 'relay-no-metadata' | 'relay-error';
+export type RelayErrorCode =
+  'relay-unreachable' | 'relay-no-metadata' | 'relay-busy' | 'relay-error';
 
-/** Error code for a failed metainfo fetch. 504 is the relay saying the swarm gave no metadata. */
+/**
+ * Error code for a failed metainfo fetch. 504 is the relay saying the swarm gave no metadata; 429
+ * is its `-max-torrents` limit.
+ */
 export function relayErrorCode(f: RelayFailure): RelayErrorCode {
   if (f.kind === 'network') return 'relay-unreachable';
   if (f.kind === 'timeout') return 'relay-no-metadata';
   if (f.kind === 'http' && f.status === 504) return 'relay-no-metadata';
+  if (f.kind === 'http' && f.status === 429) return 'relay-busy';
   return 'relay-error';
 }
 

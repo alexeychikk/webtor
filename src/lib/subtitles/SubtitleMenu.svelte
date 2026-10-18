@@ -1,5 +1,6 @@
 <script lang="ts">
   import { PLAYBACK_ERROR_MESSAGES } from '../player/errors';
+  import { formatSubtitleDelay, SUBTITLE_DELAY_STEP_S } from './cue';
   import type { SubtitleManager } from './manager.svelte';
   import { SUBTITLE_EXTENSIONS } from './parse';
   import { groupSubtitleTracks, subtitleTrackText } from './tracks';
@@ -36,6 +37,35 @@
       {/each}
     </select>
   </label>
+  <span class="delay" role="group" aria-label="Subtitle delay">
+    Delay
+    <button
+      type="button"
+      data-testid="subtitle-delay-minus"
+      title="Show subtitles {SUBTITLE_DELAY_STEP_S} s earlier"
+      aria-label="Subtitles {SUBTITLE_DELAY_STEP_S} s earlier"
+      disabled={subtitles.selected === null}
+      onclick={() => void subtitles.nudgeDelay(-1)}>−</button
+    >
+    <output data-testid="subtitle-delay" data-delay={subtitles.delay}
+      >{formatSubtitleDelay(subtitles.delay)}</output
+    >
+    <button
+      type="button"
+      data-testid="subtitle-delay-plus"
+      title="Show subtitles {SUBTITLE_DELAY_STEP_S} s later"
+      aria-label="Subtitles {SUBTITLE_DELAY_STEP_S} s later"
+      disabled={subtitles.selected === null}
+      onclick={() => void subtitles.nudgeDelay(1)}>+</button
+    >
+    {#if subtitles.delay !== 0}
+      <button
+        type="button"
+        data-testid="subtitle-delay-reset"
+        onclick={() => void subtitles.setDelay(0)}>Reset</button
+      >
+    {/if}
+  </span>
   {#if subtitles.loading}<span class="hint" data-testid="subtitles-loading">Loading subtitles…</span
     >{/if}
   <label class="upload">
@@ -65,7 +95,23 @@
   }
   select {
     margin-left: 0.25rem;
-    max-width: 24rem;
+    max-width: min(24rem, 100%);
+  }
+  .subtitles > label:first-child {
+    max-width: 100%;
+  }
+  .delay {
+    display: inline-flex;
+    gap: 0.35rem;
+    align-items: center;
+  }
+  .delay output {
+    min-width: 3.5em;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .delay button {
+    min-width: 2em;
   }
   .upload {
     cursor: pointer;

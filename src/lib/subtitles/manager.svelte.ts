@@ -7,10 +7,15 @@
  */
 import { PlaybackError } from '../player/errors';
 import type { SubtitleFileEntry, SubtitleTrackInfo } from '../player/types';
-import type { SubtitleCue } from './cue';
+import { shiftCues, SUBTITLE_DELAY_STEP_S, type SubtitleCue } from './cue';
 import { guessLanguageFromFilename, isForcedFilename } from './language';
 import { parseSubtitleFile, subtitleFormatOf } from './parse';
-import { defaultSubtitleKey, subtitleTrackText, type SubtitlePreference } from './tracks';
+import {
+  defaultSubtitleKey,
+  nextSubtitleKey,
+  subtitleTrackText,
+  type SubtitlePreference,
+} from './tracks';
 
 const PREFERENCE_KEY = 'webtor:subtitle-language';
 /** Text subtitles are tiny; anything bigger is not a subtitle file. */
@@ -21,6 +26,8 @@ interface Source {
   load: () => Promise<SubtitleCue[]>;
   cues?: Promise<SubtitleCue[]>;
   track?: TextTrack;
+  /** The delay the track's cues are shifted by. */
+  trackDelay?: number;
 }
 
 export class SubtitleManager {
@@ -31,6 +38,8 @@ export class SubtitleManager {
   /** Key whose cues are being fetched/parsed. */
   loading = $state<string | null>(null);
   notice = $state<PlaybackError | null>(null);
+  /** Seconds every cue is shifted by (positive = later); back to 0 for every new file. */
+  delay = $state(0);
 
   private sources = new Map<string, Source>();
   private video: HTMLVideoElement | null = null;
@@ -64,6 +73,26 @@ export class SubtitleManager {
     this.selected = null;
     this.loading = null;
     this.notice = null;
+    this.delay = 0;
+  }
+
+  /** Shifts the subtitles by `delay` seconds; the showing track is redrawn at once. */
+  async setDelay(delay: number): Promise<void> {
+    this.delay = Math.round(delay * 1000) / 1000;
+    const source = this.selected === null ? undefined : this.sources.get(this.selected);
+    if (!source?.track || !source.cues) return;
+    const cues = await source.cues;
+    if (this.sources.get(source.info.key) === source) this.fillTrack(source, cues);
+  }
+
+  /** The ± buttons: `steps` × 0.5 s. */
+  nudgeDelay(steps: number): Promise<void> {
+    return this.setDelay(this.delay + steps * SUBTITLE_DELAY_STEP_S);
+  }
+
+  /** The `c` shortcut: next track in selector order, then Off. */
+  cycle(): Promise<void> {
+    return this.select(nextSubtitleKey(this.tracks, this.selected));
   }
 
   /** Lists the torrent's subtitle files and applies the default selection. */
@@ -153,8 +182,10 @@ export class SubtitleManager {
     }
     if (generation !== this.generation || this.selected !== key) return;
     this.loading = null;
-    source.track ??= this.createTrack(source.info, cues);
-    if (source.track) source.track.mode = 'showing';
+    source.track ??= this.createTrack(source.info);
+    if (!source.track) return;
+    this.fillTrack(source, cues);
+    source.track.mode = 'showing';
   }
 
   private add(info: SubtitleTrackInfo, load: () => Promise<SubtitleCue[]>) {
@@ -167,10 +198,16 @@ export class SubtitleManager {
     if (key !== null && this.selected === null) await this.select(key, { remember: false });
   }
 
-  private createTrack(
-    info: SubtitleTrackInfo,
-    cues: readonly SubtitleCue[],
-  ): TextTrack | undefined {
+  /** (Re)fills the source's track with its cues shifted by the current delay, if not done yet. */
+  private fillTrack(source: Source, cues: readonly SubtitleCue[]) {
+    const track = source.track;
+    if (!track || source.trackDelay === this.delay) return;
+    clearTrack(track, track.mode);
+    for (const cue of shiftCues(cues, this.delay)) track.addCue(toVttCue(cue));
+    source.trackDelay = this.delay;
+  }
+
+  private createTrack(info: SubtitleTrackInfo): TextTrack | undefined {
     const video = this.video;
     if (!video) return undefined;
     const label = subtitleTrackText(info);
@@ -180,7 +217,6 @@ export class SubtitleManager {
         ? this.pool.splice(reuse, 1)[0]!
         : video.addTextTrack('subtitles', label, info.language);
     track.mode = 'disabled';
-    for (const cue of cues) track.addCue(toVttCue(cue));
     return track;
   }
 
@@ -198,9 +234,11 @@ export class SubtitleManager {
   }
 }
 
-function clearTrack(track: TextTrack) {
-  track.mode = 'disabled';
+/** Removes every cue, then sets `mode`. A disabled track hides its `cues` (null), so unhide it first. */
+function clearTrack(track: TextTrack, mode: TextTrackMode = 'disabled') {
+  if (track.mode === 'disabled') track.mode = 'hidden';
   for (const cue of [...(track.cues ?? [])]) track.removeCue(cue);
+  track.mode = mode;
 }
 
 function toVttCue(cue: SubtitleCue): VTTCue {

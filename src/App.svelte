@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { PlayerController, type TorrentInput } from './lib/player/controller.svelte';
   import Player from './lib/player/Player.svelte';
+  import { helpDialog } from './lib/help/help-dialog.svelte';
+  import WhyDialog from './lib/help/WhyDialog.svelte';
   import RelayDialog from './lib/torrent/RelayDialog.svelte';
   import { isTorrentFile } from './lib/torrent/files';
   import { checkRelayUrl } from './lib/torrent/relay';
@@ -143,6 +145,14 @@
     <h1>webtor</h1>
     <button
       type="button"
+      class="link"
+      data-testid="why-button"
+      onclick={() => (helpDialog.open = true)}
+    >
+      Why won’t my torrent play?
+    </button>
+    <button
+      type="button"
       class="relay"
       data-testid="relay-button"
       data-active={relaySettings.base !== null}
@@ -178,6 +188,7 @@
   {/if}
   <Player {controller} bind:video />
   <RelayDialog onchange={relayChanged} />
+  <WhyDialog />
 </main>
 
 <style>
@@ -188,9 +199,21 @@
   }
   header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
+    gap: 0.5rem 1rem;
+  }
+  h1 {
+    margin-right: auto;
+  }
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
   }
   .relay[data-active='true']::before {
     content: '● ';
@@ -204,6 +227,7 @@
   }
   #torrent-id {
     flex: 1 1 30rem;
+    min-width: 0;
     padding: 0.5rem;
   }
   .open-file {
@@ -212,6 +236,31 @@
   }
   .open-file input {
     margin-left: 0.5rem;
+  }
+  @media (max-width: 40rem) {
+    main {
+      margin: 1rem auto;
+      padding: 0 0.75rem;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.6rem;
+    }
+    form label[for='torrent-id'] {
+      flex-basis: 100%;
+    }
+    #torrent-id {
+      flex-basis: 100%;
+    }
+    form button[type='submit'] {
+      flex: 1;
+      padding: 0.5rem;
+    }
+    .open-file input {
+      display: block;
+      margin: 0.25rem 0 0;
+      max-width: 100%;
+    }
   }
   .drop-hint {
     padding: 0.5rem 0.75rem;
