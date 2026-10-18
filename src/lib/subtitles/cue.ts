@@ -2,22 +2,37 @@
 export interface SubtitleCue {
   start: number;
   end: number;
-  /** WebVTT cue text: plain text plus `<i>`, `<b>`, `<u>` tags; lines separated by `\n`. */
+  /** WebVTT cue text: escaped text (`&lt;` `&gt;` `&amp;`) plus `<i>`, `<b>`, `<u>` tags; lines split by `\n`. */
   text: string;
   /** WebVTT cue settings (`align`, `line`, `position`, `size`, `vertical`), when the source had them. */
   settings?: Record<string, string>;
 }
 
-const HTML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', nbsp: '\u00A0' };
+// A tag: `<i>`, `</b>`, `<v Bob>`, `<c.loud>`, `<font color="…">`; or a WebVTT timestamp `<00:01.000>`.
+const TAG = /<(\/?)([a-z]+)\b[^<>]*>|<(?:\d+:)?\d{2}:\d{2}\.\d{3}>/gi;
+// `&` that does not start a character reference (`&amp;`, `&nbsp;`, `&#60;`, `&#x3C;`).
+const BARE_AMP = /&(?![a-z][a-z\d]*;|#\d+;|#x[\da-f]+;)/gi;
 
-/** Keeps only the tags VTTCue renders (`<i> <b> <u>`), drops `<font>` & co and ASS `{\…}` overrides. */
+const escapeText = (text: string) =>
+  text.replace(BARE_AMP, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * Source text → WebVTT cue text, which `VTTCue` parses again when it renders: keeps `<i> <b> <u>`
+ * (normalised), drops other tags and ASS `{\…}` overrides, and escapes every other `<`, `>` and bare
+ * `&` so `I <3 you` or `a &lt; b` render as written. Existing character references are left alone.
+ */
 export function cleanCueText(text: string): string {
-  return text
-    .replace(/\{\\[^}]*\}/g, '')
-    .replace(/<\/?([a-z]+)\b[^>]*>/gi, (tag, name: string) =>
-      /^[ibu]$/i.test(name) ? tag.toLowerCase().replace(/\s.*>$/, '>') : '',
-    )
-    .replace(/&(amp|lt|gt|nbsp);/g, (m, e: string) => HTML_ENTITIES[e] ?? m)
+  const source = text.replace(/\{\\[^}]*\}/g, '');
+  let out = '';
+  let last = 0;
+  for (const m of source.matchAll(TAG)) {
+    out += escapeText(source.slice(last, m.index));
+    const name = m[2]?.toLowerCase();
+    if (name && /^[ibu]$/.test(name)) out += `<${m[1]}${name}>`;
+    last = m.index + m[0].length;
+  }
+  out += escapeText(source.slice(last));
+  return out
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l !== '')

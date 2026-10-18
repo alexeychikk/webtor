@@ -23,7 +23,8 @@ function parseSettings(raw: string): Record<string, string> | undefined {
 export function parseVtt(input: string): SubtitleCue[] {
   const text = input.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   if (!/^WEBVTT(?:[ \t].*)?(?:\n|$)/.test(text)) throw new Error('not a WebVTT file');
-  const blocks = text.split(/\n{2,}/).slice(1);
+  // Blocks end at a blank line; a line of only spaces/tabs counts as blank (hand-edited files).
+  const blocks = text.split(/\n(?:[ \t]*\n)+/).slice(1);
   const cues: SubtitleCue[] = [];
   for (const block of blocks) {
     const lines = block.split('\n');

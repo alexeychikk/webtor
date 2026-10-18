@@ -25,10 +25,21 @@ describe('parseSrt', () => {
     expect(parseSrt(text).map((c) => c.text)).toEqual(['A', 'B']);
   });
 
-  it('keeps <i>/<b>/<u>, drops <font> and ASS overrides, decodes entities', () => {
+  it('keeps <i>/<b>/<u>, drops <font> and ASS overrides, keeps entities', () => {
     const text =
       '1\n00:00:01,000 --> 00:00:02,000\n{\\an8}<font color="#ff0">Hi</font> <I>there</I> &amp; you\n';
-    expect(parseSrt(text)[0]?.text).toBe('Hi <i>there</i> & you');
+    expect(parseSrt(text)[0]?.text).toBe('Hi <i>there</i> &amp; you');
+  });
+
+  it('escapes stray <, > and & so VTTCue renders them as text', () => {
+    const text = [
+      '1\n00:00:01,000 --> 00:00:02,000\nI <3 you & me > them',
+      '2\n00:00:03,000 --> 00:00:04,000\n&lt;whispers&gt; <i>quiet</i> &#60;',
+    ].join('\n\n');
+    expect(parseSrt(text).map((c) => c.text)).toEqual([
+      'I &lt;3 you &amp; me &gt; them',
+      '&lt;whispers&gt; <i>quiet</i> &#60;',
+    ]);
   });
 
   it('drops empty and zero-length cues and sorts by start', () => {

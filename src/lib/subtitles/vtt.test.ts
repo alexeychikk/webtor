@@ -30,6 +30,19 @@ describe('parseVtt', () => {
     expect(parseVtt(text)[0]?.settings).toEqual({ align: 'start', line: '10%' });
   });
 
+  it('keeps entities and escapes a stray <, dropping timestamp tags', () => {
+    const text = 'WEBVTT\n\n00:01.000 --> 00:02.000\na &lt; b <00:01.500>and c < d';
+    expect(parseVtt(text)[0]?.text).toBe('a &lt; b and c &lt; d');
+  });
+
+  it('treats a whitespace-only line as a block separator', () => {
+    const text = 'WEBVTT\n\n00:01.000 --> 00:02.000\nOne\n \t\n00:03.000 --> 00:04.000\nTwo\n';
+    expect(parseVtt(text)).toEqual([
+      { start: 1, end: 2, text: 'One' },
+      { start: 3, end: 4, text: 'Two' },
+    ]);
+  });
+
   it('strips voice and class tags but keeps <i>', () => {
     const text = 'WEBVTT\n\n00:01.000 --> 00:02.000\n<v Bob>Hi <c.loud>there</c> <i>you</i>';
     expect(parseVtt(text)[0]?.text).toBe('Hi there <i>you</i>');
