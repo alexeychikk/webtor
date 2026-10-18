@@ -30,6 +30,7 @@ pnpm dev            # http://localhost:5173
 pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
+                    #   and the relay stack (:9100, relay :7882; needs Go, first build is slow)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
@@ -65,7 +66,9 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy, buffer math, no-peers/stalled)
 src/lib/subtitles/             MKV subtitle extractor, SRT/VTT parsing, JASSUB glue
-src/lib/torrent/relay.ts       URL contract with webtor-relay (validation, endpoints)
+src/lib/torrent/relay.ts       webtor-relay contract: URL check, endpoints, error mapping, stats merge
+  relay-client.ts              fetch glue (metainfo, /v1/info, /stats); relay-settings.svelte.ts
+  RelayDialog.svelte           settings dialog (setup steps, Test, privacy copy)
 relay/                         Go module: cmd/webtor-relay, cmd/tcp-seeder (test seeder), internal/relay
 e2e/                           Playwright specs; e2e/support/fixture-server.mjs; e2e/fixtures/
 docs/decisions/                ADRs
@@ -100,5 +103,14 @@ docs/decisions/                ADRs
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
   playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
+- **Relay (opt-in, ADR 0006).** The setting is `localStorage['webtor:relay-url']` (normalised base);
+  `#relay=<url>` (the relay's printed Open link) saves it and is stripped with `replaceState`. With a
+  relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,
+urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer count. No relay set =
+  the original path, untouched. Never log or show the relay URL: the token is a password.
+- Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns a magnet that only a TCP seeder on
+  loopback has (no `xs=`/`ws=`) and the URL of a webtor-relay that reaches it
+  (`e2e/support/relay-stack.mjs`, builds both Go commands). Relay test hooks: `relay-button`,
+  `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`.
 - Web seeds need CORS that allows the `Range` and `Cache-Control` request headers (WebTorrent sends
   both).
