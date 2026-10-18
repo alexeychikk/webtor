@@ -97,3 +97,28 @@ test('tracks the browser cannot play or convert are disabled, and the video play
   await expect(page.locator('[data-testid="notice"][data-code="no-playable-audio"]')).toBeVisible();
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
+
+test('a converter that fails to load falls back to another track instead of failing', async ({
+  page,
+}) => {
+  // The remembered language picks the AC-3 track, but its wasm decoder can't be downloaded (e.g.
+  // the chunk hashes changed after a redeploy while the tab stayed open).
+  await page.addInitScript(() => localStorage.setItem('webtor:audio-lang', 'rus'));
+  await page.route(/mediabunny-ac3-.*\.js/, (route) => route.abort());
+  const magnet = await fixtureMagnet('sample.mkv');
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
+  await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
+
+  const options = page.getByTestId('audio-track').locator('option');
+  await expect(options).toHaveText([
+    /English AAC · eng · AAC mono/,
+    /Russian AC3.*unavailable: the AC-3 converter failed to load/,
+  ]);
+  await expect(options.nth(1)).toBeDisabled();
+  await expect(page.getByTestId('audio-track')).toHaveValue(await optionValue(page, /English/));
+  await expect(video(page)).toHaveAttribute('data-audio-codec', 'aac');
+  await expect(
+    page.locator('[data-testid="notice"][data-code="audio-convert-failed"]'),
+  ).toBeVisible();
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});

@@ -166,3 +166,38 @@ export function pickAudioTrack(
     null
   );
 }
+
+/**
+ * `pickAudioTrack`, then load what the pick needs (`load`, e.g. its wasm extensions). A track whose
+ * load fails becomes `unsupported` (with a reason) and the next one is picked, so a failed
+ * download (e.g. stale chunk hashes after a redeploy) falls back to another track or to muted
+ * instead of failing the whole video. `failed` lists the tracks that were given up on.
+ */
+export async function pickLoadableAudioTrack(
+  tracks: readonly AudioTrackInfo[],
+  preferredLanguage: string | null | undefined,
+  load: (track: AudioTrackInfo) => Promise<void>,
+): Promise<{ tracks: AudioTrackInfo[]; track: AudioTrackInfo | null; failed: number[] }> {
+  let list = [...tracks];
+  const failed: number[] = [];
+  for (;;) {
+    const track = pickAudioTrack(list, preferredLanguage);
+    if (!track) return { tracks: list, track: null, failed };
+    try {
+      await load(track);
+      return { tracks: list, track, failed };
+    } catch {
+      failed.push(track.id);
+      list = list.map((t) =>
+        t.id === track.id
+          ? {
+              ...t,
+              playback: 'unsupported',
+              outputCodec: null,
+              reason: `the ${codecLabel(t.codec)} converter failed to load`,
+            }
+          : t,
+      );
+    }
+  }
+}

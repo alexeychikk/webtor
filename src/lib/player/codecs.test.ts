@@ -5,6 +5,7 @@ import {
   decideAudio,
   decideVideo,
   pickAudioTrack,
+  pickLoadableAudioTrack,
   pickTranscodeTarget,
   type TranscodeTarget,
 } from './codecs';
@@ -202,5 +203,40 @@ describe('pickAudioTrack', () => {
   it('returns null when nothing is playable (play muted)', () => {
     expect(pickAudioTrack([track(1, 'unsupported', { isDefault: true })])).toBeNull();
     expect(pickAudioTrack([])).toBeNull();
+  });
+});
+
+describe('pickLoadableAudioTrack', () => {
+  const tracks = [
+    track(1, 'copy', { isDefault: true, language: 'eng' }),
+    { ...track(2, 'transcode', { language: 'rus' }), codec: 'ac3' },
+    { ...track(3, 'transcode', { language: 'rus' }), codec: 'eac3' },
+  ];
+  it('keeps the pick when its load succeeds', async () => {
+    const r = await pickLoadableAudioTrack(tracks, 'rus', async () => {});
+    expect(r.track?.id).toBe(2);
+    expect(r.failed).toEqual([]);
+    expect(r.tracks).toEqual(tracks);
+  });
+  it('marks tracks whose load fails unsupported and falls back to the next pick', async () => {
+    const tried: number[] = [];
+    const r = await pickLoadableAudioTrack(tracks, 'rus', async (t) => {
+      tried.push(t.id);
+      if (t.codec !== null) throw new Error('chunk 404');
+    });
+    expect(tried).toEqual([2, 3, 1]);
+    expect(r.track?.id).toBe(1);
+    expect(r.failed).toEqual([2, 3]);
+    expect(r.tracks.map((t) => t.playback)).toEqual(['copy', 'unsupported', 'unsupported']);
+    expect(r.tracks[1]).toMatchObject({
+      outputCodec: null,
+      reason: 'the AC-3 converter failed to load',
+    });
+  });
+  it('plays muted when every load fails', async () => {
+    const r = await pickLoadableAudioTrack(tracks, null, () => Promise.reject(new Error('x')));
+    expect(r.track).toBeNull();
+    expect(r.failed).toEqual([1, 2, 3]);
+    expect(r.tracks.every((t) => t.playback === 'unsupported')).toBe(true);
   });
 });

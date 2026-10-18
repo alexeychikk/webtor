@@ -10,7 +10,7 @@ import { loadCodecExtensions } from './codec-extensions';
 import {
   decideAudio,
   decideVideo,
-  pickAudioTrack,
+  pickLoadableAudioTrack,
   pickTranscodeTarget,
   TRANSCODE_AUDIO,
   type AudioDecision,
@@ -161,7 +161,7 @@ export class MsePlayer {
         isTypeSupported,
       );
       const audioDecisions = new Map<number, AudioDecision>();
-      const audioTracks = await Promise.all(
+      const initialTracks = await Promise.all(
         (await input.getAudioTracks()).map(async (t, i): Promise<AudioTrackInfo> => {
           const codec = await t.getCodec();
           const codecString = await t.getCodecParameterString();
@@ -187,16 +187,25 @@ export class MsePlayer {
           };
         }),
       );
-      const audio = pickAudioTrack(audioTracks, preferredAudioLanguage());
+      // Before the MediaSource opens: a SourceBuffer can't be added once media has been appended.
+      // A track whose wasm extension fails to load is marked unsupported and another one is picked.
+      const picked = await pickLoadableAudioTrack(initialTracks, preferredAudioLanguage(), (t) =>
+        loadCodecExtensions(audioDecisions.get(t.id)!),
+      );
+      const audioTracks = picked.tracks;
+      const audio = picked.track;
+      for (const t of audioTracks) {
+        if (picked.failed.includes(t.id)) {
+          audioDecisions.set(t.id, { playback: 'unsupported', reason: t.reason ?? '' });
+        }
+      }
       const audioDecision = audio ? audioDecisions.get(audio.id) : undefined;
       const notices: PlaybackErrorCode[] = [];
-      if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
-      // Before the MediaSource opens: a SourceBuffer can't be added once media has been appended.
-      if (audioDecision) {
-        await loadCodecExtensions(audioDecision).catch((err: unknown) => {
-          throw new PlaybackError('audio-convert-failed', String(err));
-        });
+      if (picked.failed.length > 0) {
+        console.warn('audio converter failed to load for tracks', picked.failed);
+        notices.push('audio-convert-failed');
       }
+      if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
 
       // The element timeline starts at 0 even when the file's first frame does not.
       const tl = timeline(await videoTrack.getFirstTimestamp());
