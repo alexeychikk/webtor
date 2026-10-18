@@ -79,6 +79,17 @@ export class AssOverlay {
     if (added && this.video.paused) this.jassub.resize(true).catch(warn);
   }
 
+  /** Fonts that arrived after the start (slow attachments); redraws with them. */
+  addFonts(fonts: readonly Uint8Array[]) {
+    if (this.destroyed || !fonts.length) return;
+    this.jassub.renderer
+      .addFonts([...fonts])
+      .then(async () => {
+        if (!this.destroyed) await this.jassub.resize(true);
+      })
+      .catch(warn);
+  }
+
   setVisible(visible: boolean) {
     if (this.destroyed || this.canvas.hidden === !visible) return;
     this.canvas.hidden = !visible;

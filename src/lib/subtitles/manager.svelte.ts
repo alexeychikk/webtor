@@ -27,6 +27,10 @@ import { defaultSubtitleKey, subtitleTrackText, type SubtitlePreference } from '
 const PREFERENCE_KEY = 'webtor:subtitle-language';
 /** Text subtitles are tiny; anything bigger is not a subtitle file. */
 export const MAX_SUBTITLE_BYTES = 20 * 1024 * 1024;
+/** The styled renderer starts without the attached fonts if they take longer (they follow later). */
+const FONT_WAIT_MS = 15_000;
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface Source {
   info: SubtitleTrackInfo;
@@ -310,13 +314,17 @@ export class SubtitleManager {
     const entry: OverlayEntry = { key: source.info.key, overlay: null };
     this.overlay = entry;
     let overlay: AssOverlay;
+    const fonts = (source.fonts?.() ?? Promise.resolve([])).catch((err: unknown) => {
+      console.warn('subtitles: attached fonts unavailable:', err);
+      return [];
+    });
+    let late = false;
     try {
-      const fonts = await (source.fonts?.() ?? Promise.resolve([])).catch((err: unknown) => {
-        console.warn('subtitles: attached fonts unavailable:', err);
-        return [];
-      });
+      // Attachments usually sit at the end of the file: a slow swarm must not hold the subtitles.
+      const ready = await Promise.race([fonts, delay(FONT_WAIT_MS).then(() => null)]);
       if (this.overlay !== entry) return;
-      overlay = await AssOverlay.create(video, { script: source.assScript!, fonts });
+      late = ready === null;
+      overlay = await AssOverlay.create(video, { script: source.assScript!, fonts: ready ?? [] });
     } catch (err) {
       console.warn('subtitles: styled ASS unavailable, showing plain text:', err);
       source.styledFailed = true;
@@ -329,6 +337,7 @@ export class SubtitleManager {
     }
     entry.overlay = overlay;
     overlay.addChunks(source.live ?? []);
+    if (late) void fonts.then((f) => this.overlay === entry && overlay.addFonts(f));
   }
 
   private destroyOverlay() {

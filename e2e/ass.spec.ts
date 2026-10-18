@@ -105,3 +105,53 @@ test('our fullscreen button fullscreens the player container, and the overlay st
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
   await expect(canvas(page)).toBeVisible();
 });
+
+const UPLOADED_ASS = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 640
+PlayResY: 360
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Top,Some Missing Font,36,&H0000FFFF,&H000000FF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,2,0,8,10,10,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:05.00,Top,,0,0,0,,{\\pos(320,40)}Uploaded ASS
+`;
+
+test('an uploaded .ass file is drawn styled too', async ({ page }) => {
+  await playSample(page);
+  await page.getByTestId('subtitle-upload').setInputFiles({
+    name: 'mine.ass',
+    mimeType: 'text/x-ssa',
+    buffer: Buffer.from(UPLOADED_ASS),
+  });
+  await expect(page.getByTestId('subtitles')).toHaveValue('upload:1');
+  await expect(canvas(page)).toBeVisible({ timeout: 20_000 });
+  await seekTo(page, 2);
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
+  expect(await shownCues(page)).toEqual([]);
+});
+
+test('without container fullscreen (iOS), ASS is shown as plain text and the button uses the video', async ({
+  page,
+}) => {
+  // Like iPhone Safari: no element fullscreen, only the video's own (`webkitEnterFullscreen`).
+  await page.addInitScript(() => {
+    Object.defineProperty(Document.prototype, 'fullscreenEnabled', { get: () => false });
+    Object.defineProperty(Document.prototype, 'webkitFullscreenEnabled', { get: () => false });
+    if (!('webkitEnterFullscreen' in HTMLVideoElement.prototype)) {
+      Object.defineProperty(HTMLVideoElement.prototype, 'webkitEnterFullscreen', {
+        value() {},
+      });
+    }
+  });
+  await playSample(page);
+  await expect(video(page)).not.toHaveAttribute('controlslist', /nofullscreen/);
+  await expect(page.getByTestId('fullscreen')).toBeVisible();
+  await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
+  await seekTo(page, 3);
+  await expect.poll(() => shownCues(page)).toEqual(['Привет из ASS']);
+  await expect(canvas(page)).toHaveCount(0);
+});

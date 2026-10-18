@@ -5,7 +5,13 @@ import type { ByteSource } from '../../player/types';
 import type { SubtitleCue } from '../cue';
 import { assBlockText } from './blocks';
 import { ID, readVint } from './ebml';
-import { embeddedTrackInfo } from './embedded';
+import {
+  MAX_FONT_BYTES,
+  assHeaderOf,
+  embeddedTrackInfo,
+  isFontAttachment,
+  readFontAttachments,
+} from './embedded';
 import { readAttachments, readCuePoints, readMkvHeader, type MkvSubtitleTrack } from './header';
 import { ByteReader, readRange } from './reader';
 import { ClusterScanner } from './scanner';
@@ -124,7 +130,7 @@ describe('MKV header on sample.mkv', () => {
 });
 
 describe('cluster scan on sample.mkv', () => {
-  it('extracts every cue of both tracks (ASS as plain text)', async () => {
+  it('extracts every cue of both tracks (ASS as plain text plus its raw block)', async () => {
     const { cues, covered } = await scanAll(fixture);
     expect(covered).toBe(Infinity);
     expect(cues.get(4)).toEqual([
@@ -132,8 +138,13 @@ describe('cluster scan on sample.mkv', () => {
       { start: 5, end: 8, text: 'Second english cue' },
     ]);
     expect(cues.get(5)).toEqual([
-      { start: 2, end: 4, text: 'Привет из ASS' },
-      { start: 6, end: 9, text: 'Второй субтитр' },
+      {
+        start: 2,
+        end: 4,
+        text: 'Привет из ASS',
+        assChunk: '0,0,Default,,0,0,0,,{\\i1}Привет из ASS{\\i0}',
+      },
+      { start: 6, end: 9, text: 'Второй субтитр', assChunk: '1,0,Default,,0,0,0,,Второй субтитр' },
     ]);
   });
 
@@ -142,7 +153,7 @@ describe('cluster scan on sample.mkv', () => {
     // Cluster 6–8 s only: the next one starts just before 8 s (audio leads the keyframe).
     expect(covered).toBeCloseTo(8, 0);
     expect(cues.get(4)).toBeUndefined(); // "Second english cue" starts at 5 s, in the 4–6 s cluster.
-    expect(cues.get(5)).toEqual([{ start: 6, end: 9, text: 'Второй субтитр' }]);
+    expect(cues.get(5)).toMatchObject([{ start: 6, end: 9, text: 'Второй субтитр' }]);
   });
 
   it('does not read clusters again or emit duplicates when a range is scanned twice', async () => {
@@ -313,6 +324,15 @@ describe('MKV reader on a synthetic file', () => {
     expect(header.attachmentsPosition).not.toBeNull();
   });
 
+  it('reads the attached fonts for the ASS renderer', async () => {
+    const { source } = memorySource(bytes);
+    const header = (await readMkvHeader(new ByteReader(source)))!;
+    const fonts = await readFontAttachments(source, header);
+    expect(fonts).toHaveLength(1);
+    expect(fonts[0]).toHaveLength(3000);
+    expect(fonts[0]!.every((b) => b === 7)).toBe(true);
+  });
+
   it('lists attachments without reading their data', async () => {
     const { source, reads } = memorySource(bytes);
     const header = (await readMkvHeader(new ByteReader(source)))!;
@@ -333,7 +353,14 @@ describe('MKV reader on a synthetic file', () => {
       { start: 1.5, end: 3, text: 'Hallo <i>Welt</i>' },
       { start: 4, end: 8, text: 'Ohne Dauer' }, // No duration: DEFAULT_CUE_SECONDS.
     ]);
-    expect(cues.get(3)).toEqual([{ start: 1.2, end: 2, text: 'Bonjour, le\nmonde' }]);
+    expect(cues.get(3)).toEqual([
+      {
+        start: 1.2,
+        end: 2,
+        text: 'Bonjour, le\nmonde',
+        assChunk: '0,0,Default,,0,0,0,,Bonjour{\\i1}, le\\Nmonde',
+      },
+    ]);
     expect(cues.get(4)).toBeUndefined();
   });
 
@@ -384,6 +411,45 @@ describe('embedded selector entries', () => {
       label: 'PGS',
       unsupported: true,
     });
+  });
+
+  it('marks ASS/SSA tracks for the styled renderer', () => {
+    expect(embeddedTrackInfo(track({ codecId: 'S_TEXT/ASS', format: 'ass' })).renderer).toBe('ass');
+    expect(embeddedTrackInfo(track({ codecId: 'S_TEXT/SSA', format: 'ssa' })).renderer).toBe('ass');
+    expect(embeddedTrackInfo(track({ codecId: 'S_TEXT/WEBVTT', format: 'webvtt' })).renderer).toBe(
+      'text',
+    );
+  });
+
+  it('takes the ASS header from CodecPrivate, null when there is none', async () => {
+    const { source } = memorySource(fixture);
+    const header = (await readMkvHeader(new ByteReader(source)))!;
+    const [srt, ass] = header.subtitleTracks;
+    expect(assHeaderOf(srt!)).toBeNull();
+    const text = assHeaderOf(ass!)!;
+    expect(text).toMatch(/^\[Script Info\]/);
+    expect(text).toContain('Style: Default,Arial,28');
+    expect(text).toContain('[Events]');
+    const enc = new TextEncoder();
+    expect(assHeaderOf(track({ format: 'ass', codecPrivate: null }))).toBeNull();
+    expect(assHeaderOf(track({ format: 'ass', codecPrivate: enc.encode('garbage') }))).toBeNull();
+    expect(
+      assHeaderOf(track({ format: 'srt', codecPrivate: enc.encode('[Script Info]\n') })),
+    ).toBeNull();
+  });
+
+  it('recognises font attachments by MIME type or extension', () => {
+    const att = (name: string, mimeType: string) => ({ name, mimeType });
+    expect(isFontAttachment(att('a.bin', 'font/ttf'))).toBe(true);
+    expect(isFontAttachment(att('a.bin', 'application/x-truetype-font'))).toBe(true);
+    expect(isFontAttachment(att('a.bin', 'application/vnd.ms-opentype'))).toBe(true);
+    expect(isFontAttachment(att('a.bin', 'application/font-sfnt'))).toBe(true);
+    expect(isFontAttachment(att('a.bin', 'application/x-font-ttf'))).toBe(true);
+    expect(isFontAttachment(att('Arial Bold.TTF', 'application/octet-stream'))).toBe(true);
+    expect(isFontAttachment(att('a.otf', ''))).toBe(true);
+    expect(isFontAttachment(att('cover.jpg', 'image/jpeg'))).toBe(false);
+    expect(isFontAttachment(att('notes.txt', 'text/plain'))).toBe(false);
+    expect(MAX_FONT_BYTES).toBeGreaterThan(10 * 1024 * 1024);
   });
 
   it('takes the Text field of an ASS block', () => {
