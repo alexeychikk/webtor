@@ -1,0 +1,56 @@
+name: Deploy relay to Oracle Cloud
+
+# Run by hand only (Actions → "Deploy relay to Oracle Cloud" → Run workflow), by the repository owner.
+# It is the one workflow a human runs on purpose; agents never trigger, re-run or watch it, and it
+# never gets a push/pull_request/schedule trigger (docs/decisions/0005-manual-ci-and-release.md).
+# It maps the repository secrets to scripts/deploy-relay-oci.sh's environment; see relay/README.md
+# ("Oracle Cloud in one click") for the secrets to add.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: deploy (create or update the relay VM) or destroy (delete everything it created)
+        type: choice
+        options:
+          - deploy
+          - destroy
+        default: deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-relay-oci
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Mask the relay token
+        env:
+          RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
+        run: |
+          if [ -n "$RELAY_TOKEN" ]; then echo "::add-mask::$RELAY_TOKEN"; fi
+      - name: Install the OCI CLI
+        run: pipx install oci-cli==3.95.0
+      - name: Run scripts/deploy-relay-oci.sh
+        env:
+          ACTION: ${{ inputs.action }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_COMPARTMENT_OCID: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+          RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
+          RELAY_HOST: ${{ vars.RELAY_HOST }}
+        run: |
+          case "$ACTION" in
+            deploy) scripts/deploy-relay-oci.sh --deploy ;;
+            destroy) scripts/deploy-relay-oci.sh --destroy ;;
+            *) echo "unknown action: $ACTION" >&2; exit 2 ;;
+          esac

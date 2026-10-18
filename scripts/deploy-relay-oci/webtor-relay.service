@@ -1,0 +1,31 @@
+# Installed by scripts/deploy-relay-oci.sh (cloud-init). Caddy (HTTPS) proxies the public host to it.
+[Unit]
+Description=webtor-relay (BitTorrent relay for the webtor web app)
+Documentation=https://github.com/alexeychikk/webtor/blob/main/relay/README.md
+Wants=network-online.target webtor-relay-setup.service
+After=network-online.target webtor-relay-setup.service
+StartLimitIntervalSec=0
+
+[Service]
+User=webtor-relay
+Group=webtor-relay
+# WEBTOR_RELAY_TOKEN (from RELAY_TOKEN, mode 0600) and WEBTOR_RELAY_PUBLIC_URL (written by the setup).
+EnvironmentFile=/etc/webtor-relay/token.env
+EnvironmentFile=-/etc/webtor-relay/public.env
+ExecStart=/usr/local/bin/webtor-relay -listen 127.0.0.1:7881 -data-dir /var/lib/webtor-relay
+Restart=always
+RestartSec=10
+StateDirectory=webtor-relay
+StateDirectoryMode=0700
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -38,6 +38,7 @@ pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
 scripts/release-relay.sh <version> [all|binaries|image|build]   # relay release, see below
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
+scripts/deploy-relay-oci.sh [--destroy] [--dry-run | --print-cloud-init]   # relay on Oracle Cloud, see below
 cd relay && go test ./...  # relay checks: gofmt -l . && go vet ./... && go test ./...  (relay/CLAUDE.md)
 ```
 
@@ -55,6 +56,27 @@ By the owner's decision CI is **manual-only** (`.github/workflows/ci.yml` has ju
   `dist/.nojekyll`; and force-pushes `dist/` as one parentless commit (`deploy: <sha>`) to
   `origin gh-pages`, which GitHub Pages serves at https://alexeychikk.github.io/webtor/. It builds the
   commit with a temporary index, so `main`, the index and the working tree are never touched.
+
+**The one exception: `.github/workflows/deploy-relay-oci.yml`** (`workflow_dispatch` only, input
+`action` = deploy|destroy). The owner runs it by hand to deploy webtor-relay to their Oracle Cloud
+Always Free account with credentials held in repository secrets, which agents can't read. Agents
+never trigger, re-run or watch it, and never add another trigger.
+
+## Relay on Oracle Cloud (`scripts/deploy-relay-oci.sh`)
+
+OCI CLI only (HTTPS, no SSH: the sandbox reaches TCP 80/443 only). Inputs are env vars named like
+the repo secrets (script header, `relay/README.md` "Oracle Cloud in one click"). Everything it creates
+is named `webtor-relay` and tagged `managed-by=webtor-relay`; lookups use both, so re-runs reuse and
+`--destroy` deletes only those. The VM is configured by cloud-init rendered from
+`scripts/deploy-relay-oci/` (`setup.sh` → `/usr/local/sbin/webtor-relay-setup`, run on every boot by
+`webtor-relay-setup.service`: iptables, `<ip>.sslip.io` host, Caddyfile, latest release checked
+against `SHA256SUMS`; `webtor-relay.service`). A re-run reboots the VM, which updates the relay.
+User-data can't change after launch: the `config` tag (hash of user-data + SSH key) tells a re-run
+when only destroy + deploy applies new settings. Never print `RELAY_TOKEN`: output masks it as
+`<RELAY_TOKEN>`, and URLs holding it go to curl via `-K -`, not argv. Checks without credentials:
+`shellcheck scripts/deploy-relay-oci.sh scripts/deploy-relay-oci/setup.sh`, `--dry-run` (stand-in
+responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity"), `--print-cloud-init` piped to
+`cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)
 
