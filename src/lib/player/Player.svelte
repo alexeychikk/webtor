@@ -2,6 +2,7 @@
   import { PLAYBACK_ERROR_MESSAGES } from './errors';
   import { formatPercent, formatSpeed } from './format';
   import type { PlayerController, Phase } from './controller.svelte';
+  import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
 
   let {
     controller,
@@ -19,10 +20,36 @@
   };
 
   const busy = $derived(['connecting', 'metadata', 'buffering'].includes(controller.phase));
+  let dragging = $state(false);
+
+  const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
+
+  function dragOver(event: DragEvent) {
+    if (!carriesFiles(event) || controller.phase === 'error') return;
+    event.preventDefault();
+    dragging = true;
+  }
+
+  function drop(event: DragEvent) {
+    dragging = false;
+    const file = event.dataTransfer?.files[0];
+    if (!file || controller.phase === 'error') return;
+    event.preventDefault();
+    void controller.subtitles.addFile(file);
+  }
 </script>
 
-<section class="player" data-phase={controller.phase} hidden={controller.phase === 'idle'}>
-  <!-- svelte-ignore a11y_media_has_caption (subtitles are a separate feature) -->
+<section
+  class="player"
+  class:dragging
+  data-phase={controller.phase}
+  hidden={controller.phase === 'idle'}
+  ondragover={dragOver}
+  ondragleave={() => (dragging = false)}
+  ondrop={drop}
+  aria-label="Player (drop a subtitle file here)"
+>
+  <!-- svelte-ignore a11y_media_has_caption (cues are added as text tracks at runtime) -->
   <video bind:this={video} data-testid="video" controls playsinline></video>
 
   <p class="status" data-testid="status" data-phase={controller.phase} aria-live="polite">
@@ -49,6 +76,10 @@
   {#each controller.notices as code (code)}
     <p class="notice" data-testid="notice" data-code={code}>{PLAYBACK_ERROR_MESSAGES[code]}</p>
   {/each}
+
+  {#if controller.phase !== 'error'}
+    <SubtitleMenu subtitles={controller.subtitles} />
+  {/if}
 </section>
 
 <style>
@@ -59,6 +90,10 @@
     width: 100%;
     max-height: 70vh;
     background: #000;
+  }
+  .dragging video {
+    outline: 3px dashed currentColor;
+    outline-offset: -3px;
   }
   .status {
     display: flex;

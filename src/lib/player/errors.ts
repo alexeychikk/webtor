@@ -14,7 +14,8 @@ export type PlaybackErrorCode =
   | 'no-mse'
   | 'no-playable-audio'
   | 'torrent-failed'
-  | 'playback-failed';
+  | 'playback-failed'
+  | 'subtitle-failed';
 
 export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'invalid-input': 'That is not a magnet link, info hash or .torrent file.',
@@ -38,6 +39,8 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
     'None of the audio tracks in this video can be played in this browser, so it plays muted.',
   'torrent-failed': 'The torrent could not be loaded.',
   'playback-failed': 'The browser failed to play this video.',
+  'subtitle-failed':
+    'This subtitle file could not be read. Supported: SRT, WebVTT and ASS/SSA (shown as plain text).',
 };
 
 export class PlaybackError extends Error {
