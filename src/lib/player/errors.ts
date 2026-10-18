@@ -11,7 +11,10 @@ export type PlaybackErrorCode =
   | 'unsupported-container'
   | 'unsupported-video-codec'
   | 'unsupported-audio-codec'
-  | 'no-mse';
+  | 'no-mse'
+  | 'no-playable-audio'
+  | 'torrent-failed'
+  | 'playback-failed';
 
 export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'invalid-input': 'That is not a magnet link, info hash or .torrent file.',
@@ -31,6 +34,10 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'unsupported-audio-codec':
     'This audio track cannot be played or converted in the browser. Pick another audio track.',
   'no-mse': 'This browser cannot stream video (Media Source Extensions missing; iOS needs 17.1+).',
+  'no-playable-audio':
+    'None of the audio tracks in this video can be played in this browser, so it plays muted.',
+  'torrent-failed': 'The torrent could not be loaded.',
+  'playback-failed': 'The browser failed to play this video.',
 };
 
 export class PlaybackError extends Error {

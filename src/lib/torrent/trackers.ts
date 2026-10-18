@@ -28,3 +28,38 @@ export function announceList(torrentTrackers: readonly string[]): string[] {
   const ws = torrentTrackers.filter((t) => /^wss?:\/\//i.test(t));
   return [...new Set([...ws, ...DEFAULT_WS_TRACKERS])];
 }
+
+export interface PreparedTorrentId {
+  /** Magnet to hand to `client.add`: the input with non-WebSocket `tr=` entries dropped. */
+  torrentId: string;
+  /** `announce` option for `client.add`: the magnet's WebSocket trackers plus the defaults. */
+  announce: string[];
+}
+
+/**
+ * Turns user input (magnet or bare info hash; check `isTorrentId` first) into what `client.add` needs.
+ * UDP/HTTP trackers are unreachable from a page, so they are removed instead of failing on every
+ * announce. Everything else (`xs=`, `ws=`, `dn=`, …) is kept byte-for-byte.
+ */
+export function prepareTorrentId(input: string): PreparedTorrentId {
+  const s = input.trim();
+  if (!s.toLowerCase().startsWith('magnet:?')) {
+    return { torrentId: `magnet:?xt=urn:btih:${s.toLowerCase()}`, announce: announceList([]) };
+  }
+  const trackers: string[] = [];
+  const kept = s
+    .slice('magnet:?'.length)
+    .split('&')
+    .filter((part) => {
+      if (!part.toLowerCase().startsWith('tr=')) return part !== '';
+      let url: string;
+      try {
+        url = decodeURIComponent(part.slice(3).replace(/\+/g, ' '));
+      } catch {
+        return false;
+      }
+      trackers.push(url);
+      return /^wss?:\/\//i.test(url);
+    });
+  return { torrentId: `magnet:?${kept.join('&')}`, announce: announceList(trackers) };
+}
