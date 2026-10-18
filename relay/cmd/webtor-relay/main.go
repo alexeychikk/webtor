@@ -37,6 +37,14 @@ var defaultTrackers = []string{
 	"http://tracker.opentrackr.org:1337/announce",
 }
 
+// Defaults that container builds override with -ldflags "-X main.defaultListen=… -X main.defaultDataDir=…"
+// (relay/.ko.yaml, relay/Dockerfile): a container must listen on all interfaces, and distroless
+// images have no $HOME, so the user cache dir is unknown there.
+var (
+	defaultListen  = "127.0.0.1:7881"
+	defaultDataDir = ""
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "webtor-relay:", err)
@@ -45,11 +53,14 @@ func main() {
 }
 
 func run() error {
-	cacheDir, _ := os.UserCacheDir()
-	listen := flag.String("listen", envOr("WEBTOR_RELAY_LISTEN", "127.0.0.1:7881"), "HTTP address the web app connects to")
+	if defaultDataDir == "" {
+		cacheDir, _ := os.UserCacheDir()
+		defaultDataDir = filepath.Join(cacheDir, "webtor-relay")
+	}
+	listen := flag.String("listen", envOr("WEBTOR_RELAY_LISTEN", defaultListen), "HTTP address the web app connects to")
 	publicURL := flag.String("public-url", os.Getenv("WEBTOR_RELAY_PUBLIC_URL"), "URL the app reaches this relay at, if not http://<listen> (e.g. behind HTTPS)")
 	token := flag.String("token", os.Getenv("WEBTOR_RELAY_TOKEN"), "secret path segment; generated and saved in -data-dir when empty")
-	dataDir := flag.String("data-dir", envOr("WEBTOR_RELAY_DATA_DIR", filepath.Join(cacheDir, "webtor-relay")), "token file and the data of open torrents (deleted on drop and at startup)")
+	dataDir := flag.String("data-dir", envOr("WEBTOR_RELAY_DATA_DIR", defaultDataDir), "token file and the data of open torrents (deleted on drop and at startup)")
 	peerPort := flag.Int("peer-port", envInt("WEBTOR_RELAY_PEER_PORT", 42069), "TCP/uTP port for BitTorrent peers (0 = random)")
 	maxTorrents := flag.Int("max-torrents", envInt("WEBTOR_RELAY_MAX_TORRENTS", relay.DefaultMaxTorrents), "torrents open at once; one more gets HTTP 429")
 	metadataTimeout := flag.Duration("metadata-timeout", envDuration("WEBTOR_RELAY_METADATA_TIMEOUT", relay.DefaultMetadataTimeout), "how long a metainfo request waits for the swarm (then 504)")
@@ -59,7 +70,12 @@ func run() error {
 	noDefaultTrackers := flag.Bool("no-default-trackers", envBool("WEBTOR_RELAY_NO_DEFAULT_TRACKERS"), "announce only to the magnet's own trackers")
 	noDHT := flag.Bool("no-dht", envBool("WEBTOR_RELAY_NO_DHT"), "disable the DHT")
 	debug := flag.Bool("debug", envBool("WEBTOR_RELAY_DEBUG"), "log every API request (never the token)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("webtor-relay", relay.Version)
+		return nil
+	}
 
 	lvl := slog.LevelInfo
 	if *debug {
@@ -92,7 +108,8 @@ func run() error {
 	cfg.DisableWebtorrent = true
 	cfg.DataDir = piecesDir
 	cfg.DefaultStorage = relay.NewStorage(piecesDir)
-	cfg.Slogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	// QuietReadErrors: the library logs every aborted web seed read (a browser seek) as an error.
+	cfg.Slogger = slog.New(relay.QuietReadErrors(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	cl, err := torrent.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("starting BitTorrent client: %w", err)

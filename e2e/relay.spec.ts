@@ -53,7 +53,7 @@ test('no peers → "Connect a relay" → test, save, and the torrent starts', as
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('link', { name: 'latest relay release' })).toHaveAttribute(
     'href',
-    'https://github.com/alexeychikk/webtor/releases',
+    'https://github.com/alexeychikk/webtor/releases/latest',
   );
   await expect(dialog).toContainText('Keep the relay URL secret');
 

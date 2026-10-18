@@ -3,6 +3,8 @@
 //
 // dist/ holds a committed placeholder index.html that links to the hosted site. A release build
 // replaces dist/ with the built app (`pnpm build`, then copy the root dist/ here) before `go build`.
+// The "all:" prefix keeps files whose names start with "_" or ".": Vite emits chunks such as
+// assets/__vite-browser-external-<hash>.js that the audio codec extensions import.
 package webapp
 
 import (
@@ -10,7 +12,7 @@ import (
 	"io/fs"
 )
 
-//go:embed dist
+//go:embed all:dist
 var dist embed.FS
 
 // FS is the app, rooted at its index.html.
