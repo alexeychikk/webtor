@@ -79,6 +79,11 @@ interface Pipeline {
 export interface MsePlayerOptions {
   /** Fatal error after `open` resolved (pipeline or media element failure). */
   onError(err: PlaybackError): void;
+  /**
+   * True once a newer playback took over the element (e.g. the user picked another file while this
+   * one was opening): `open` then rejects instead of attaching its MediaSource over the newer one.
+   */
+  isStale?(): boolean;
 }
 
 export class MsePlayer {
@@ -217,6 +222,7 @@ export class MsePlayer {
 
       const mediaSource = new MS();
       if (managed) video.disableRemotePlayback = true;
+      if (opts.isStale?.()) throw new PlaybackError('playback-failed', 'superseded');
       const objectUrl = URL.createObjectURL(mediaSource);
       const opened = new Promise((resolve) =>
         mediaSource.addEventListener('sourceopen', resolve, { once: true }),
@@ -327,8 +333,11 @@ export class MsePlayer {
       void p.conversion?.cancel().catch(() => {});
     }
     if (!this.input.disposed) this.input.dispose();
-    this.video.removeAttribute('src');
-    this.video.load();
+    // Leave the element alone if a newer player already attached its own MediaSource.
+    if (this.video.src === this.objectUrl) {
+      this.video.removeAttribute('src');
+      this.video.load();
+    }
     URL.revokeObjectURL(this.objectUrl);
   }
 

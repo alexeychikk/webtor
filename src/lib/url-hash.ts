@@ -1,6 +1,6 @@
 /**
- * App state in the URL hash (docs/decisions/0001): `#magnet=<encoded magnet or info hash>`, and the
- * one-shot `#relay=<encoded relay URL>` printed by webtor-relay (see `takeRelayFromHash`).
+ * App state in the URL hash (docs/decisions/0001): `#magnet=<encoded magnet or info hash>&file=<n>`
+ * (`n` = index into the torrent's file list, the file being played), and the one-shot `#relay=<encoded relay URL>` printed by webtor-relay (see `takeRelayFromHash`).
  * Pasted links often carry the magnet unencoded (`#magnet=magnet:?xt=…&dn=…&tr=…`); those are
  * accepted too, taking everything after `magnet=` as the magnet.
  */
@@ -11,7 +11,10 @@ export function readMagnetFromHash(hash: string): string | null {
     return value?.trim() || null;
   }
   const value = raw.slice('magnet='.length);
-  if (/^magnet:\?/i.test(value)) return value.trim() || null;
+  if (/^magnet:\?/i.test(value)) {
+    // Our own params can follow an unencoded magnet; no magnet carries `file=`.
+    return value.replace(/&file=[^&]*/g, '').trim() || null;
+  }
   const ampersand = value.indexOf('&');
   const encoded = ampersand < 0 ? value : value.slice(0, ampersand);
   try {
@@ -21,8 +24,19 @@ export function readMagnetFromHash(hash: string): string | null {
   }
 }
 
-export function magnetHash(torrentId: string): string {
-  return `#magnet=${encodeURIComponent(torrentId.trim())}`;
+/** `#file=<n>`: the torrent file index to play, `null` when absent or not a whole number. */
+export function readFileFromHash(hash: string): number | null {
+  const parts = hash
+    .replace(/^#/, '')
+    .split('&')
+    .filter((p) => p.startsWith('file='));
+  const value = parts.at(-1)?.slice('file='.length) ?? '';
+  return /^\d{1,6}$/.test(value) ? Number(value) : null;
+}
+
+export function magnetHash(torrentId: string, fileIndex: number | null = null): string {
+  const file = fileIndex === null ? '' : `&file=${fileIndex}`;
+  return `#magnet=${encodeURIComponent(torrentId.trim())}${file}`;
 }
 
 /**
