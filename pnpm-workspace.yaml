@@ -1,0 +1,8 @@
+# Native addons pulled in by webtorrent's Node code paths. The app imports the prebuilt browser
+# bundle, so none of them is needed; denying them keeps installs script-free.
+allowBuilds:
+  bufferutil: false
+  ip-set: false
+  node-datachannel: false
+  utf-8-validate: false
+  utp-native: false
