@@ -267,6 +267,11 @@ export class MsePlayer {
     }
   }
 
+  /** Source time of element time 0 (the file's first video timestamp). */
+  get startTime(): number {
+    return this.timeline.startTime;
+  }
+
   get audioTrackId(): number | null {
     return this.audioPipeline?.trackId ?? null;
   }

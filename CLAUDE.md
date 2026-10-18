@@ -89,6 +89,8 @@ src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004
   manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick
   srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ASS/SSA as plain text until JASSUB)
   encoding.ts language.ts tracks.ts   BOM/UTF-8/1251/1252 decode, filename language, default rule
+  mkv/                         embedded MKV/WebM subtitles: EBML reader (header, Cues, Attachments),
+                               cluster scanner, embedded.ts (selector entries + scan ~30 s ahead of the playhead)
 src/lib/torrent/relay.ts       webtor-relay contract: URL check, endpoints, error mapping, stats merge
   relay-client.ts              fetch glue (metainfo, /v1/info, /stats); relay-settings.svelte.ts
   RelayDialog.svelte           settings dialog (setup steps, Test, privacy copy)
@@ -131,7 +133,10 @@ docs/decisions/                ADRs
   input). The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
   when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Check shown cues through
   `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
-- New subtitle sources (embedded MKV, JASSUB) plug into `SubtitleManager`: list a
+- Embedded MKV tracks are `embedded:<TrackNumber>` (sample.mkv: `embedded:4` "English · SRT",
+  `embedded:5` "Russian · ASS"). Their cues stream in: `SubtitleManager.addEmbedded` lists them,
+  `appendCues` adds what the scanner finds, and the scanner runs only while one is selected.
+- New subtitle sources (JASSUB) plug into `SubtitleManager`: list a
   `SubtitleTrackInfo` (key `<kind>:<id>`) with a loader for its cues; the selector groups by `kind`.
   The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·

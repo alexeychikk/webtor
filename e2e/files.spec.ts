@@ -115,3 +115,54 @@ test('a file that is not a torrent shows a clear error', async ({ page }) => {
   });
   await expect(page.getByTestId('error')).toHaveAttribute('data-code', 'invalid-input');
 });
+
+test('switching files drops the embedded subtitles of the previous file', async ({ page }) => {
+  const shownCues = () =>
+    video(page).evaluate((v: HTMLVideoElement) =>
+      [...v.textTracks]
+        .filter((t) => t.mode === 'showing')
+        .flatMap((t) => [...(t.activeCues ?? [])].map((c) => (c as VTTCue).text)),
+    );
+  const allCues = () =>
+    video(page).evaluate((v: HTMLVideoElement) =>
+      [...v.textTracks].reduce((n, t) => n + (t.cues?.length ?? 0), 0),
+    );
+  const seekTo = (t: number) =>
+    video(page).evaluate(
+      (v: HTMLVideoElement, t) =>
+        new Promise<void>((resolve) => {
+          v.pause();
+          v.addEventListener('seeked', () => resolve(), { once: true });
+          v.currentTime = t;
+        }),
+      t,
+    );
+  const embedded = page.getByTestId('subtitles').locator('optgroup[label="Embedded"] option');
+
+  const magnet = await fixtureMagnet('multi-file');
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
+  await expect(page.getByTestId('status')).toContainText('episode-2.mkv');
+  await expect(embedded).toHaveCount(2);
+  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await seekTo(2);
+  await expect.poll(shownCues).toEqual(['Hello from English SRT']);
+
+  // episode-1.ts has no subtitles: nothing listed, no cues left over from the MKV's scan.
+  await fileButton(page, 'episode-1.ts').click();
+  await expect.poll(() => duration(page), { timeout: 30_000 }).toBeLessThan(10.5);
+  await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
+  await expect(embedded).toHaveCount(0);
+  await expect(page.getByTestId('subtitles')).toHaveValue('');
+  await seekTo(2);
+  expect(await allCues()).toBe(0);
+  expect(await shownCues()).toEqual([]);
+
+  // Back on the MKV: its tracks again, each cue once.
+  await fileButton(page, 'episode-2.mkv').click();
+  await expect.poll(() => duration(page), { timeout: 30_000 }).toBeGreaterThan(11.5);
+  await expect(embedded).toHaveCount(2);
+  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await seekTo(2);
+  await expect.poll(shownCues).toEqual(['Hello from English SRT']);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});
