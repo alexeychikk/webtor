@@ -30,7 +30,9 @@ pnpm dev            # http://localhost:5173
 pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
-                    #   and the relay stack (:9100, relay :7882; needs Go, first build is slow)
+                    #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
+                    #   Projects: chromium runs every spec; firefox + webkit run smoke.spec.ts only
+                    #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
@@ -75,7 +77,7 @@ relay-v<version> --cleanup-tag` first.
 
 ```
 src/App.svelte                 shell: input → player
-src/lib/torrent/               WebTorrent client, trackers, file classification
+src/lib/torrent/               WebTorrent client, trackers, file classification; memory-store.ts (when OPFS can't write)
   files.ts FileList.svelte     video file list (playable / greyed-out unsupported), pick, picker UI
   webtorrent.d.ts              typings for the WebTorrent API subset we use; extend as needed
 src/lib/player/                MSE session, Mediabunny conversions, codec decisions
@@ -85,6 +87,10 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  shortcuts.ts                 keyboard shortcuts (key → action, SHORTCUTS for the help); Player.svelte runs them
+  StatsPanel.svelte ShareButton.svelte   peers/speed/progress panel; "Copy share link" (`shareUrl`)
+src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay);
+                               open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
 src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
   manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick
   srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ASS/SSA as plain text until JASSUB)
@@ -129,11 +135,20 @@ docs/decisions/                ADRs
   `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
   `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off) and `subtitle-upload` (file
   input). The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
-  when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Check shown cues through
+  when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish hooks: `why-button`
+  (header), `why-link` (in no-peers/stalled notices), `why-dialog`, `why-relay`; `stats` with
+  `stats-peers`, `stats-download`, `stats-upload`, `stats-progress`; `share-link` (`data-state`
+  `idle|copied|failed`; `share-url` shows the link when the clipboard is denied); `shortcuts-help`;
+  `subtitle-delay` (`data-delay` in s), `subtitle-delay-minus|plus|reset`. Check shown cues through
   `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
 - New subtitle sources (embedded MKV, JASSUB) plug into `SubtitleManager`: list a
   `SubtitleTrackInfo` (key `<kind>:<id>`) with a loader for its cues; the selector groups by `kind`.
   The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
+  **Subtitle delay** (`SubtitleManager.delay`, ±0.5 s, reset per file) re-fills the showing track
+  with `shiftCues` (pure, `cue.ts`); any renderer must draw cues shifted by it. Note: a disabled
+  `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
+- Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
+  Ctrl/Meta/Alt; they act only while a file is open (not idle/error).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the

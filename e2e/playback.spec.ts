@@ -10,7 +10,7 @@ test('plays a magnet from the fixture web seed and keeps playing after a seek', 
   const magnet = await fixtureMagnet('sample.mkv');
   await page.goto('./');
   await page.getByLabel('Magnet link or info hash').fill(magnet);
-  await page.getByRole('button', { name: 'Play' }).click();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
 
   await expect(page).toHaveURL(/#magnet=magnet%3A%3Fxt%3Durn%3Abtih%3A/);
   await expect(page.getByTestId('status')).toContainText('sample.mkv');
@@ -88,7 +88,7 @@ test('a torrent nobody seeds shows the no-peers message', async ({ page }) => {
   const randomHash = Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16));
   await page.goto('./');
   await page.getByLabel('Magnet link or info hash').fill(randomHash.join(''));
-  await page.getByRole('button', { name: 'Play' }).click();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'connecting');
   await expect(page.locator('[data-testid="notice"][data-code="no-peers"]')).toContainText(
     'No browser-compatible peers found',

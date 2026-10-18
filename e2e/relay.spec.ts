@@ -9,7 +9,7 @@ const currentTime = (page: Page) =>
 
 const play = async (page: Page, magnet: string) => {
   await page.getByLabel('Magnet link or info hash').fill(magnet);
-  await page.getByRole('button', { name: 'Play' }).click();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
 };
 
 test('plays a magnet only regular peers have, through webtor-relay set by #relay=', async ({

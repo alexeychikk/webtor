@@ -4,9 +4,12 @@
  */
 import type WebTorrentType from 'webtorrent/dist/webtorrent.min.js';
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
+import { canWriteOpfs, MemoryChunkStore } from './memory-store';
 import { announceList, prepareTorrentId } from './trackers';
 
 let clientPromise: Promise<WebTorrentType> | null = null;
+/** Pieces go to OPFS (WebTorrent's default) unless this tab can't write there. */
+let memoryOnly: Promise<boolean> | null = null;
 
 function getClient(): Promise<WebTorrentType> {
   clientPromise ??= import('webtorrent/dist/webtorrent.min.js').then(({ default: WebTorrent }) => {
@@ -46,9 +49,12 @@ async function addTorrentId(
   announce: string[],
   urlList: string[],
 ): Promise<Torrent> {
-  const client = await getClient();
+  memoryOnly ??= canWriteOpfs().then((ok) => !ok);
+  const [client, inMemory] = await Promise.all([getClient(), memoryOnly]);
   await Promise.all(client.torrents.map(destroyTorrent));
   return client.add(torrentId, {
+    // Already in memory: no extra piece cache in front of it.
+    ...(inMemory ? { store: MemoryChunkStore, storeCacheSlots: 0 } : {}),
     announce,
     ...(urlList.length ? { urlList } : {}),
     destroyStoreOnDestroy: true,

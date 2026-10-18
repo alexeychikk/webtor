@@ -9,6 +9,9 @@ Browsers can only connect to WebRTC-capable peers, so many public torrents will 
 To reach regular BitTorrent peers, run [webtor-relay](relay/README.md) on your computer or a server
 ([download](https://github.com/alexeychikk/webtor/releases/latest)).
 
+Keyboard: Space play/pause · ←/→ seek 5 s · F fullscreen · M mute · C next subtitle track. Subtitles
+can be shifted in 0.5 s steps; "Copy share link" copies a link that plays the same file.
+
 ```sh
 pnpm install && pnpm dev
 ```
