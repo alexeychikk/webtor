@@ -1,0 +1,19 @@
+# Container image built with ko (no Docker daemon needed): scripts/release-relay.sh <version> image.
+# Same image as relay/Dockerfile: distroless static, non-root (65532), listens on 0.0.0.0:7881 and
+# keeps its data (token, open torrents) in /home/nonroot/webtor-relay; mount a volume at /home/nonroot.
+defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+builds:
+  - id: webtor-relay
+    main: ./cmd/webtor-relay
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/alexeychikk/webtor/relay/internal/relay.Version={{.Env.RELAY_VERSION}}
+      - -X main.defaultListen=0.0.0.0:7881
+      - -X main.defaultDataDir=/home/nonroot/webtor-relay

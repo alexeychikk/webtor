@@ -7,7 +7,8 @@
   /** Called after the user saves or removes a relay, so the app can retry what is playing. */
   let { onchange }: { onchange?: () => void } = $props();
 
-  const RELEASES_URL = 'https://github.com/alexeychikk/webtor/releases';
+  // Relay releases (tag relay-v*) are the repository's only releases and are marked latest.
+  const RELEASES_URL = 'https://github.com/alexeychikk/webtor/releases/latest';
 
   let dialog = $state<HTMLDialogElement>();
   let url = $state('');

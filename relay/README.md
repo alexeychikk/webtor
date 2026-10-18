@@ -6,9 +6,35 @@ on its own. It is a full BitTorrent client ([anacrolix/torrent](https://github.c
 that the app uses as a metadata source and an HTTP web seed. Why and how:
 [`docs/decisions/0006-regular-peers-relay.md`](../docs/decisions/0006-regular-peers-relay.md).
 
-```sh
-go run ./cmd/webtor-relay          # from relay/
-```
+## Run on your computer
+
+Download the file for your system from the
+[latest release](https://github.com/alexeychikk/webtor/releases/latest) (one file, nothing to
+install; `SHA256SUMS` has the checksums):
+
+| System               | File                                                                                                                              |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Windows              | [`webtor-relay-windows-amd64.exe`](https://github.com/alexeychikk/webtor/releases/latest/download/webtor-relay-windows-amd64.exe) |
+| macOS, Apple silicon | [`webtor-relay-darwin-arm64`](https://github.com/alexeychikk/webtor/releases/latest/download/webtor-relay-darwin-arm64)           |
+| macOS, Intel         | [`webtor-relay-darwin-amd64`](https://github.com/alexeychikk/webtor/releases/latest/download/webtor-relay-darwin-amd64)           |
+| Linux x86-64         | [`webtor-relay-linux-amd64`](https://github.com/alexeychikk/webtor/releases/latest/download/webtor-relay-linux-amd64)             |
+| Linux ARM64          | [`webtor-relay-linux-arm64`](https://github.com/alexeychikk/webtor/releases/latest/download/webtor-relay-linux-arm64)             |
+
+- **Windows:** double-click the `.exe`. The binary isn't signed, so SmartScreen says "Windows
+  protected your PC": click **More info → Run anyway**. Allow the firewall prompt so peers can
+  connect to you.
+- **macOS:** in Terminal, make it executable and remove the download quarantine (it isn't signed or
+  notarized, so Gatekeeper would refuse to open it), then run it:
+  ```sh
+  cd ~/Downloads
+  chmod +x webtor-relay-darwin-arm64
+  xattr -d com.apple.quarantine webtor-relay-darwin-arm64
+  ./webtor-relay-darwin-arm64
+  ```
+- **Linux:** `chmod +x webtor-relay-linux-amd64 && ./webtor-relay-linux-amd64`.
+
+Keep the window open while you watch; Ctrl-C stops it. From source: `go run ./cmd/webtor-relay`
+in `relay/`. `-version` prints the version.
 
 It prints three links:
 
@@ -25,6 +51,47 @@ stdout is the only place it is printed; logs (stderr) never contain it.
 see the relay's IP address. When it runs on your computer, that is your own IP, just as with any
 torrent client.
 
+Peers find you faster when port `42069` (TCP and UDP, `-peer-port`) is reachable from the internet
+(router port forwarding or UPnP). The relay works without it, with fewer peers.
+
+## Run on a server
+
+The page is served over HTTPS, so it can only use a remote relay over HTTPS: put a TLS proxy in
+front and tell the relay its public address with `-public-url`. Any VPS with Docker works, for
+example Oracle Cloud's Always Free tier (an ARM64 VM; the image is built for `linux/arm64` and
+`linux/amd64`). Free PaaS tiers don't fit: bandwidth caps, sleeping instances and terms of service
+that forbid BitTorrent (see ADR 0006).
+
+The image `ghcr.io/alexeychikk/webtor-relay` (tags `latest` and the version) is distroless and runs
+as a non-root user. It listens on `0.0.0.0:7881` and keeps its token in
+`/home/nonroot/webtor-relay`, so mount a volume at `/home/nonroot` to keep the relay URL across
+restarts. Open the peer port in the VM's firewall (on Oracle Cloud also in the subnet's security
+list): `42069/tcp` and `42069/udp`, plus `80` and `443` for Caddy.
+
+```sh
+docker network create webtor
+docker run -d --name webtor-relay --restart unless-stopped --network webtor \
+  -p 42069:42069 -p 42069:42069/udp -v webtor-relay:/home/nonroot \
+  ghcr.io/alexeychikk/webtor-relay -public-url https://relay.example.com
+docker logs webtor-relay   # prints the Open link and the Relay URL
+```
+
+Caddy gets and renews the certificate itself. Point a DNS name at the server, then:
+
+```sh
+docker run -d --name caddy --restart unless-stopped --network webtor \
+  -p 80:80 -p 443:443 -v caddy-data:/data \
+  caddy caddy reverse-proxy --from relay.example.com --to webtor-relay:7881
+```
+
+Paste the printed Relay URL (`https://relay.example.com/<token>`) into the app's relay setting, or
+open the printed "Or open" link. Port 7881 isn't published, so the relay is reachable only through
+Caddy. To build the image yourself: `docker build -f relay/Dockerfile -t webtor-relay .` from the
+repository root.
+
+The server's IP address is what swarm peers and trackers see, and its provider's terms apply to
+what you download through it.
+
 ## Behaviour
 
 - At most `-max-torrents` torrents are open at once. Opening one more answers HTTP 429 with
@@ -40,8 +107,10 @@ torrent client.
 - Each web seed request downloads its whole range with top priority, plus `-readahead` bytes after
   it, so WebTorrent's next piece is usually already there. A seek moves both. A read that gets no
   data for 3 s makes the relay re-request the torrent's pieces (works around an anacrolix
-  stall that otherwise lasts until WebTorrent's 60 s timeout). anacrolix then logs one harmless
-  `read failed ... torrent data downloading disabled` error.
+  stall that otherwise lasts until WebTorrent's 60 s timeout).
+- The BitTorrent library logs at warning level and above. Read errors that are part of normal
+  streaming (a seek aborts a web seed read, the stall workaround above) are left out, so an
+  `error` line on stderr is worth a look.
 - SIGINT/SIGTERM shut down gracefully: in-flight requests get 3 s, then torrents are dropped and
   their data deleted. A second Ctrl-C kills the process.
 - Multi-file torrents work, but WebTorrent puts file names into web seed URLs without
@@ -54,21 +123,22 @@ torrent client.
 
 Every flag can also be set by its environment variable (handy in Docker).
 
-| Flag                   | Env                                | Default                         |
-| ---------------------- | ---------------------------------- | ------------------------------- |
-| `-listen`              | `WEBTOR_RELAY_LISTEN`              | `127.0.0.1:7881`                |
-| `-public-url`          | `WEBTOR_RELAY_PUBLIC_URL`          | `http://<listen>`               |
-| `-token`               | `WEBTOR_RELAY_TOKEN`               | generated, saved in data dir    |
-| `-data-dir`            | `WEBTOR_RELAY_DATA_DIR`            | `<user cache dir>/webtor-relay` |
-| `-peer-port`           | `WEBTOR_RELAY_PEER_PORT`           | `42069` (`0` = random)          |
-| `-max-torrents`        | `WEBTOR_RELAY_MAX_TORRENTS`        | `3`                             |
-| `-metadata-timeout`    | `WEBTOR_RELAY_METADATA_TIMEOUT`    | `90s`                           |
-| `-idle-timeout`        | `WEBTOR_RELAY_IDLE_TIMEOUT`        | `10m`                           |
-| `-readahead`           | `WEBTOR_RELAY_READAHEAD`           | `33554432` (32 MiB)             |
-| `-no-upload`           | `WEBTOR_RELAY_NO_UPLOAD`           | off                             |
-| `-no-default-trackers` | `WEBTOR_RELAY_NO_DEFAULT_TRACKERS` | off                             |
-| `-no-dht`              | `WEBTOR_RELAY_NO_DHT`              | off                             |
-| `-debug`               | `WEBTOR_RELAY_DEBUG`               | off (logs every API request)    |
+| Flag                   | Env                                | Default                                                               |
+| ---------------------- | ---------------------------------- | --------------------------------------------------------------------- |
+| `-listen`              | `WEBTOR_RELAY_LISTEN`              | `127.0.0.1:7881` (image: `0.0.0.0:7881`)                              |
+| `-public-url`          | `WEBTOR_RELAY_PUBLIC_URL`          | `http://<listen>`                                                     |
+| `-token`               | `WEBTOR_RELAY_TOKEN`               | generated, saved in data dir                                          |
+| `-data-dir`            | `WEBTOR_RELAY_DATA_DIR`            | `<user cache dir>/webtor-relay` (image: `/home/nonroot/webtor-relay`) |
+| `-peer-port`           | `WEBTOR_RELAY_PEER_PORT`           | `42069` (`0` = random)                                                |
+| `-max-torrents`        | `WEBTOR_RELAY_MAX_TORRENTS`        | `3`                                                                   |
+| `-metadata-timeout`    | `WEBTOR_RELAY_METADATA_TIMEOUT`    | `90s`                                                                 |
+| `-idle-timeout`        | `WEBTOR_RELAY_IDLE_TIMEOUT`        | `10m`                                                                 |
+| `-readahead`           | `WEBTOR_RELAY_READAHEAD`           | `33554432` (32 MiB)                                                   |
+| `-no-upload`           | `WEBTOR_RELAY_NO_UPLOAD`           | off                                                                   |
+| `-no-default-trackers` | `WEBTOR_RELAY_NO_DEFAULT_TRACKERS` | off                                                                   |
+| `-no-dht`              | `WEBTOR_RELAY_NO_DHT`              | off                                                                   |
+| `-debug`               | `WEBTOR_RELAY_DEBUG`               | off (logs every API request)                                          |
+| `-version`             |                                    | print the version and exit                                            |
 
 ## Development
 
@@ -82,4 +152,6 @@ node scripts/bench-webtorrent.mjs [MB]  # loopback throughput through WebTorrent
 `internal/relay` holds the HTTP API, `internal/seedtest` a regular (TCP-only) seeder for tests and
 `internal/webapp` the app served at `/` (`go:embed` of `internal/webapp/dist`). Only a placeholder
 `index.html` that links to the hosted site is committed. A release copies the built app (root
-`pnpm build` → `dist/`) into `internal/webapp/dist/` before `go build`.
+`pnpm build` → `dist/`) into `internal/webapp/dist/` before `go build`: run
+`scripts/release-relay.sh <version> build` (from the repository root) for release binaries in
+`relay/dist/`. Releasing is described in the root `CLAUDE.md`.

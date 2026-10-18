@@ -34,6 +34,7 @@ pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture se
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
+scripts/release-relay.sh <version> [all|binaries|image|build]   # relay release, see below
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
 cd relay && go test ./...  # relay checks: gofmt -l . && go vet ./... && go test ./...  (relay/CLAUDE.md)
 ```
@@ -52,6 +53,23 @@ By the owner's decision CI is **manual-only** (`.github/workflows/ci.yml` has ju
   `dist/.nojekyll`; and force-pushes `dist/` as one parentless commit (`deploy: <sha>`) to
   `origin gh-pages`, which GitHub Pages serves at https://alexeychikk.github.io/webtor/. It builds the
   commit with a temporary index, so `main`, the index and the working tree are never touched.
+
+## Relay release (manual, no GitHub Actions)
+
+`webtor-relay` (`relay/`) is versioned on its own: tags `relay-v<semver>`. From a clean, pushed
+`main`, run `scripts/release-relay.sh <version>`. It builds the web app and embeds it
+(`relay/internal/webapp/dist`, placeholder restored on exit), cross-compiles `CGO_ENABLED=0` binaries
+for linux/darwin amd64+arm64 and windows/amd64 into `relay/dist/` with the version in
+`-ldflags` (checked with `-version`), writes `SHA256SUMS`, and runs `gh release create relay-v<version>
+--latest`. Asset names carry no version, so `releases/latest/download/<name>` links (relay README,
+the app's relay dialog → `releases/latest`) stay valid. Relay releases must stay the repository's
+only "latest" releases. It then pushes `ghcr.io/alexeychikk/webtor-relay:<version>` and `:latest`
+(linux amd64+arm64) with `ko` (`relay/.ko.yaml`; no Docker daemon). `relay/Dockerfile` builds the
+same image with Docker (context: repository root). Container builds set `main.defaultListen`
+(`0.0.0.0:7881`) and `main.defaultDataDir` (`/home/nonroot/webtor-relay`) via `-ldflags`; keep the
+two in step. The image push needs a token that can write packages (`ko login ghcr.io`); if it fails
+after the binaries are out, run the `image` step alone. Re-releasing a version: `gh release delete
+relay-v<version> --cleanup-tag` first.
 
 ## Layout
 

@@ -27,6 +27,11 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
 - Tests that need a swarm use `internal/seedtest` (TCP-only loopback seeder, file or directory)
   with the magnet's `x.pe=`. Never depend on the public internet in tests; the platform sandbox only
   allows outbound TCP 80/443 (`scripts/measure.sh` is for real networks).
+- The library's logger goes through `QuietReadErrors`: it drops the Error-level read failures that
+  normal streaming causes (cancelled web seed reads, the nudge). Extend it rather than raising the
+  level when the library gets noisier.
+- Release: `scripts/release-relay.sh` (root `CLAUDE.md`). Container defaults come from `-ldflags`
+  (`main.defaultListen`, `main.defaultDataDir`) in both `.ko.yaml` and `Dockerfile`.
 - `scripts/bench-webtorrent.mjs` measures loopback throughput through WebTorrent in Chromium (see
   the root Playwright setup).
 - No GitHub Actions (root `CLAUDE.md`).
