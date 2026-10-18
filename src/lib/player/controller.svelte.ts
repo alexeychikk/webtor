@@ -21,11 +21,16 @@ import {
 import { fetchRelayMetainfo, fetchRelayStats } from '../torrent/relay-client';
 import { relaySettings } from '../torrent/relay-settings.svelte';
 import { SubtitleManager } from '../subtitles/manager.svelte';
+import {
+  EmbeddedSubtitleScan,
+  embeddedTrackInfo,
+  readEmbeddedHeader,
+} from '../subtitles/mkv/embedded';
 import { isTorrentId } from '../torrent/trackers';
 import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
-import type { AudioTrackInfo, TorrentStats } from './types';
+import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import { nextStarvedFor, watchdogNotice } from './watchdog';
 
 /**
@@ -80,6 +85,7 @@ export class PlayerController {
   private input: TorrentInput | null = null;
   private torrent: Torrent | null = null;
   private player: MsePlayer | null = null;
+  private embedded: EmbeddedSubtitleScan | null = null;
   private video: HTMLVideoElement | null = null;
   private timer: ReturnType<typeof setInterval> | undefined;
   private videoEvents: AbortController | null = null;
@@ -206,9 +212,10 @@ export class PlayerController {
       return new Uint8Array(await sidecar.arrayBuffer());
     });
 
+    const source = torrentByteSource(file);
     let player: MsePlayer;
     try {
-      player = await MsePlayer.open(video, torrentByteSource(file), {
+      player = await MsePlayer.open(video, source, {
         onError: (err) => {
           if (run === this.run) this.fail(err);
         },
@@ -228,10 +235,42 @@ export class PlayerController {
     this.audioCodec = player.audioCodec;
     this.phase = 'buffering';
     this.watchVideo(video);
+    void this.listEmbeddedSubtitles(run, source, video, player.startTime);
     video.play().catch((err: unknown) => {
       // Autoplay blocked (no user gesture, e.g. #magnet= on page load): wait for the play button.
       if (run === this.run && (err as Error)?.name === 'NotAllowedError') this.updatePhase();
     });
+  }
+
+  /**
+   * Matroska/WebM: lists the embedded subtitle tracks (the header is already downloaded by now) and
+   * sets up their cluster scan, which runs while one of them is selected. Never fatal.
+   */
+  private async listEmbeddedSubtitles(
+    run: number,
+    source: ByteSource,
+    video: HTMLVideoElement,
+    startTime: number,
+  ) {
+    let header;
+    try {
+      header = await readEmbeddedHeader(source);
+    } catch (err) {
+      console.warn('subtitles: no embedded tracks:', err);
+      return;
+    }
+    if (run !== this.run || !header || header.subtitleTracks.length === 0) return;
+    const scan = new EmbeddedSubtitleScan(source, header, video, startTime, {
+      onCues: (key, cues) => this.subtitles.appendCues(key, cues),
+      onError: (err) => {
+        console.warn('subtitles: embedded scan failed:', err);
+        this.subtitles.embeddedFailed();
+      },
+    });
+    this.embedded = scan;
+    this.subtitles.addEmbedded(header.subtitleTracks.map(embeddedTrackInfo), (key) =>
+      scan.setActive(key !== null),
+    );
   }
 
   /** Tears down the playing file (MsePlayer and its SourceBuffers, subtitle sources), keeps the torrent. */
@@ -240,6 +279,8 @@ export class PlayerController {
     this.videoEvents = null;
     this.player?.destroy();
     this.player = null;
+    this.embedded?.destroy();
+    this.embedded = null;
     this.subtitles.reset();
     this.fileName = null;
     this.resetFileState();
@@ -316,6 +357,8 @@ export class PlayerController {
     this.videoEvents = null;
     this.player?.destroy();
     this.player = null;
+    this.embedded?.destroy();
+    this.embedded = null;
     this.subtitles.reset();
     const torrent = this.torrent;
     this.torrent = null;
@@ -334,6 +377,8 @@ export class PlayerController {
     this.phase = 'error';
     this.player?.destroy();
     this.player = null;
+    this.embedded?.destroy();
+    this.embedded = null;
     this.subtitles.reset();
     clearInterval(this.timer);
     this.stopRelay();

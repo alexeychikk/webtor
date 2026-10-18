@@ -28,6 +28,8 @@ interface Source {
   track?: TextTrack;
   /** The delay the track's cues are shifted by. */
   trackDelay?: number;
+  /** Embedded tracks: every cue found so far; more arrive through `appendCues`. */
+  live?: SubtitleCue[];
 }
 
 export class SubtitleManager {
@@ -48,6 +50,8 @@ export class SubtitleManager {
   /** Emptied tracks of earlier sources, reusable by label + language. */
   private pool: TextTrack[] = [];
   private listening: AbortController | null = null;
+  /** Told which embedded track is selected (`null`: none), so its scanner runs only then. */
+  private onEmbeddedSelect: ((key: string | null) => void) | null = null;
 
   attach(video: HTMLVideoElement) {
     if (this.video === video) return;
@@ -69,6 +73,7 @@ export class SubtitleManager {
       this.pool.push(source.track);
     }
     this.sources.clear();
+    this.onEmbeddedSelect = null;
     this.tracks = [];
     this.selected = null;
     this.loading = null;
@@ -80,7 +85,10 @@ export class SubtitleManager {
   async setDelay(delay: number): Promise<void> {
     this.delay = Math.round(delay * 1000) / 1000;
     const source = this.selected === null ? undefined : this.sources.get(this.selected);
-    if (!source?.track || !source.cues) return;
+    if (!source?.track) return;
+    // Embedded: refill from every cue found so far (the scan keeps appending to `live`).
+    if (source.live) return this.fillTrack(source, source.live);
+    if (!source.cues) return;
     const cues = await source.cues;
     if (this.sources.get(source.info.key) === source) this.fillTrack(source, cues);
   }
@@ -117,6 +125,41 @@ export class SubtitleManager {
       );
     }
     void this.applyDefault();
+  }
+
+  /**
+   * Lists the playing file's embedded tracks and applies the default selection. Their cues arrive
+   * over time through `appendCues`; `onSelect` hears the selected embedded key (or `null`).
+   */
+  addEmbedded(infos: readonly SubtitleTrackInfo[], onSelect: (key: string | null) => void) {
+    for (const info of infos) {
+      const source: Source = { info, load: () => Promise.resolve(source.live!), live: [] };
+      this.sources.set(info.key, source);
+    }
+    this.tracks = [...this.tracks, ...infos];
+    this.onEmbeddedSelect = onSelect;
+    const selected = this.selected === null ? undefined : this.sources.get(this.selected);
+    onSelect(selected?.info.kind === 'embedded' ? selected.info.key : null);
+    void this.applyDefault();
+  }
+
+  /** New cues of an embedded track (found by the cluster scanner). */
+  appendCues(key: string, cues: readonly SubtitleCue[]) {
+    const source = this.sources.get(key);
+    if (!source?.live) return;
+    source.live.push(...cues);
+    // Drawn with the delay the track is filled with; a later `setDelay` refills from `live`.
+    if (source.track && source.trackDelay !== undefined) {
+      for (const cue of shiftCues(cues, source.trackDelay)) source.track.addCue(toVttCue(cue));
+    }
+  }
+
+  /** The embedded scan failed: cues found so far stay, the user is told the rest is missing. */
+  embeddedFailed() {
+    const source = this.selected === null ? undefined : this.sources.get(this.selected);
+    if (source?.info.kind === 'embedded') {
+      this.notice = new PlaybackError('subtitle-failed', source.info.label);
+    }
   }
 
   /** Adds a user's file (input or drop) and selects it. */
@@ -159,6 +202,7 @@ export class SubtitleManager {
     this.selected = key;
     this.notice = null;
     if (remember) rememberChoice(source?.info ?? null);
+    this.onEmbeddedSelect?.(source?.info.kind === 'embedded' ? key : null);
     // Hide the previous track right away, even if the new one still has to load.
     for (const s of this.sources.values()) if (s !== source && s.track) s.track.mode = 'disabled';
     if (!source) {
@@ -184,7 +228,8 @@ export class SubtitleManager {
     this.loading = null;
     source.track ??= this.createTrack(source.info);
     if (!source.track) return;
-    this.fillTrack(source, cues);
+    // Embedded: the cues found by now, including any that arrived while this awaited.
+    this.fillTrack(source, source.live ?? cues);
     source.track.mode = 'showing';
   }
 
@@ -234,7 +279,7 @@ export class SubtitleManager {
   }
 }
 
-/** Removes every cue, then sets `mode`. A disabled track hides its `cues` (null), so unhide it first. */
+/** Removes every cue, then sets `mode`. A disabled track's `cues` is null, so unhide it first. */
 function clearTrack(track: TextTrack, mode: TextTrackMode = 'disabled') {
   if (track.mode === 'disabled') track.mode = 'hidden';
   for (const cue of [...(track.cues ?? [])]) track.removeCue(cue);

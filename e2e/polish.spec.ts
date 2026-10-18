@@ -101,6 +101,33 @@ test('subtitle delay moves the cues in 0.5 s steps', async ({ page }) => {
   await expect.poll(() => shownCues(page)).toEqual(['Hello from English SRT']);
 });
 
+test('subtitle delay also moves embedded MKV cues, including ones found after the change', async ({
+  page,
+}) => {
+  // A short buffer window: the cluster scan finds the later cues only as playback gets there.
+  await page.addInitScript(() => localStorage.setItem('webtor:buffer-ahead-s', '3'));
+  await playFixture(page, 'sample.mkv');
+  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await page.getByTestId('subtitle-delay-plus').click();
+  await page.getByTestId('subtitle-delay-plus').click();
+  await expect(page.getByTestId('subtitle-delay')).toHaveText('+1.0 s');
+  // Cues at 1–3 s and 5–8 s; 1 s later they are at 2–4 s and 6–9 s.
+  await seekTo(page, 8.5);
+  await expect.poll(() => shownCues(page), { timeout: 15_000 }).toEqual(['Second english cue']);
+  await seekTo(page, 3.5);
+  await expect.poll(() => shownCues(page)).toEqual(['Hello from English SRT']);
+  await seekTo(page, 1.5);
+  await expect.poll(() => shownCues(page)).toEqual([]);
+
+  // Back to 0: every cue found so far is redrawn unshifted.
+  await page.getByTestId('subtitle-delay-reset').click();
+  await expect(page.getByTestId('subtitle-delay')).toHaveText('0.0 s');
+  await seekTo(page, 8.5);
+  await expect.poll(() => shownCues(page)).toEqual([]);
+  await seekTo(page, 5.5);
+  await expect.poll(() => shownCues(page)).toEqual(['Second english cue']);
+});
+
 test('keyboard shortcuts: space, arrows, m, c, f — and their help', async ({ page }) => {
   await playFixture(page, 'with-sidecar');
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'playing');
