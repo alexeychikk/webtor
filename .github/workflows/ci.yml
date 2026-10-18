@@ -1,9 +1,10 @@
 name: CI
 
+# Manual-only by the owner's decision: no GitHub Actions minutes are spent on PRs or pushes.
+# Checks run locally (see CLAUDE.md); the site is deployed with `pnpm run deploy:pages`.
+# Do not add pull_request/push/schedule triggers back. See docs/decisions/0005-manual-ci-and-release.md.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,7 +49,8 @@ jobs:
 
   deploy:
     # GitHub Pages serves the gh-pages branch. Static files only; no headers needed (see docs/decisions/0001).
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Runs only when dispatched by hand on main; the usual path is the local `pnpm run deploy:pages`.
+    if: github.ref == 'refs/heads/main'
     needs: [check, e2e]
     runs-on: ubuntu-latest
     permissions:

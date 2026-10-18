@@ -13,8 +13,8 @@ Date: 2026-10-18 · Status: accepted
   (`node-datachannel`, `utp-native`, …) are denied in `pnpm-workspace.yaml`; nothing we run needs them.
 - **Vitest 5** for unit tests (pure logic: parsers, codec decisions, track mapping);
   **Playwright 1.64 (Chromium)** for e2e against the production build (`vite preview`).
-- **Hosting: GitHub Pages**, built by `.github/workflows/ci.yml` and pushed to the `gh-pages` branch on
-  every green `main`. `base: './'` so the same build works under `/webtor/` and at a domain root.
+- **Hosting: GitHub Pages**, served from the `gh-pages` branch, which `pnpm run deploy:pages` publishes
+  from `main` by hand (CI deploys were dropped, see 0005). `base: './'` so the same build works under `/webtor/` and at a domain root.
 - **No service worker, no COOP/COEP.** Nothing in the design needs `SharedArrayBuffer`: Mediabunny and
   its AC-3/DTS wasm extensions are single-threaded; JASSUB falls back to single-threaded rendering
   when not cross-origin isolated. So the GitHub Pages limitation (no custom headers) does not bite, and
@@ -23,7 +23,7 @@ Date: 2026-10-18 · Status: accepted
 
 ## Consequences
 
-- Only Chromium is automated in CI. Firefox/Safari behaviour (codec support, `ManagedMediaSource`) is
+- Only Chromium is automated (Playwright). Firefox/Safari behaviour (codec support, `ManagedMediaSource`) is
   checked by hand and handled by feature detection, never UA sniffing.
 - If a future feature needs threads (e.g. multi-threaded ffmpeg), revisit hosting (Cloudflare Pages
   or Netlify can set headers) before reaching for `coi-serviceworker`.

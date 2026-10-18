@@ -29,11 +29,24 @@ pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
+pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
 ```
 
-CI (`.github/workflows/ci.yml`): check + unit + build, e2e, then on `main` deploy `dist/` to the
-`gh-pages` branch (GitHub Pages).
+## Checks and release: local only, no GitHub Actions
+
+By the owner's decision CI is **manual-only** (`.github/workflows/ci.yml` has just
+`workflow_dispatch`; never add `push`/`pull_request`/`schedule` back, never trigger or wait on runs).
+`main` has no required status checks. See `docs/decisions/0005-manual-ci-and-release.md`.
+
+- **Before review / in QA**, run locally: `pnpm format:check && pnpm check && pnpm test && pnpm build`,
+  plus `pnpm test:e2e` (always in QA; for the developer when playback or UI changed).
+- **Release:** merge the PR, then from an up-to-date, clean `main` (`git checkout main && git pull`)
+  run `pnpm run deploy:pages`. It refuses a dirty tree, a branch other than `main` or a `main` that
+  differs from `origin/main`; runs `pnpm install --frozen-lockfile && pnpm build`; adds
+  `dist/.nojekyll`; and force-pushes `dist/` as one parentless commit (`deploy: <sha>`) to
+  `origin gh-pages`, which GitHub Pages serves at https://alexeychikk.github.io/webtor/. It builds the
+  commit with a temporary index, so `main`, the index and the working tree are never touched.
 
 ## Layout
 
