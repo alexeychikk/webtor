@@ -79,6 +79,10 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     /** Free the OPFS / memory chunk store when the torrent is destroyed. */
     destroyStoreOnDestroy?: boolean;
     deselect?: boolean;
+    /** Chunk store constructor (abstract-chunk-store); default OPFS where `createWritable` exists. */
+    store?: new (chunkLength: number, opts: { length?: number }) => unknown;
+    /** Pieces cached in memory in front of the store (default 20; 0 = none). */
+    storeCacheSlots?: number;
   }
 
   export interface ClientOptions {

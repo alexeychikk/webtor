@@ -34,8 +34,8 @@ and a default public tracker list. WebRTC and seeding-after-done are off. API (`
 - `GET {base}/v1/torrents/{ih}/metainfo?<magnet query>` adds the torrent (`tr=` of every scheme,
   `dn=`, `x.pe=`, `ws=`) and waits up to 90 s for the info dict. It answers with a .torrent that
   holds only `info`, or 504 when the swarm gave no metadata. With `-max-torrents` (default 3)
-  torrents busy it answers 429 `{error, maxTorrents}`; a torrent idle for a minute is evicted
-  instead.
+  torrents busy it answers 429 `{error, maxTorrents}` (the app shows `relay-busy`); a torrent idle
+  for a minute is evicted instead.
 - `GET {base}/v1/torrents/{ih}/files` → `[{index, path, length, webseedPath}]`.
 - `GET {base}/v1/torrents/{ih}/stats` → swarm peers/seeders, bytes. This is what the UI shows,
   because WebTorrent only sees one wire, the web seed.

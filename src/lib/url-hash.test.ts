@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { magnetHash, readFileFromHash, readMagnetFromHash, takeRelayFromHash } from './url-hash';
+import {
+  magnetHash,
+  readFileFromHash,
+  readMagnetFromHash,
+  shareUrl,
+  takeRelayFromHash,
+} from './url-hash';
 
 const magnet =
   'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=wss%3A%2F%2Fx';
@@ -83,5 +89,19 @@ describe('takeRelayFromHash', () => {
       relayUrl: null,
       hash: '#magnet=abc',
     });
+  });
+});
+
+describe('share link', () => {
+  it('is this page with the torrent and the file in the hash', () => {
+    const page = { origin: 'https://alexeychikk.github.io', pathname: '/webtor/', search: '' };
+    const url = shareUrl(page, magnet, 1);
+    expect(url).toBe(`https://alexeychikk.github.io/webtor/${magnetHash(magnet, 1)}`);
+    const hash = new URL(url).hash;
+    expect(readMagnetFromHash(hash)).toBe(magnet);
+    expect(readFileFromHash(hash)).toBe(1);
+    expect(shareUrl({ ...page, search: '?x=1' }, 'abc', null)).toBe(
+      'https://alexeychikk.github.io/webtor/?x=1#magnet=abc',
+    );
   });
 });

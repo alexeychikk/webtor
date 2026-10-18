@@ -2,7 +2,6 @@
   import { relaySettings } from '../torrent/relay-settings.svelte';
   import { channelsLabel, codecLabel } from './codecs';
   import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
-  import { formatPercent, formatSpeed } from './format';
   import {
     detectDisplayCapabilities,
     enterFullscreen,
@@ -12,10 +11,14 @@
     fullscreenMethod,
   } from './fullscreen';
   import type { PlayerController, Phase } from './controller.svelte';
+  import ShareButton from './ShareButton.svelte';
+  import { seekTarget, shortcutFor, SHORTCUTS, type ShortcutAction } from './shortcuts';
+  import StatsPanel from './StatsPanel.svelte';
   import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
   import FileList from '../torrent/FileList.svelte';
   import { isTorrentFile } from '../torrent/files';
+  import { helpDialog } from '../help/help-dialog.svelte';
 
   let {
     controller,
@@ -72,12 +75,18 @@
     };
   });
 
+  /** The fullscreen button and the `f` shortcut. */
   function toggleFullscreen() {
     if (fsMethod === 'video') {
       if (video) enterVideoFullscreen(video);
       return;
     }
-    const done = fullscreen ? exitFullscreen() : screen ? enterFullscreen(screen) : undefined;
+    // Leaves any fullscreen (also the bare video's, e.g. after a double-click on it).
+    const done = fullscreenElement()
+      ? exitFullscreen()
+      : screen
+        ? enterFullscreen(screen)
+        : undefined;
     done?.catch((err: unknown) => console.warn('fullscreen:', err));
   }
 
@@ -89,6 +98,50 @@
     dragging = true;
   }
 
+  /** Notices the "Why won't my torrent play?" help explains. */
+  const PEER_NOTICES: readonly PlaybackErrorCode[] = ['no-peers', 'stalled'];
+
+  function onKeyDown(event: KeyboardEvent) {
+    const v = video;
+    if (!v || event.defaultPrevented || controller.phase === 'idle' || controller.phase === 'error')
+      return;
+    // A key typed in a dialog (relay settings, help) is not meant for the player.
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest('dialog')) return;
+    const action = shortcutFor({
+      key: event.key,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      altKey: event.altKey,
+      targetTag: target?.tagName,
+      targetEditable: target?.isContentEditable,
+    });
+    if (!action) return;
+    event.preventDefault();
+    run(action, v);
+  }
+
+  function run(action: ShortcutAction, v: HTMLVideoElement) {
+    switch (action.type) {
+      case 'toggle-play':
+        if (v.paused) v.play().catch(() => {});
+        else v.pause();
+        break;
+      case 'seek':
+        v.currentTime = seekTarget(v.currentTime, action.by, v.duration);
+        break;
+      case 'mute':
+        v.muted = !v.muted;
+        break;
+      case 'fullscreen':
+        toggleFullscreen();
+        break;
+      case 'cycle-subtitles':
+        void controller.subtitles.cycle();
+        break;
+    }
+  }
+
   function drop(event: DragEvent) {
     dragging = false;
     const file = event.dataTransfer?.files[0];
@@ -98,6 +151,8 @@
     void controller.subtitles.addFile(file);
   }
 </script>
+
+<svelte:window onkeydown={onKeyDown} />
 
 <section
   class="player"
@@ -163,18 +218,28 @@
     {#if controller.fileName}<span class="file" title={controller.fileName}
         >{controller.fileName}</span
       >{/if}
-    {#if controller.phase !== 'error'}
-      <span class="stats" data-testid="stats">
-        {controller.stats.numPeers}
-        {controller.stats.numPeers === 1 ? 'peer' : 'peers'} · ↓ {formatSpeed(
-          controller.stats.downloadSpeed,
-        )} · {formatPercent(controller.stats.progress)}
-        {#if controller.stats.relayPeers !== undefined}
-          <span data-testid="relay-peers">· {controller.stats.relayPeers} via relay</span>
-        {/if}
-      </span>
-    {/if}
   </p>
+
+  {#if controller.phase !== 'error'}
+    <StatsPanel stats={controller.stats} />
+  {/if}
+
+  <div class="actions">
+    {#if controller.magnet}
+      <ShareButton magnet={controller.magnet} fileIndex={controller.fileIndex} />
+    {/if}
+    <details class="shortcuts" data-testid="shortcuts-help">
+      <summary>Keyboard shortcuts</summary>
+      <dl>
+        {#each SHORTCUTS as s (s.keys)}
+          <div>
+            <dt><kbd>{s.keys}</kbd></dt>
+            <dd>{s.action}</dd>
+          </div>
+        {/each}
+      </dl>
+    </details>
+  </div>
 
   {#if controller.error}
     <p class="error" role="alert" data-testid="error" data-code={controller.error.code}>
@@ -187,6 +252,11 @@
   {#each controller.notices as code (code)}
     <p class="notice" data-testid="notice" data-code={code}>
       {PLAYBACK_ERROR_MESSAGES[code]}
+      {#if PEER_NOTICES.includes(code)}
+        <button type="button" data-testid="why-link" onclick={() => (helpDialog.open = true)}
+          >Why won’t it play?</button
+        >
+      {/if}
       {#if code === 'no-peers' && !controller.viaRelay}
         <button type="button" onclick={() => relaySettings.openDialog()}>Connect a relay</button>
       {/if}
@@ -273,11 +343,48 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 30rem;
+    max-width: min(30rem, 100%);
   }
-  .stats {
-    opacity: 0.75;
-    font-variant-numeric: tabular-nums;
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: flex-start;
+    margin: 0.5rem 0;
+  }
+  .shortcuts {
+    position: relative;
+  }
+  .shortcuts summary {
+    cursor: pointer;
+    opacity: 0.85;
+  }
+  .shortcuts dl {
+    position: absolute;
+    z-index: 1;
+    margin: 0.25rem 0 0;
+    padding: 0.5rem 0.75rem;
+    min-width: 16rem;
+    border-radius: 0.25rem;
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
+  }
+  .shortcuts dl div {
+    display: flex;
+    gap: 0.75rem;
+  }
+  .shortcuts dt {
+    min-width: 4.5rem;
+  }
+  .shortcuts dd {
+    margin: 0;
+  }
+  kbd {
+    font-family: inherit;
+    padding: 0 0.3em;
+    border: 1px solid currentColor;
+    border-radius: 0.2em;
   }
   .error,
   .notice {
@@ -290,6 +397,19 @@
   .error button,
   .notice button {
     margin-left: 0.5rem;
+  }
+  @media (max-width: 40rem) {
+    video {
+      max-height: 50vh;
+    }
+    .error button,
+    .notice button {
+      margin: 0.5rem 0.5rem 0 0;
+    }
+    .shortcuts dl {
+      position: static;
+      min-width: 0;
+    }
   }
   .notice {
     background: color-mix(in srgb, orange 18%, transparent);

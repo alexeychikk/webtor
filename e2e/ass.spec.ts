@@ -69,6 +69,27 @@ test('the Russian ASS track is drawn by JASSUB on the overlay canvas at 2–4 s,
   await expect(page.locator('[data-testid="notice"][data-code="subtitle-failed"]')).toHaveCount(0);
 });
 
+test('the subtitle delay moves the styled ASS overlay too', async ({ page }) => {
+  await playSample(page);
+  await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
+  await expect(canvas(page)).toBeVisible({ timeout: 20_000 });
+  await seekTo(page, 3);
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
+
+  // +2 s: the 2–4 s event is drawn at 4–6 s (redrawn at once while paused).
+  for (let i = 0; i < 4; i++) await page.getByTestId('subtitle-delay-plus').click();
+  await expect(page.getByTestId('subtitle-delay')).toHaveAttribute('data-delay', '2');
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBe(0);
+  await seekTo(page, 5);
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
+  expect(await shownCues(page)).toEqual([]);
+
+  await page.getByTestId('subtitle-delay-reset').click();
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBe(0);
+  await seekTo(page, 3);
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
+});
+
 test('our fullscreen button fullscreens the player container, and the overlay stays drawn', async ({
   page,
 }) => {

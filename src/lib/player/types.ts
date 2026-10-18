@@ -65,6 +65,9 @@ export interface TorrentStats {
   downloadSpeed: number;
   uploadSpeed: number;
   progress: number;
+  /** Payload bytes received so far, and the torrent size once its info is known. */
+  downloaded?: number;
+  length?: number;
   /** Swarm peers behind the relay (included in `numPeers`); absent without a relay. */
   relayPeers?: number;
 }

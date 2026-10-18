@@ -22,6 +22,9 @@ maintained BitTorrent-over-WebRTC implementation.
   accepting a `.torrent` file upload/URL (metadata without peers).
 - **Storage:** WebTorrent's browser default chunk store (OPFS via `fsa-chunk-store`, memory fallback);
   add torrents with `destroyStoreOnDestroy: true` so OPFS is freed when the user leaves a torrent.
+  WebTorrent picks OPFS whenever `createWritable` exists, even where writes then fail (Safari
+  private browsing, Playwright's WebKit: `UnknownError`), so `client.ts` probes one OPFS write first
+  and otherwise passes our `MemoryChunkStore` (`memory-store.ts`).
 - **Piece selection:** keep `strategy: 'sequential'`; deselect the whole torrent after metadata and let
   the reads the media pipeline makes (`file.stream({start,end})`) drive priority; the selected video
   file is then `select()`ed at low priority for read-ahead.

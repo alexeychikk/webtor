@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { SubtitleTrackInfo } from '../player/types';
-import { defaultSubtitleKey, groupSubtitleTracks, subtitleTrackText } from './tracks';
+import {
+  defaultSubtitleKey,
+  groupSubtitleTracks,
+  nextSubtitleKey,
+  subtitleTrackText,
+} from './tracks';
 
 const track = (key: string, extra: Partial<SubtitleTrackInfo> = {}): SubtitleTrackInfo => ({
   key,
@@ -60,5 +65,26 @@ describe('subtitleTrackText', () => {
       'a.srt (forced)',
     );
     expect(subtitleTrackText(track('embedded:1', { label: '' }))).toBe('Untitled');
+  });
+});
+
+describe('nextSubtitleKey', () => {
+  // Out of display order on purpose: the selector shows embedded, then in-torrent, then uploads.
+  const tracks = [
+    track('upload:1'),
+    track('sidecar:4'),
+    track('embedded:2', { unsupported: true }),
+    track('embedded:3'),
+  ];
+
+  it('cycles in selector order through Off, skipping unsupported tracks', () => {
+    expect(nextSubtitleKey(tracks, null)).toBe('embedded:3');
+    expect(nextSubtitleKey(tracks, 'embedded:3')).toBe('sidecar:4');
+    expect(nextSubtitleKey(tracks, 'sidecar:4')).toBe('upload:1');
+    expect(nextSubtitleKey(tracks, 'upload:1')).toBeNull();
+  });
+  it('is Off without tracks and starts over from an unknown key', () => {
+    expect(nextSubtitleKey([], null)).toBeNull();
+    expect(nextSubtitleKey(tracks, 'sidecar:99')).toBe('embedded:3');
   });
 });

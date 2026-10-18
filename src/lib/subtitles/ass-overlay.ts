@@ -90,6 +90,16 @@ export class AssOverlay {
       .catch(warn);
   }
 
+  /**
+   * Draws every event `delay` seconds later (the subtitle delay; positive = later): libass renders
+   * the script at `mediaTime − delay`.
+   */
+  setDelay(delay: number) {
+    if (this.destroyed || this.jassub.timeOffset === -delay) return;
+    this.jassub.timeOffset = -delay;
+    this.jassub.resize(true).catch(warn);
+  }
+
   setVisible(visible: boolean) {
     if (this.destroyed || this.canvas.hidden === !visible) return;
     this.canvas.hidden = !visible;

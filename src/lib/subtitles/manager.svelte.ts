@@ -19,10 +19,15 @@ import {
 } from '../player/fullscreen';
 import { AssOverlay } from './ass-overlay';
 import type { SubtitleFileEntry, SubtitleTrackInfo } from '../player/types';
-import type { SubtitleCue } from './cue';
+import { shiftCues, SUBTITLE_DELAY_STEP_S, type SubtitleCue } from './cue';
 import { guessLanguageFromFilename, isForcedFilename } from './language';
 import { isAssFormat, readSubtitleFile, subtitleFormatOf } from './parse';
-import { defaultSubtitleKey, subtitleTrackText, type SubtitlePreference } from './tracks';
+import {
+  defaultSubtitleKey,
+  nextSubtitleKey,
+  subtitleTrackText,
+  type SubtitlePreference,
+} from './tracks';
 
 const PREFERENCE_KEY = 'webtor:subtitle-language';
 /** Text subtitles are tiny; anything bigger is not a subtitle file. */
@@ -37,6 +42,8 @@ interface Source {
   load: (source: Source) => Promise<SubtitleCue[]>;
   cues?: Promise<SubtitleCue[]>;
   track?: TextTrack;
+  /** The delay the track's cues are shifted by. */
+  trackDelay?: number;
   /** Embedded tracks: every cue found so far; more arrive through `appendCues`. */
   live?: SubtitleCue[];
   /**
@@ -72,6 +79,8 @@ export class SubtitleManager {
   /** Key whose cues are being fetched/parsed. */
   loading = $state<string | null>(null);
   notice = $state<PlaybackError | null>(null);
+  /** Seconds every cue is shifted by (positive = later); back to 0 for every new file. */
+  delay = $state(0);
 
   private sources = new Map<string, Source>();
   private video: HTMLVideoElement | null = null;
@@ -126,6 +135,34 @@ export class SubtitleManager {
     this.selected = null;
     this.loading = null;
     this.notice = null;
+    this.delay = 0;
+  }
+
+  /**
+   * Shifts the subtitles by `delay` seconds: the text track is refilled with shifted cues and the
+   * styled overlay renders with a time offset.
+   */
+  async setDelay(delay: number): Promise<void> {
+    this.delay = Math.round(delay * 1000) / 1000;
+    const source = this.selectedSource();
+    if (!source) return;
+    if (this.overlay?.key === source.info.key) this.overlay.overlay?.setDelay(this.delay);
+    if (!source.track) return;
+    // Embedded: refill from every cue found so far (the scan keeps appending to `live`).
+    if (source.live) return this.fillTrack(source, source.live);
+    if (!source.cues) return;
+    const cues = await source.cues;
+    if (this.sources.get(source.info.key) === source) this.fillTrack(source, cues);
+  }
+
+  /** The ± buttons: `steps` × 0.5 s. */
+  nudgeDelay(steps: number): Promise<void> {
+    return this.setDelay(this.delay + steps * SUBTITLE_DELAY_STEP_S);
+  }
+
+  /** The `c` shortcut: next track in selector order, then Off. */
+  cycle(): Promise<void> {
+    return this.select(nextSubtitleKey(this.tracks, this.selected));
   }
 
   /** Lists the torrent's subtitle files and applies the default selection. */
@@ -184,7 +221,11 @@ export class SubtitleManager {
     const source = this.sources.get(key);
     if (!source?.live) return;
     source.live.push(...cues);
-    if (source.track) addCues(source.track, cues);
+    // Drawn with the delay the track is filled with; a later `setDelay` refills from `live`. The
+    // overlay takes them unshifted: it applies the delay as its time offset.
+    if (source.track && source.trackDelay !== undefined) {
+      addCues(source.track, shiftCues(cues, source.trackDelay));
+    }
     if (this.overlay?.key === key) this.overlay.overlay?.addChunks(cues);
   }
 
@@ -264,7 +305,8 @@ export class SubtitleManager {
     if (generation !== this.generation || this.selected !== key) return;
     // Embedded: the cues found by now, including any that arrived while this awaited. The text
     // track is made for ASS too: it is the fallback when the overlay can't be seen.
-    source.track ??= this.createTrack(source.info, source.live ?? cues);
+    source.track ??= this.createTrack(source.info);
+    if (source.track) this.fillTrack(source, source.live ?? cues);
     if (this.styled(source)) await this.showOverlay(source);
     if (generation !== this.generation || this.selected !== key) return;
     this.loading = null;
@@ -336,6 +378,7 @@ export class SubtitleManager {
       return;
     }
     entry.overlay = overlay;
+    overlay.setDelay(this.delay);
     overlay.addChunks(source.live ?? []);
     if (late) void fonts.then((f) => this.overlay === entry && overlay.addFonts(f));
   }
@@ -350,10 +393,16 @@ export class SubtitleManager {
     if (key !== null && this.selected === null) await this.select(key, { remember: false });
   }
 
-  private createTrack(
-    info: SubtitleTrackInfo,
-    cues: readonly SubtitleCue[],
-  ): TextTrack | undefined {
+  /** (Re)fills the source's track with its cues shifted by the current delay, if not done yet. */
+  private fillTrack(source: Source, cues: readonly SubtitleCue[]) {
+    const track = source.track;
+    if (!track || source.trackDelay === this.delay) return;
+    clearTrack(track, track.mode);
+    addCues(track, shiftCues(cues, this.delay));
+    source.trackDelay = this.delay;
+  }
+
+  private createTrack(info: SubtitleTrackInfo): TextTrack | undefined {
     const video = this.video;
     if (!video) return undefined;
     const label = subtitleTrackText(info);
@@ -363,7 +412,6 @@ export class SubtitleManager {
         ? this.pool.splice(reuse, 1)[0]!
         : video.addTextTrack('subtitles', label, info.language);
     track.mode = 'disabled';
-    addCues(track, cues);
     return track;
   }
 
@@ -390,11 +438,11 @@ function addCues(track: TextTrack, cues: readonly SubtitleCue[]) {
   for (const cue of cues) if (cue.text) track.addCue(toVttCue(cue));
 }
 
-function clearTrack(track: TextTrack) {
-  // A disabled track's `cues` is null, so the cues go while it is still hidden.
-  track.mode = 'hidden';
+/** Removes every cue, then sets `mode`. A disabled track's `cues` is null, so unhide it first. */
+function clearTrack(track: TextTrack, mode: TextTrackMode = 'disabled') {
+  if (track.mode === 'disabled') track.mode = 'hidden';
   for (const cue of [...(track.cues ?? [])]) track.removeCue(cue);
-  track.mode = 'disabled';
+  track.mode = mode;
 }
 
 function toVttCue(cue: SubtitleCue): VTTCue {

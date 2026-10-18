@@ -91,7 +91,7 @@ describe('relay error mapping', () => {
     expect(relayErrorCode({ kind: 'http', status: 504 })).toBe('relay-no-metadata');
     expect(relayErrorCode({ kind: 'timeout' })).toBe('relay-no-metadata');
     expect(relayErrorCode({ kind: 'http', status: 429, message: 'too many torrents' })).toBe(
-      'relay-error',
+      'relay-busy',
     );
     expect(relayErrorCode({ kind: 'http', status: 404 })).toBe('relay-error');
     expect(relayErrorCode({ kind: 'http', status: 400 })).toBe('relay-error');

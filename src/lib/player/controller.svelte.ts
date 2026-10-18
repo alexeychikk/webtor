@@ -423,6 +423,8 @@ export class PlayerController {
       downloadSpeed: t.downloadSpeed,
       uploadSpeed: t.uploadSpeed,
       progress: t.progress,
+      downloaded: t.downloaded,
+      length: t.files?.length ? t.length : undefined,
     };
     const webSeeds = t.wires.filter((w) => w.type === 'webSeed').length;
     this.stats = mergeRelayStats(stats, webSeeds, this.relayStats);

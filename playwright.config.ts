@@ -25,6 +25,20 @@ export default defineConfig({
         },
       },
     },
+    // Cross-browser smoke (magnet → play) in the Firefox and Safari engines; features run on Chromium.
+    {
+      name: 'firefox',
+      testMatch: 'smoke.spec.ts',
+      use: {
+        ...devices['Desktop Firefox'],
+        launchOptions: { firefoxUserPrefs: { 'media.autoplay.default': 0 } },
+      },
+    },
+    {
+      name: 'webkit',
+      testMatch: 'smoke.spec.ts',
+      use: { ...devices['Desktop Safari'] },
+    },
   ],
   webServer: [
     {
