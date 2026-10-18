@@ -16,7 +16,7 @@ export const SCAN_AHEAD_S = 30;
  * Scans start this far behind the playhead (seconds): a cue is stored in the Cluster where it starts,
  * so one still on screen at the seek target can sit a Cluster or two earlier.
  */
-export const SCAN_BEHIND_S = 10;
+export const SCAN_BEHIND_S = 5;
 /** A new scan starts when less than this much is covered ahead of the playhead (seconds). */
 export const SCAN_REFILL_S = 15;
 

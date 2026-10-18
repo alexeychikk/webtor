@@ -26,7 +26,11 @@ SRT and ASS tracks don't appear in `getTracks()`). So we keep a small EBML reade
   reads element headers and the track-number vint of each `SimpleBlock`/`BlockGroup`, and skips
   non-subtitle blocks by size. The bytes it touches are ones the video pipeline downloads anyway.
   Cue time is `(ClusterTimestamp + int16 block timestamp) × TimestampScale`. Duration comes from
-  `BlockDuration`. Cues are kept per track (deduplicated by start), so going back is instant.
+  `BlockDuration` (4 s when missing). Cues are kept per track (deduplicated by start + text) and
+  Clusters already read are remembered, so going back is instant. A scan starts 5 s behind the
+  playhead, so a cue that began in an earlier Cluster still shows after a seek. Track
+  `ContentEncodings` are undone: zlib (mkvmerge's default for subtitles, via `DecompressionStream`)
+  and header stripping; encrypted or bzlib/lzo tracks are listed as unsupported.
 - An ASS block payload is `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`. It is
   turned into a `Dialogue:` line with the block's start and end.
 
