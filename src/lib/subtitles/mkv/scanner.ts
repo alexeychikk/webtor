@@ -25,7 +25,7 @@ export type CueSink = (trackNumber: number, cues: SubtitleCue[]) => void;
 export class ClusterScanner {
   private readonly scanned = new Map<number, ScannedCluster>();
   private cuePoints: Promise<CuePoint[]> | null = null;
-  /** Per track: `start|text` of every cue emitted, so overlapping scans don't duplicate. */
+  /** Per track: `start|text` (ASS: `start|chunk`) of every cue emitted, so overlapping scans don't duplicate. */
   private readonly emitted = new Map<number, Set<string>>();
   private readonly tracks;
 
@@ -111,7 +111,7 @@ export class ClusterScanner {
       if (!cue) continue;
       const seen = this.emitted.get(block.track) ?? new Set<string>();
       this.emitted.set(block.track, seen);
-      const key = `${cue.start}|${cue.text}`;
+      const key = `${cue.start}|${cue.assChunk ?? cue.text}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const list = byTrack.get(block.track) ?? [];

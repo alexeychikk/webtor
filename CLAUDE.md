@@ -85,9 +85,13 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  fullscreen.ts                capabilities (styled ASS, container/video fullscreen), button method,
+                               ASS styled-vs-text decision; prefixed Fullscreen API glue
 src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
-  manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick
-  srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ASS/SSA as plain text until JASSUB)
+  manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick;
+                               ASS/SSA → AssOverlay when `assRenderMode` is styled, else its text track
+  ass-overlay.ts               JASSUB glue: lazy import, canvas after the <video>, fonts, processChunk
+  srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ass.ts: plain-text fallback of ASS/SSA)
   encoding.ts language.ts tracks.ts   BOM/UTF-8/1251/1252 decode, filename language, default rule
   mkv/                         embedded MKV/WebM subtitles: EBML reader (header, Cues, Attachments),
                                cluster scanner, embedded.ts (selector entries + scan ~30 s ahead of the playhead)
@@ -129,15 +133,26 @@ docs/decisions/                ADRs
 - UI test hooks: `data-testid` `file-list` / `file` (`data-index`, `data-kind`, `aria-current`; shown
   only with 2+ video files), `torrent-file` (the .torrent input), `video`, `status` (with `data-phase`), `error` and `notice` (with
   `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
-  `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off) and `subtitle-upload` (file
-  input). The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
+  `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off), `subtitle-upload` (file
+  input), `screen` (the container our fullscreen button fullscreens), `fullscreen` (that button,
+  `aria-pressed`) and `ass-canvas` (the JASSUB overlay; exists only while an ASS track is drawn
+  styled). Read its pixels with `drawImage` onto a 2D canvas after a paused seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
   when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Check shown cues through
   `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
 - Embedded MKV tracks are `embedded:<TrackNumber>` (sample.mkv: `embedded:4` "English · SRT",
   `embedded:5` "Russian · ASS"). Their cues stream in: `SubtitleManager.addEmbedded` lists them,
   `appendCues` adds what the scanner finds, and the scanner runs only while one is selected.
-- New subtitle sources (JASSUB) plug into `SubtitleManager`: list a
+- New subtitle sources plug into `SubtitleManager`: list a
   `SubtitleTrackInfo` (key `<kind>:<id>`) with a loader for its cues; the selector groups by `kind`.
+- **Styled ASS/SSA (JASSUB 2.5).** A source is styled when it has an `assScript`: the whole file
+  (sidecar/upload) or the track's CodecPrivate header (embedded, `assHeaderOf`). Embedded cues carry
+  the raw block in `SubtitleCue.assChunk`, fed to libass with `renderer.processChunk` (it skips
+  duplicates by ReadOrder). Every ASS source also gets its plain-text TextTrack, shown instead of the
+  canvas on iOS (no container fullscreen), while the bare `<video>` is fullscreen, or after JASSUB
+  failed. The default font (Liberation Sans, metric-compatible with Arial) is preloaded in `fonts`:
+  a font fetched on demand isn't drawn until the next video frame, which never comes while paused.
+  `queryFonts: false` (no local-font prompts, no Google Fonts). Single-threaded without COOP/COEP.
+  JASSUB uses `requestVideoFrameCallback` `mediaTime` (element timeline), like the text tracks.
   The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.

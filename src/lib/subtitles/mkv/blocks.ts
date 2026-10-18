@@ -48,27 +48,37 @@ export function assBlockText(payload: string): string {
 
 const utf8 = new TextDecoder('utf-8');
 
-/** Cue text of a decoded frame in the track's format (plain text for ASS/SSA for now). */
+const decodeFrameText = (frame: Uint8Array) =>
+  utf8.decode(frame).replace(/\0+$/, '').replace(/\r\n?/g, '\n');
+
+const isAss = (format: NonNullable<MkvSubtitleTrack['format']>) =>
+  format === 'ass' || format === 'ssa';
+
+/** Plain cue text of a decoded frame in the track's format (ASS/SSA overrides dropped). */
 export function frameText(format: NonNullable<MkvSubtitleTrack['format']>, frame: Uint8Array) {
-  const text = utf8.decode(frame).replace(/\0+$/, '').replace(/\r\n?/g, '\n');
-  return format === 'ass' || format === 'ssa'
-    ? assTextToPlain(assBlockText(text))
-    : cleanCueText(text);
+  const text = decodeFrameText(frame);
+  return isAss(format) ? assTextToPlain(assBlockText(text)) : cleanCueText(text);
 }
 
-/** One block → a cue on the file's own timeline, or `null` when it has no text. */
+/**
+ * One block → a cue on the file's own timeline, or `null` when it has no text. ASS/SSA cues carry the
+ * raw block payload in `assChunk`; their `text` (the plain fallback) may be empty.
+ */
 export async function blockToCue(
   track: MkvSubtitleTrack,
   block: MkvBlock,
   timestampScale: number,
 ): Promise<SubtitleCue | null> {
   if (!track.format) return null;
-  const text = frameText(track.format, await decodeFrame(block.data, track.encodings));
-  if (!text) return null;
+  const frame = await decodeFrame(block.data, track.encodings);
+  const text = frameText(track.format, frame);
+  // ASS drawings (`{\p1}m 0 0 l …`) have no plain text but still render styled.
+  const assChunk = isAss(track.format) ? decodeFrameText(frame) : undefined;
+  if (!text && !assChunk) return null;
   const start = (block.timestamp * timestampScale) / 1e9;
   const end =
     block.duration !== null && block.duration > 0
       ? ((block.timestamp + block.duration) * timestampScale) / 1e9
       : start + DEFAULT_CUE_SECONDS;
-  return { start, end, text };
+  return assChunk === undefined ? { start, end, text } : { start, end, text, assChunk };
 }
