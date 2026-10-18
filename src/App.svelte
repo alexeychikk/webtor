@@ -1,22 +1,30 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { PlayerController } from './lib/player/controller.svelte';
+  import { PlayerController, type TorrentInput } from './lib/player/controller.svelte';
   import Player from './lib/player/Player.svelte';
   import RelayDialog from './lib/torrent/RelayDialog.svelte';
+  import { isTorrentFile } from './lib/torrent/files';
   import { checkRelayUrl } from './lib/torrent/relay';
   import { relaySettings } from './lib/torrent/relay-settings.svelte';
   import { isTorrentId } from './lib/torrent/trackers';
-  import { magnetHash, readMagnetFromHash, takeRelayFromHash } from './lib/url-hash';
+  import {
+    magnetHash,
+    readFileFromHash,
+    readMagnetFromHash,
+    takeRelayFromHash,
+  } from './lib/url-hash';
 
   const controller = new PlayerController();
   let input = $state('');
   let video = $state<HTMLVideoElement>();
-  let current: string | null = null;
+  /** What is loaded: a magnet / info hash, or the bytes of an opened .torrent file. */
+  let current: TorrentInput | null = null;
+  let draggingTorrent = $state(false);
   const valid = $derived(isTorrentId(input));
 
-  function play(torrentId: string) {
+  function play(torrentId: TorrentInput, fileIndex: number | null = null) {
     current = torrentId;
-    if (video) void controller.load(torrentId, video);
+    if (video) void controller.load(torrentId, video, fileIndex);
   }
 
   function submit(event: SubmitEvent) {
@@ -27,6 +35,49 @@
     history.pushState(null, '', magnetHash(torrentId));
     play(torrentId);
   }
+
+  /** A .torrent from the file picker or a drop. Its magnet goes into the hash once it is parsed. */
+  async function openTorrentFile(file: File) {
+    input = '';
+    history.pushState(null, '', `${location.pathname}${location.search}`);
+    play(new Uint8Array(await file.arrayBuffer()));
+  }
+
+  function onTorrentPicked(event: Event) {
+    const el = event.currentTarget as HTMLInputElement;
+    const file = el.files?.[0];
+    el.value = '';
+    if (file) void openTorrentFile(file);
+  }
+
+  const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
+
+  function onWindowDragOver(event: DragEvent) {
+    if (!carriesFiles(event)) return;
+    // Lets the drop happen here instead of the browser opening the file and leaving the page.
+    event.preventDefault();
+    draggingTorrent = true;
+  }
+
+  function onWindowDrop(event: DragEvent) {
+    draggingTorrent = false;
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    const file = event.dataTransfer?.files[0];
+    // Subtitle files are handled by the player (drop target); anything else is ignored.
+    if (file && isTorrentFile(file)) void openTorrentFile(file);
+  }
+
+  // `#magnet=…&file=…` follows what plays: the auto-picked file, a switch, an opened .torrent.
+  $effect(() => {
+    const magnet = controller.magnet;
+    const fileIndex = controller.fileIndex;
+    if (magnet === null || fileIndex === null) return;
+    const hash = magnetHash(magnet, fileIndex);
+    if (hash !== location.hash) {
+      history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
+    }
+  });
 
   /**
    * `#relay=<url>` (webtor-relay's printed Open link) saves the relay and leaves the address bar
@@ -45,7 +96,7 @@
   /** After the relay setting changed: retry a playback that is still looking for peers or failed. */
   function relayChanged() {
     if (current && (controller.phase === 'connecting' || controller.phase === 'error')) {
-      play(current);
+      play(current, controller.fileIndex);
     }
   }
 
@@ -56,9 +107,17 @@
 
   function playFromHash() {
     const torrentId = readMagnetFromHash(location.hash);
-    if (!torrentId || torrentId === current) return;
+    const fileIndex = readFileFromHash(location.hash);
+    if (!torrentId) return;
+    if (torrentId === current || torrentId === controller.magnet) {
+      // Same torrent, e.g. the user edited `&file=` or went back: switch files only.
+      if (fileIndex !== null && fileIndex !== controller.fileIndex) {
+        void controller.selectFile(fileIndex);
+      }
+      return;
+    }
     input = torrentId;
-    play(torrentId);
+    play(torrentId, fileIndex);
   }
 
   onMount(() => {
@@ -70,6 +129,14 @@
     };
   });
 </script>
+
+<svelte:window
+  ondragover={onWindowDragOver}
+  ondragleave={(e) => {
+    if (!e.relatedTarget) draggingTorrent = false;
+  }}
+  ondrop={onWindowDrop}
+/>
 
 <main>
   <header>
@@ -96,7 +163,19 @@
       bind:value={input}
     />
     <button type="submit" disabled={!valid}>Play</button>
+    <label class="open-file">
+      or open a .torrent file
+      <input
+        type="file"
+        accept=".torrent,application/x-bittorrent"
+        data-testid="torrent-file"
+        onchange={onTorrentPicked}
+      />
+    </label>
   </form>
+  {#if draggingTorrent}
+    <p class="drop-hint" aria-hidden="true">Drop a .torrent file to play it</p>
+  {/if}
   <Player {controller} bind:video />
   <RelayDialog onchange={relayChanged} />
 </main>
@@ -123,8 +202,21 @@
     flex-wrap: wrap;
     align-items: center;
   }
-  input {
+  #torrent-id {
     flex: 1 1 30rem;
     padding: 0.5rem;
+  }
+  .open-file {
+    flex-basis: 100%;
+    opacity: 0.85;
+  }
+  .open-file input {
+    margin-left: 0.5rem;
+  }
+  .drop-hint {
+    padding: 0.5rem 0.75rem;
+    border: 2px dashed currentColor;
+    border-radius: 0.25rem;
+    text-align: center;
   }
 </style>

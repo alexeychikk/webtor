@@ -81,6 +81,8 @@ export class EmbeddedSubtitleScan {
     private readonly handlers: EmbeddedScanEvents,
   ) {
     this.scanner = new ClusterScanner(source, header, (track, cues) => {
+      // A read still in flight when the file closed must not feed the next file's tracks.
+      if (this.destroyed) return;
       const shifted = cues
         .map((c) => ({ ...c, start: c.start - startTime, end: c.end - startTime }))
         .filter((c) => c.end > 0);

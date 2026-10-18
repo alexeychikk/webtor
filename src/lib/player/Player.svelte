@@ -6,6 +6,8 @@
   import type { PlayerController, Phase } from './controller.svelte';
   import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
+  import FileList from '../torrent/FileList.svelte';
+  import { isTorrentFile } from '../torrent/files';
 
   let {
     controller,
@@ -58,7 +60,8 @@
   function drop(event: DragEvent) {
     dragging = false;
     const file = event.dataTransfer?.files[0];
-    if (!file || controller.phase === 'error') return;
+    // A .torrent bubbles up to the page, which opens it.
+    if (!file || controller.phase === 'error' || isTorrentFile(file)) return;
     event.preventDefault();
     void controller.subtitles.addFile(file);
   }
@@ -72,7 +75,7 @@
   ondragover={dragOver}
   ondragleave={() => (dragging = false)}
   ondrop={drop}
-  aria-label="Player (drop a subtitle file here)"
+  aria-label="Player (drop a subtitle or .torrent file here)"
 >
   <!-- svelte-ignore a11y_media_has_caption (cues are added as text tracks at runtime) -->
   <video
@@ -143,6 +146,12 @@
       {/if}
     </p>
   {/each}
+
+  <FileList
+    files={controller.files}
+    selected={controller.fileIndex}
+    onselect={(index) => void controller.selectFile(index)}
+  />
 
   {#if controller.phase !== 'error'}
     <SubtitleMenu subtitles={controller.subtitles} />
