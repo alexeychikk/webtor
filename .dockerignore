@@ -1,0 +1,10 @@
+# Build context of relay/Dockerfile (docker build -f relay/Dockerfile .)
+.git
+node_modules
+dist
+e2e
+playwright-report
+test-results
+relay/dist
+relay/webtor-relay
+relay/tcp-seeder
