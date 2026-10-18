@@ -19,8 +19,10 @@
 #   RELAY_REPO             GitHub repo whose latest release is installed (default alexeychikk/webtor)
 #   RELAY_WAIT_SECONDS     how long to wait for https://<host>/ to answer (default 900)
 # --dry-run needs none of them: it prints the OCI calls it would make (with stand-in responses, as if
-# nothing existed yet; DRY_RUN_NO_A1=1 simulates "Out of host capacity" for the A1 shape) and the
-# rendered cloud-init. The token is never printed: output shows <RELAY_TOKEN> instead.
+# nothing existed yet) and the rendered cloud-init. The token is never printed: output shows
+# <RELAY_TOKEN> instead. Dry-run knobs: DRY_RUN_NO_A1=1 simulates "Out of host capacity" for the A1
+# shape, DRY_RUN_NOT_HOME=1 a region that isn't the home region, DRY_RUN_USED_GB=<n> an existing
+# boot volume of n GB.
 set -euo pipefail
 # Plain bash 3.2 (macOS) works: no empty-array expansions under set -u, no GNU-only tools.
 cd "$(dirname "$0")/.."
@@ -34,11 +36,15 @@ A1_SHAPE=VM.Standard.A1.Flex
 A1_OCPUS=1
 A1_MEMORY_GB=6
 MICRO_SHAPE=VM.Standard.E2.1.Micro
+# 50 GB is the smallest boot volume size the API takes (the Console's 46.6/47 GB default is the
+# image's own size); a fixed size keeps the storage check below exact.
 BOOT_VOLUME_GB=50
-# Always Free allowances (per tenancy, home region): A1 4 OCPUs + 24 GB in total, two E2.1.Micro.
+# Always Free allowances (per tenancy, home region only): A1 4 OCPUs + 24 GB in total, two
+# E2.1.Micro, 200 GB of boot and block volumes together.
 FREE_A1_OCPUS=4
 FREE_A1_MEMORY_GB=24
 FREE_MICRO_COUNT=2
+FREE_STORAGE_GB=200
 
 action=deploy
 dry_run=0
@@ -228,9 +234,24 @@ fake_oci() {
     fi
     echo "{\"data\":{\"id\":\"$id\",\"lifecycle-state\":\"PROVISIONING\"}}"
     ;;
+  "iam region-subscription list")
+    local home=$OCI_REGION
+    if [[ ${DRY_RUN_NOT_HOME:-} == 1 ]]; then
+      home=us-ashburn-1
+    fi
+    jq -n --arg r "$OCI_REGION" --arg h "$home" \
+      '{data: ([$h, $r] | unique | map({"region-name": ., "is-home-region": (. == $h)}))}'
+    ;;
   "compute instance get") echo '{"data":{"lifecycle-state":"RUNNING"}}' ;;
   "compute instance list-vnics") echo '{"data":[{"public-ip":"203.0.113.10"}]}' ;;
-  "search resource structured-search") echo '{"data":{"items":[]}}' ;;
+  "bv boot-volume get") echo "{\"data\":{\"size-in-gbs\":${DRY_RUN_USED_GB:-0}}}" ;;
+  "search resource structured-search")
+    if [[ -n ${DRY_RUN_USED_GB:-} && " $* " == *" query bootvolume, volume "* ]]; then
+      echo '{"data":{"items":[{"identifier":"ocid1.bootvolume.oc1.dryrun","resource-type":"BootVolume"}]}}'
+    else
+      echo '{"data":{"items":[]}}'
+    fi
+    ;;
   *" list")
     # Deploy: nothing exists yet. Destroy: one of each, so the delete calls show.
     if [[ $action == destroy ]]; then
@@ -383,7 +404,8 @@ fits_free_tier() {
     die "can't list the tenancy's instances to check the Always Free allowance (the user needs permission to inspect instances)"
   for id in $ids; do
     info=$(oci_ compute instance get --instance-id "$id" |
-      jq -r '[.data.shape, (.data["shape-config"].ocpus // 0), (.data["shape-config"]["memory-in-gbs"] // 0)] | @tsv')
+      jq -r '[.data.shape, (.data["shape-config"].ocpus // 0), (.data["shape-config"]["memory-in-gbs"] // 0)] | @tsv') ||
+      die "can't read instance $id to check the Always Free allowance"
     case $info in
     "$A1_SHAPE"*)
       a1_ocpus=$(awk -v a="$a1_ocpus" -v b="$(cut -f2 <<<"$info")" 'BEGIN { print a + b }')
@@ -407,6 +429,29 @@ fits_free_tier() {
   return 1
 }
 
+# Always Free covers 200 GB of boot and block volumes in total, across the tenancy (detached and
+# preserved boot volumes included). Dies when one more boot volume would go over it.
+check_free_storage() {
+  local items id type size used=0
+  items=$(oci_ search resource structured-search \
+    --query-text "query bootvolume, volume resources where lifecycleState != 'TERMINATED' && lifecycleState != 'TERMINATING'" |
+    jq -r '.data.items[]? | "\(.identifier) \(.["resource-type"])"') ||
+    die "can't list the tenancy's volumes to check the Always Free storage (the user needs permission to inspect volumes)"
+  while read -r id type; do
+    [[ -n $id ]] || continue
+    case $type in
+    BootVolume) size=$(oci_ bv boot-volume get --boot-volume-id "$id" | jq -r '.data["size-in-gbs"] // empty') ;;
+    *) size=$(oci_ bv volume get --volume-id "$id" | jq -r '.data["size-in-gbs"] // empty') ;;
+    esac || die "can't read volume $id to check the Always Free storage"
+    [[ $size =~ ^[0-9]+$ ]] || die "volume $id has no size (got '$size')"
+    used=$((used + size))
+  done <<<"$items"
+  if ((used + BOOT_VOLUME_GB > FREE_STORAGE_GB)); then
+    die "the tenancy's boot and block volumes already take $used of the $FREE_STORAGE_GB GB Always Free storage; the relay's $BOOT_VOLUME_GB GB boot volume would be billed. Free up space (delete unused volumes) first."
+  fi
+  log "Storage: $used GB used, $BOOT_VOLUME_GB GB more stays within the $FREE_STORAGE_GB GB Always Free allowance."
+}
+
 launch_instance() {
   local user_data=$1 config_tag=$2 tags shape image image_name ad out err ads ssh_args=()
   tags=$(jq -c --arg c "$config_tag" '. + {"config": $c}' <<<"$TAGS")
@@ -416,6 +461,7 @@ launch_instance() {
   fi
   ads=$(oci_ iam availability-domain list --compartment-id "$OCI_TENANCY_OCID" | jq -r '.data[].name')
   [[ -n $ads ]] || die "no availability domains in $OCI_REGION"
+  check_free_storage
 
   for shape in "$A1_SHAPE" "$MICRO_SHAPE"; do
     local shape_args=()
@@ -549,6 +595,19 @@ wait_relay() {
 
 # --- actions ------------------------------------------------------------------------------------
 
+# Always Free resources exist only in the tenancy's home region: anywhere else the VM would be billed.
+check_home_region() {
+  local regions home
+  regions=$(oci_ iam region-subscription list --tenancy-id "$OCI_TENANCY_OCID") ||
+    die "can't read the tenancy's region subscriptions to check the home region"
+  home=$(jq -r '.data[]? | select(.["is-home-region"] == true) | .["region-name"]' <<<"$regions")
+  [[ -n $home ]] || die "can't tell the tenancy's home region"
+  if [[ $home != "$OCI_REGION" ]]; then
+    die "OCI_REGION is $OCI_REGION, but the tenancy's home region is $home. Always Free resources exist only in the home region: set OCI_REGION=$home."
+  fi
+  log "Region: $OCI_REGION (home region)"
+}
+
 deploy() {
   render_cloud_init >"$WORK/user-data"
   if ((dry_run)); then
@@ -560,6 +619,7 @@ deploy() {
   # Fingerprint of everything that only applies at launch, to tell when a re-run can't apply it.
   config_tag=$({ cat "$WORK/user-data"; printf '%s\n' "$OCI_SSH_PUBLIC_KEY"; } | sha256 | cut -c1-16)
 
+  check_home_region
   ensure_network
   ids=$(find_instances)
   INSTANCE_ID=$(first_line <<<"$ids")

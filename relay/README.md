@@ -105,9 +105,11 @@ systemd service on `127.0.0.1:7881`, and Caddy gets a Let's Encrypt certificate 
   the VM is created (or `destroy` first). The run prints the VM's IP: point the name's DNS A record
   at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it.
 - **Remove:** run the workflow with `destroy`; it deletes everything it created.
-- **Cost:** it creates only Always Free resources, and checks the tenancy's other instances first so
-  that a Pay As You Go account stays within the allowance (A1: 4 OCPUs and 24 GB in total; two
-  E2.1.Micro). Block storage is free up to 200 GB in total; the VM's boot volume takes 50 GB.
+- **Cost:** it creates only Always Free resources, so that a Pay As You Go account stays within the
+  allowance. Before launching it checks that `OCI_REGION` is the home region (Always Free exists only
+  there), that the tenancy's other instances leave room (A1: 4 OCPUs and 24 GB in total; two
+  E2.1.Micro), and that its boot and block volumes leave room for the VM's 50 GB boot volume (200 GB
+  in total). It stops with a message otherwise.
 - Oracle's terms apply to what you download through it, and swarm peers see the VM's IP address.
 
 ### Any server with Docker
