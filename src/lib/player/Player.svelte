@@ -3,6 +3,14 @@
   import { channelsLabel, codecLabel } from './codecs';
   import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
   import { formatPercent, formatSpeed } from './format';
+  import {
+    detectDisplayCapabilities,
+    enterFullscreen,
+    enterVideoFullscreen,
+    exitFullscreen,
+    fullscreenElement,
+    fullscreenMethod,
+  } from './fullscreen';
   import type { PlayerController, Phase } from './controller.svelte';
   import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
@@ -49,6 +57,30 @@
   const busy = $derived(['connecting', 'metadata', 'buffering'].includes(controller.phase));
   let dragging = $state(false);
 
+  // Our button fullscreens the container, so the ASS overlay canvas stays over the picture
+  // (docs/decisions/0004). The native one would fullscreen the bare video: hidden where ours works.
+  const fsMethod = fullscreenMethod(detectDisplayCapabilities());
+  let screen = $state<HTMLDivElement>();
+  let fullscreen = $state(false);
+
+  $effect(() => {
+    const update = () => (fullscreen = !!screen && fullscreenElement() === screen);
+    const events = ['fullscreenchange', 'webkitfullscreenchange'];
+    for (const type of events) document.addEventListener(type, update);
+    return () => {
+      for (const type of events) document.removeEventListener(type, update);
+    };
+  });
+
+  function toggleFullscreen() {
+    if (fsMethod === 'video') {
+      if (video) enterVideoFullscreen(video);
+      return;
+    }
+    const done = fullscreen ? exitFullscreen() : screen ? enterFullscreen(screen) : undefined;
+    done?.catch((err: unknown) => console.warn('fullscreen:', err));
+  }
+
   const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
 
   function dragOver(event: DragEvent) {
@@ -77,15 +109,29 @@
   ondrop={drop}
   aria-label="Player (drop a subtitle or .torrent file here)"
 >
-  <!-- svelte-ignore a11y_media_has_caption (cues are added as text tracks at runtime) -->
-  <video
-    bind:this={video}
-    data-testid="video"
-    data-audio-codec={controller.audioCodec ?? ''}
-    data-audio-track={controller.audioTrackId ?? ''}
-    controls
-    playsinline
-  ></video>
+  <div class="screen" class:fullscreen bind:this={screen} data-testid="screen">
+    {#if fsMethod !== 'none'}
+      <button
+        type="button"
+        class="fullscreen-button"
+        data-testid="fullscreen"
+        aria-pressed={fullscreen}
+        title={fullscreen ? 'Exit fullscreen' : 'Fullscreen (keeps styled subtitles)'}
+        onclick={toggleFullscreen}>{fullscreen ? 'Exit fullscreen' : 'Fullscreen'}</button
+      >
+    {/if}
+    <!-- The ASS overlay canvas is inserted right after the video (subtitles/ass-overlay.ts). -->
+    <!-- svelte-ignore a11y_media_has_caption (cues are added as text tracks at runtime) -->
+    <video
+      bind:this={video}
+      data-testid="video"
+      data-audio-codec={controller.audioCodec ?? ''}
+      data-audio-track={controller.audioTrackId ?? ''}
+      controls
+      controlslist={fsMethod === 'container' ? 'nofullscreen' : undefined}
+      playsinline
+    ></video>
+  </div>
 
   {#if controller.audioTracks.length > 0}
     <p class="tracks">
@@ -162,10 +208,47 @@
   .player {
     margin-top: 1rem;
   }
+  .screen {
+    position: relative;
+  }
   video {
+    display: block;
     width: 100%;
     max-height: 70vh;
     background: #000;
+  }
+  .screen.fullscreen {
+    display: flex;
+    align-items: center;
+    background: #000;
+  }
+  .screen.fullscreen video {
+    height: 100%;
+    max-height: none;
+  }
+  .screen :global(.ass-overlay) {
+    position: absolute;
+    pointer-events: none;
+  }
+  .fullscreen-button {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    z-index: 1;
+    padding: 0.25rem 0.5rem;
+    border: 0;
+    border-radius: 0.25rem;
+    background: rgb(0 0 0 / 0.55);
+    color: #fff;
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+  }
+  .fullscreen-button:hover,
+  .fullscreen-button:focus-visible {
+    opacity: 1;
   }
   .tracks {
     display: flex;
@@ -175,7 +258,7 @@
   .tracks select {
     max-width: 100%;
   }
-  .dragging video {
+  .dragging .screen {
     outline: 3px dashed currentColor;
     outline-offset: -3px;
   }
