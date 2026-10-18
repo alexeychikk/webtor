@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bufferedAhead, evictionRange, isBuffered, toRanges } from './buffer';
+import { bufferedAhead, evictionRange, gapJumpTarget, isBuffered, toRanges } from './buffer';
 
 describe('bufferedAhead', () => {
   it('measures the contiguous range containing t', () => {
@@ -41,5 +41,26 @@ describe('evictionRange', () => {
     expect(evictionRange(toRanges([[0, 100]]), 50)).toEqual([0, 20]);
     expect(evictionRange(toRanges([[0, 100]]), 20)).toBeNull();
     expect(evictionRange(toRanges([]), 100)).toBeNull();
+  });
+});
+
+describe('gapJumpTarget', () => {
+  it('skips a small hole in front of the playhead', () => {
+    expect(gapJumpTarget(toRanges([[0.1, 10]]), 0)).toBe(0.1);
+    expect(
+      gapJumpTarget(
+        toRanges([
+          [0, 4],
+          [4.6, 9],
+        ]),
+        4.05,
+      ),
+    ).toBe(4.6);
+  });
+  it('leaves buffered positions and large holes alone', () => {
+    expect(gapJumpTarget(toRanges([[0, 10]]), 3)).toBeNull();
+    expect(gapJumpTarget(toRanges([[5, 10]]), 0)).toBeNull();
+    expect(gapJumpTarget(toRanges([]), 0)).toBeNull();
+    expect(gapJumpTarget(toRanges([[0, 4]]), 6)).toBeNull();
   });
 });

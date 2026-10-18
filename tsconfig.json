@@ -15,5 +15,6 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte", "e2e/**/*.ts", "*.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte", "e2e/**/*.ts", "*.config.ts"],
+  "exclude": ["e2e/fixtures"]
 }

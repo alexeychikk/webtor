@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regenerates e2e/fixtures/sample.mkv: 12 s 640x360 H.264, two audio tracks (eng AAC 440 Hz,
 # rus AC-3 880 Hz — the second one forces the in-browser transcode path), embedded SRT (eng) and
-# ASS (rus) subtitles. Plus a sidecar SRT. Needs an ffmpeg with libx264 + ac3 on PATH, or:
+# ASS (rus) subtitles. Plus a sidecar SRT, and offset.ts: 10 s H.264 + AAC MPEG-TS whose first
+# timestamp is ~1.4 s (the muxer default), for the non-zero start time path. Needs an ffmpeg with libx264 + ac3 on PATH, or:
 #   FFMPEG=$(node -e "console.log(require('ffmpeg-static'))") after `npm i --no-save ffmpeg-static`
 set -euo pipefail
 FFMPEG=${FFMPEG:-ffmpeg}
@@ -49,4 +50,11 @@ ASS
   -metadata:s:s:0 language=eng -metadata:s:s:1 language=rus \
   -disposition:a:0 default \
   sample.mkv
-ls -l sample.mkv sidecar.en.srt
+
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i testsrc2=size=320x180:rate=24:duration=10 \
+  -f lavfi -i sine=frequency=440:duration=10 \
+  -c:v libx264 -preset veryfast -g 24 -pix_fmt yuv420p -b:v 150k \
+  -c:a aac -b:a 48k \
+  offset.ts
+ls -l sample.mkv sidecar.en.srt offset.ts

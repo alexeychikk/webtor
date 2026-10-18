@@ -77,5 +77,9 @@ docs/decisions/                ADRs
   `data-code` = the `PlaybackErrorCode`).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
+- `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
+  every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
+  k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
+  playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
 - Web seeds need CORS that allows the `Range` and `Cache-Control` request headers (WebTorrent sends
   both).

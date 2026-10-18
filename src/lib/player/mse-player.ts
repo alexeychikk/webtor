@@ -4,9 +4,17 @@
  * (`codecs.ts`, `buffer.ts`); this file only wires them to the DOM.
  */
 import type { Conversion, Input, InputVideoTrack } from 'mediabunny';
-import { BUFFER_AHEAD_S, bufferedAhead, evictionRange, isBuffered } from './buffer';
+import { BUFFER_AHEAD_S, bufferedAhead, evictionRange, gapJumpTarget, isBuffered } from './buffer';
 import { audioMime, audioPlayback, decideVideo, pickAudioTrack } from './codecs';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
+import {
+  appendOffset,
+  elementDuration,
+  restartPoint,
+  timeline,
+  toSourceTime,
+  type Timeline,
+} from './timeline';
 import type { AudioTrackInfo, ByteSource } from './types';
 
 type Mediabunny = typeof import('mediabunny');
@@ -72,7 +80,8 @@ export class MsePlayer {
     private readonly mediaSource: MediaSource,
     private readonly objectUrl: string,
     private readonly videoTrack: InputVideoTrack,
-    private readonly startTime: number,
+    private readonly timeline: Timeline,
+    /** Element-timeline duration (starts at 0), NaN if unknown. */
     readonly duration: number,
     audioTracks: AudioTrackInfo[],
     notices: PlaybackErrorCode[],
@@ -145,10 +154,13 @@ export class MsePlayer {
       const notices: PlaybackErrorCode[] = [];
       if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
 
-      const startTime = Math.max(0, await videoTrack.getFirstTimestamp());
-      const duration =
+      // The element timeline starts at 0 even when the file's first frame does not.
+      const tl = timeline(await videoTrack.getFirstTimestamp());
+      const duration = elementDuration(
+        tl,
         (await input.getDurationFromMetadata().catch(() => null)) ??
-        (await input.computeDuration());
+          (await input.computeDuration()),
+      );
 
       const mediaSource = new MS();
       if (managed) video.disableRemotePlayback = true;
@@ -158,7 +170,7 @@ export class MsePlayer {
       );
       video.src = objectUrl;
       await opened;
-      if (Number.isFinite(duration) && duration > 0) mediaSource.duration = duration;
+      if (Number.isFinite(duration)) mediaSource.duration = duration;
 
       const player = new MsePlayer(
         mb,
@@ -167,7 +179,7 @@ export class MsePlayer {
         mediaSource,
         objectUrl,
         videoTrack,
-        startTime,
+        tl,
         duration,
         audioTracks,
         notices,
@@ -183,7 +195,7 @@ export class MsePlayer {
           throw new PlaybackError('unsupported-video-codec', String(err));
         }
         player.listen();
-        for (const p of player.pipelines) await player.startPipeline(p, startTime, p.gen);
+        for (const p of player.pipelines) await player.startPipeline(p, tl.startTime, p.gen);
         return player;
       } catch (err) {
         player.destroy();
@@ -222,6 +234,7 @@ export class MsePlayer {
   private listen() {
     const { signal } = this.abort;
     this.video.addEventListener('seeking', () => this.onSeeking(), { signal });
+    this.video.addEventListener('waiting', () => this.jumpGap(), { signal });
     this.video.addEventListener(
       'error',
       () => {
@@ -240,6 +253,13 @@ export class MsePlayer {
     );
   }
 
+  /** Moves a playhead stuck just before buffered media (see `gapJumpTarget`). */
+  private jumpGap() {
+    if (this.destroyed || this.video.seeking) return;
+    const target = gapJumpTarget(this.video.buffered, this.video.currentTime);
+    if (target !== null) this.video.currentTime = target;
+  }
+
   /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
   private onSeeking() {
     const t = this.video.currentTime;
@@ -251,6 +271,7 @@ export class MsePlayer {
     );
   }
 
+  /** `t` is element time; the keyframe lookup and trim work in source time. */
   private async restartAt(t: number) {
     const gen = ++this.seekGen;
     // Stop the old pipelines first so their reads stop competing with the keyframe lookup.
@@ -262,11 +283,14 @@ export class MsePlayer {
       return { p, g, cancel: c?.cancel().catch(() => {}) };
     });
     try {
-      const key = await new this.mb.EncodedPacketSink(this.videoTrack).getKeyPacket(t, {
-        verifyKeyPackets: true,
-      });
+      const key = await new this.mb.EncodedPacketSink(this.videoTrack).getKeyPacket(
+        toSourceTime(this.timeline, t),
+        {
+          verifyKeyPackets: true,
+        },
+      );
       if (gen !== this.seekGen || this.destroyed) return;
-      const k = Math.max(this.startTime, key?.timestamp ?? this.startTime);
+      const k = restartPoint(this.timeline, key?.timestamp);
       await Promise.all(
         stopped.map(async ({ p, g, cancel }) => {
           await cancel;
@@ -290,6 +314,7 @@ export class MsePlayer {
     if (this.mediaSource.readyState === 'open') p.sb.abort();
   }
 
+  /** Starts `p` at source time `k` (a keyframe, or the first frame). */
   private async startPipeline(p: Pipeline, k: number, gen: number) {
     const { mb } = this;
     const output = new mb.Output({
@@ -319,8 +344,8 @@ export class MsePlayer {
       );
     }
     p.conversion = conversion;
-    // Conversion output starts at 0 for trim.start = k; map it back to media time.
-    p.sb.timestampOffset = k;
+    // Conversion output starts at 0 for trim.start = k; place it on the 0-based element timeline.
+    p.sb.timestampOffset = appendOffset(this.timeline, k);
     conversion.execute().then(
       () => {
         if (gen !== p.gen) return;
@@ -355,6 +380,7 @@ export class MsePlayer {
       try {
         p.sb.appendBuffer(data as Uint8Array<ArrayBuffer>);
         await settled(p.sb);
+        this.jumpGap();
         return;
       } catch (err) {
         if (!(err instanceof DOMException && err.name === 'QuotaExceededError') || attempt > 5) {

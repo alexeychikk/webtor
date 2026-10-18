@@ -129,6 +129,8 @@ export class PlayerController {
 
   private fail(err: PlaybackError) {
     if (this.phase === 'error') return;
+    // Invalidate this run, so pending awaits in `load()` (e.g. `MsePlayer.open`) bail out.
+    this.run++;
     console.warn(err);
     this.error = err;
     this.phase = 'error';

@@ -49,3 +49,20 @@ export function toRanges(pairs: readonly (readonly [number, number])[]): Ranges 
     end: (i) => pairs[i]![1],
   };
 }
+
+/** Largest hole in front of a stuck playhead that we skip over instead of waiting forever. */
+export const MAX_GAP_JUMP_S = 1;
+
+/**
+ * Where to move a playhead that sits in a small unbuffered gap (e.g. audio starting a few frames
+ * after video, or a hole between fragments), or null if `t` is buffered or the next range is far.
+ */
+export function gapJumpTarget(ranges: Ranges, t: number, maxGap = MAX_GAP_JUMP_S): number | null {
+  // Strict containment: the browser stalls in a hole however small (unlike `isBuffered`).
+  for (let i = 0; i < ranges.length; i++) {
+    const s = ranges.start(i);
+    if (s <= t && t < ranges.end(i)) return null;
+    if (s > t) return s - t <= maxGap ? s : null;
+  }
+  return null;
+}

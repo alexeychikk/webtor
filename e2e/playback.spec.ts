@@ -52,6 +52,31 @@ test('back-pressure and a seek into unbuffered media restart at a keyframe', asy
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
 
+test('a file whose first frame is not at 0 (MPEG-TS, ~1.4 s) plays from 0 and seeks', async ({
+  page,
+}) => {
+  // Small window: back-pressure must engage, which it can't if the buffer starts past currentTime.
+  await page.addInitScript(() => localStorage.setItem('webtor:buffer-ahead-s', '3'));
+  const magnet = await fixtureMagnet('offset.ts');
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
+  await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
+  const media = () =>
+    page.getByTestId('video').evaluate((v: HTMLVideoElement) => ({
+      start: v.buffered.length ? v.buffered.start(0) : NaN,
+      end: v.buffered.length ? v.buffered.end(v.buffered.length - 1) : NaN,
+      duration: v.duration,
+    }));
+  const first = await media();
+  expect(first.start).toBeLessThan(0.5);
+  expect(first.end).toBeLessThan(7);
+  expect(first.duration).toBeGreaterThan(9);
+  expect(first.duration).toBeLessThan(10.5);
+
+  await page.getByTestId('video').evaluate((v: HTMLVideoElement) => (v.currentTime = 7));
+  await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(8);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});
+
 test('autoplays a #magnet= link on page load', async ({ page }) => {
   const magnet = await fixtureMagnet('sample.mkv');
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
