@@ -97,3 +97,16 @@ test('a torrent nobody seeds shows the no-peers message', async ({ page }) => {
   // Not a dead end: it keeps searching.
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'connecting');
 });
+
+test('a web seed that keeps failing shows the stalled message', async ({ page }) => {
+  // WebTorrent retries a failing web seed every ~10 s; each retry blips the speed estimate above
+  // 0 without delivering bytes, which must not reset the stall timer.
+  await page.route(/127\.0\.0\.1:9000\/sample\.mkv$/, (route) => route.fulfill({ status: 503 }));
+  const magnet = await fixtureMagnet('sample.mkv');
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
+  await expect(page.getByTestId('status')).toContainText('sample.mkv');
+  await expect(page.locator('[data-testid="notice"][data-code="stalled"]')).toBeVisible({
+    timeout: 40_000,
+  });
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});

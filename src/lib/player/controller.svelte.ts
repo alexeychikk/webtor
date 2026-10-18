@@ -10,7 +10,7 @@ import { isTorrentId } from '../torrent/trackers';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
 import type { TorrentStats } from './types';
-import { watchdogNotice } from './watchdog';
+import { nextStarvedFor, watchdogNotice } from './watchdog';
 
 /**
  * - `connecting`: looking for peers / metadata
@@ -41,6 +41,7 @@ export class PlayerController {
   private videoEvents: AbortController | null = null;
   private startedAt = 0;
   private starvedFor = 0;
+  private lastDownloaded = 0;
 
   /** Starts playing `input` (magnet or info hash) in `video`, replacing the current playback. */
   async load(input: string, video: HTMLVideoElement): Promise<void> {
@@ -69,6 +70,7 @@ export class PlayerController {
     this.torrent = torrent;
     this.startedAt = performance.now();
     this.starvedFor = 0;
+    this.lastDownloaded = torrent.downloaded;
     torrent.on('error', (err) => {
       if (run === this.run) this.fail(new PlaybackError('torrent-failed', String(err)));
     });
@@ -169,7 +171,13 @@ export class PlayerController {
       progress: t.progress,
     };
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';
-    this.starvedFor = waitingForData && t.downloadSpeed === 0 ? this.starvedFor + TICK_MS : 0;
+    this.starvedFor = nextStarvedFor(this.starvedFor, {
+      waiting: waitingForData,
+      downloaded: t.downloaded,
+      lastDownloaded: this.lastDownloaded,
+      dt: TICK_MS,
+    });
+    this.lastDownloaded = t.downloaded;
     const notice = watchdogNotice({
       elapsed: performance.now() - this.startedAt,
       hasMetadata: Boolean(t.files?.length),

@@ -48,6 +48,8 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     readonly numPeers: number;
     readonly downloadSpeed: number;
     readonly uploadSpeed: number;
+    /** Payload bytes received so far (all pieces, finished or not). */
+    readonly downloaded: number;
     readonly progress: number;
     readonly pieceLength: number;
     /** Lowest priority selection; `deselect(0, pieces.length - 1)` stops the default "download everything". */
