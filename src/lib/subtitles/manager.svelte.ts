@@ -238,8 +238,10 @@ export class SubtitleManager {
 }
 
 function clearTrack(track: TextTrack) {
-  track.mode = 'disabled';
+  // A disabled track's `cues` is null, so the cues go while it is still hidden.
+  track.mode = 'hidden';
   for (const cue of [...(track.cues ?? [])]) track.removeCue(cue);
+  track.mode = 'disabled';
 }
 
 function toVttCue(cue: SubtitleCue): VTTCue {
