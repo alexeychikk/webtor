@@ -16,9 +16,10 @@ import { fetchRelayMetainfo, fetchRelayStats } from '../torrent/relay-client';
 import { relaySettings } from '../torrent/relay-settings.svelte';
 import { SubtitleManager } from '../subtitles/manager.svelte';
 import { isTorrentId } from '../torrent/trackers';
+import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
-import type { TorrentStats } from './types';
+import type { AudioTrackInfo, TorrentStats } from './types';
 import { nextStarvedFor, watchdogNotice } from './watchdog';
 
 /**
@@ -43,6 +44,11 @@ export class PlayerController {
   notices = $state<PlaybackErrorCode[]>([]);
   error = $state<PlaybackError | null>(null);
   fileName = $state<string | null>(null);
+  audioTracks = $state<readonly AudioTrackInfo[]>([]);
+  /** Selected audio track (`AudioTrackInfo.id`); `null` when the video plays muted. */
+  audioTrackId = $state<number | null>(null);
+  /** Codec the audio SourceBuffer gets (`aac`, `opus`, …): differs from the track's when transcoded. */
+  audioCodec = $state<string | null>(null);
   /** Subtitle selector state; sources are reset with every `load()`. */
   readonly subtitles = new SubtitleManager();
   /** This playback goes through the user's relay (docs/decisions/0006). */
@@ -71,6 +77,9 @@ export class PlayerController {
     this.error = null;
     this.notices = [];
     this.fileName = null;
+    this.audioTracks = [];
+    this.audioTrackId = null;
+    this.audioCodec = null;
     this.stats = NO_STATS;
     const relayBase = relaySettings.base;
     this.viaRelay = relayBase !== null;
@@ -138,12 +147,37 @@ export class PlayerController {
     if (run !== this.run) return player.destroy();
     this.player = player;
     this.notices = [...this.notices, ...player.notices];
+    this.audioTracks = player.audioTracks;
+    this.audioTrackId = player.audioTrackId;
+    this.audioCodec = player.audioCodec;
     this.phase = 'buffering';
     this.watchVideo(video);
     video.play().catch((err: unknown) => {
       // Autoplay blocked (no user gesture, e.g. #magnet= on page load): wait for the play button.
       if (run === this.run && (err as Error)?.name === 'NotAllowedError') this.updatePhase();
     });
+  }
+
+  /** Switches the audio track (video keeps playing) and remembers its language for next time. */
+  async selectAudioTrack(id: number): Promise<void> {
+    const player = this.player;
+    const track = this.audioTracks.find((t) => t.id === id);
+    if (!player || !track || id === this.audioTrackId) return;
+    this.audioTrackId = id;
+    const others = () => this.notices.filter((n) => n !== 'audio-convert-failed');
+    try {
+      await player.selectAudioTrack(id);
+      if (player !== this.player) return;
+      rememberAudioLanguage(track.language);
+      this.notices = others();
+    } catch (err) {
+      if (player !== this.player) return;
+      console.warn(err);
+      this.notices = [...others(), 'audio-convert-failed'];
+    }
+    // A newer switch may have superseded this one; show what the player actually plays.
+    this.audioTrackId = player.audioTrackId;
+    this.audioCodec = player.audioCodec;
   }
 
   /**

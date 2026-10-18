@@ -1,8 +1,10 @@
 <script lang="ts">
   import { relaySettings } from '../torrent/relay-settings.svelte';
+  import { channelsLabel, codecLabel } from './codecs';
   import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
   import { formatPercent, formatSpeed } from './format';
   import type { PlayerController, Phase } from './controller.svelte';
+  import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
 
   let {
@@ -19,6 +21,22 @@
     paused: 'Paused',
     error: 'Stopped',
   };
+
+  /** e.g. `Russian AC3 · rus · AC-3 5.1 → Opus`, or `… — unavailable: codec not supported`. */
+  function audioOptionText(t: AudioTrackInfo): string {
+    const parts = [t.label];
+    if (t.language !== 'und' && t.language !== t.label) parts.push(t.language);
+    parts.push([codecLabel(t.codec), channelsLabel(t.channels)].filter(Boolean).join(' '));
+    let text = parts.join(' · ');
+    if (t.playback === 'transcode') text += ` → ${codecLabel(t.outputCodec)}`;
+    if (t.playback === 'unsupported') text += ` — unavailable: ${t.reason ?? 'not supported'}`;
+    return text;
+  }
+
+  function onAudioChange(event: Event) {
+    const id = Number((event.currentTarget as HTMLSelectElement).value);
+    void controller.selectAudioTrack(id);
+  }
 
   const isRelayError = (code: PlaybackErrorCode) => code.startsWith('relay-');
   const phaseText = $derived(
@@ -57,7 +75,38 @@
   aria-label="Player (drop a subtitle file here)"
 >
   <!-- svelte-ignore a11y_media_has_caption (cues are added as text tracks at runtime) -->
-  <video bind:this={video} data-testid="video" controls playsinline></video>
+  <video
+    bind:this={video}
+    data-testid="video"
+    data-audio-codec={controller.audioCodec ?? ''}
+    data-audio-track={controller.audioTrackId ?? ''}
+    controls
+    playsinline
+  ></video>
+
+  {#if controller.audioTracks.length > 0}
+    <p class="tracks">
+      <label for="audio-track">Audio</label>
+      <select
+        id="audio-track"
+        data-testid="audio-track"
+        value={controller.audioTrackId ?? ''}
+        onchange={onAudioChange}
+        disabled={controller.audioTrackId === null}
+      >
+        {#if controller.audioTrackId === null}<option value="">Muted</option>{/if}
+        {#each controller.audioTracks as t (t.id)}
+          <option
+            value={t.id}
+            disabled={t.playback === 'unsupported'}
+            title={t.playback === 'transcode'
+              ? `Converted in the browser to ${codecLabel(t.outputCodec)}`
+              : t.reason}>{audioOptionText(t)}</option
+          >
+        {/each}
+      </select>
+    </p>
+  {/if}
 
   <p class="status" data-testid="status" data-phase={controller.phase} aria-live="polite">
     {#if busy}<span class="spinner" aria-hidden="true"></span>{/if}
@@ -108,6 +157,14 @@
     width: 100%;
     max-height: 70vh;
     background: #000;
+  }
+  .tracks {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .tracks select {
+    max-width: 100%;
   }
   .dragging video {
     outline: 3px dashed currentColor;

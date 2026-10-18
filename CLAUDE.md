@@ -64,7 +64,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   errors.ts                    PlaybackError codes + user-facing copy
   mse-player.ts                Input → per-SourceBuffer Conversion → MSE; back-pressure, seek restart
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
-  codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy, buffer math, no-peers/stalled)
+  codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
+  codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
 src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
   manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick
   srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ASS/SSA as plain text until JASSUB)
@@ -99,8 +100,10 @@ docs/decisions/                ADRs
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
 - UI test hooks: `data-testid` `video`, `status` (with `data-phase`), `error` and `notice` (with
-  `data-code` = the `PlaybackErrorCode`), `subtitles` (the `<select>`; values `sidecar:<file index>`,
-  `upload:<n>`, `""` = Off) and `subtitle-upload` (file input). Check shown cues through
+  `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
+  `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off) and `subtitle-upload` (file
+  input). The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
+  when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Check shown cues through
   `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
 - New subtitle sources (embedded MKV, JASSUB) plug into `SubtitleManager`: list a
   `SubtitleTrackInfo` (key `<kind>:<id>`) with a loader for its cues; the selector groups by `kind`.
