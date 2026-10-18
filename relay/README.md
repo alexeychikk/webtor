@@ -56,6 +56,62 @@ Peers find you faster when port `42069` (TCP and UDP, `-peer-port`) is reachable
 
 ## Run on a server
 
+### Oracle Cloud in one click
+
+`scripts/deploy-relay-oci.sh` puts the relay on an
+[Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) VM with HTTPS, using only Oracle's API
+(no SSH). The repository's **Deploy relay to Oracle Cloud** workflow runs it with your repository
+secrets.
+
+1. **API key.** In the OCI Console: Profile (top right) → **My profile** → **API keys** → **Add API
+   key** → **Generate API key pair** → **Download private key** → **Add**. The configuration snippet
+   it shows has `user`, `fingerprint`, `tenancy` and `region`.
+2. **Secrets.** In the repository's Settings → Secrets and variables → Actions, add:
+
+   | Secret                 | Value                                                                                      |
+   | ---------------------- | ------------------------------------------------------------------------------------------ |
+   | `OCI_TENANCY_OCID`     | `tenancy` from the snippet                                                                 |
+   | `OCI_USER_OCID`        | `user`                                                                                     |
+   | `OCI_FINGERPRINT`      | `fingerprint`                                                                              |
+   | `OCI_REGION`           | `region`: your **home** region, e.g. `eu-frankfurt-1` (Always Free runs only there)        |
+   | `OCI_PRIVATE_KEY`      | the whole downloaded `.pem` file                                                           |
+   | `RELAY_TOKEN`          | the relay's password, 32+ characters of `A-Z a-z 0-9 . _ ~ -` (`openssl rand -hex 24`)     |
+   | `OCI_COMPARTMENT_OCID` | optional: a compartment for it (default: the tenancy's root)                               |
+   | `OCI_SSH_PUBLIC_KEY`   | optional: your SSH public key, to log in as `ubuntu@<ip>` (opens port 22; shut without it) |
+
+3. **Run it.** Actions → **Deploy relay to Oracle Cloud** → **Run workflow** with `deploy`. It takes
+   10–20 minutes and ends with the relay's address, the token masked:
+   `https://<ip-with-dashes>.sslip.io/<your RELAY_TOKEN>`. Paste that URL, with your token, into the
+   app's relay setting, or open `https://<ip-with-dashes>.sslip.io/` (the app served by the relay)
+   and paste it there.
+
+On your computer instead: install the [OCI CLI](https://docs.oracle.com/iaas/Content/API/SDKDocs/cliinstall.htm)
+(`pipx install oci-cli`) and `jq`, export the same variables (`OCI_PRIVATE_KEY="$(cat key.pem)"`)
+and run `scripts/deploy-relay-oci.sh`. `--dry-run` prints what it would do without credentials,
+`--print-cloud-init` the VM's setup.
+
+What it creates, all named `webtor-relay`: a VCN with a public subnet, internet gateway, route table
+and a security list that opens `80`, `443` and `42069` (TCP and UDP), and one VM: `VM.Standard.A1.Flex`
+(1 OCPU, 6 GB, ARM64) on the newest Ubuntu LTS. When Oracle has no A1 capacity in any availability
+domain ("Out of host capacity", common), it falls back to `VM.Standard.E2.1.Micro` (AMD64, 1 GB);
+when neither is free, run it again later. At boot the VM opens the same ports in its own firewall,
+installs the latest release's `webtor-relay-linux-<arch>` (checked against `SHA256SUMS`) as a
+systemd service on `127.0.0.1:7881`, and Caddy gets a Let's Encrypt certificate for
+`<ip-with-dashes>.sslip.io` (a public DNS name that resolves to the IP in it).
+
+- **Update:** run `deploy` again. It reuses everything and reboots the VM, which installs the latest
+  release. A new `RELAY_TOKEN` or SSH key applies only to a new VM: run `destroy`, then `deploy`.
+- **Your own domain:** add a repository _variable_ `RELAY_HOST` (e.g. `relay.example.com`) before
+  the VM is created (or `destroy` first). The run prints the VM's IP: point the name's DNS A record
+  at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it.
+- **Remove:** run the workflow with `destroy`; it deletes everything it created.
+- **Cost:** it creates only Always Free resources, and checks the tenancy's other instances first so
+  that a Pay As You Go account stays within the allowance (A1: 4 OCPUs and 24 GB in total; two
+  E2.1.Micro). Block storage is free up to 200 GB in total; the VM's boot volume takes 50 GB.
+- Oracle's terms apply to what you download through it, and swarm peers see the VM's IP address.
+
+### Any server with Docker
+
 The page is served over HTTPS, so it can only use a remote relay over HTTPS: put a TLS proxy in
 front and tell the relay its public address with `-public-url`. Any VPS with Docker works, for
 example Oracle Cloud's Always Free tier (an ARM64 VM; the image is built for `linux/arm64` and

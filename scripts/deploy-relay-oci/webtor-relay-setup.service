@@ -1,0 +1,17 @@
+# Installed by scripts/deploy-relay-oci.sh (cloud-init). Runs on every boot, before the relay and Caddy.
+[Unit]
+Description=webtor-relay setup (firewall, host name, Caddyfile, latest release)
+Wants=network-online.target
+After=network-online.target
+Before=webtor-relay.service caddy.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/webtor-relay-setup
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
