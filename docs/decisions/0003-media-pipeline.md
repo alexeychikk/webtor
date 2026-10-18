@@ -47,13 +47,18 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   `codec === null`) are listed as unsupported. If no audio track is playable, play the video muted
   with a notice.
 - **Audio track switching** (`HTMLMediaElement.audioTracks` is not used anywhere):
-  1. Cancel the audio conversion, then `remove(t + 1, Infinity)` and `abort()` on the audio
-     SourceBuffer, where `t = currentTime`. The old track stays buffered for one more second, so
-     the element never waits on an empty audio buffer (clearing it all stalled playback until the
-     first new fragment arrived).
+  1. Cancel the audio conversion and `abort()` the audio SourceBuffer, keeping everything it has
+     buffered. The old track plays on until the new one replaces it. Cutting it (all of it, or
+     everything past `t + 1 s`) stalled playback whenever the new pipeline's first fragment took
+     longer: an AC-3 → Opus start (decoder worker + wasm, encoder, a 1 s fragment) takes 0.5 s
+     idle and 2–4 s on a busy machine.
   2. Call `changeType(mime)` if the new output codec differs (e.g. AAC copy → Opus transcode).
-  3. Set `timestampOffset = t` and restart with `trim.start = t`. The new track's appends
-     overwrite the old one from `t` on. Video keeps playing; the audio gap is under a second.
+  3. Set `timestampOffset = t` and restart with `trim.start = t`, where `t = currentTime`. MSE
+     drops the old frames each new fragment overlaps, so the buffer stays contiguous: new track up
+     to where the pipeline is, old track after it. While the old media lies ahead, `sb.buffered`
+     can't show how far the new pipeline got, so back-pressure follows the start of its latest
+     fragment (`Mp4OutputFormat.onMoof`) until it passes the old buffered end. Video keeps playing
+     without an audio gap.
      If the new track fails to start, the player goes back to the previous one.
      The default track is the user's last chosen language (`localStorage['webtor:audio-lang']`),
      else the `default`-flagged track, else the first one; unsupported tracks are skipped.

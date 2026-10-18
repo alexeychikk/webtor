@@ -183,6 +183,12 @@ docs/decisions/                ADRs
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
   playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
+- **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
+  playhead to make room for a new track. The new pipeline's first fragment can take seconds
+  (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.
+  Back-pressure then follows `Pipeline.writtenTo`, not `sb.buffered`. The e2e asserts no
+  _underrun_ (`waiting` with < 0.5 s buffered). A busy machine can fire a `waiting` with seconds
+  buffered, which says nothing about the player.
 - **Relay (opt-in, ADR 0006).** The setting is `localStorage['webtor:relay-url']` (normalised base);
   `#relay=<url>` (the relay's printed Open link) saves it and is stripped with `replaceState`. With a
   relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,

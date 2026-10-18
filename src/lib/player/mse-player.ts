@@ -46,11 +46,6 @@ export function mediaSourceClass(): { MS: typeof MediaSource; managed: boolean }
 class StalePipeline extends Error {}
 
 const SEEK_DEBOUNCE_MS = 150;
-/**
- * On an audio switch the old track stays buffered this far past the playhead, so playback never
- * waits on an empty audio buffer; the new track's first appends overwrite it.
- */
-const SWITCH_KEEP_S = 1;
 
 /** e2e uses a few seconds so the 12 s fixture exercises back-pressure and seek restarts. */
 function bufferAheadSeconds(): number {
@@ -74,6 +69,17 @@ interface Pipeline {
   gen: number;
   conversion: Conversion | null;
   done: boolean;
+  /**
+   * Element time of the newest fragment the current conversion produced (Mediabunny's `onMoof`,
+   * which fires before the fragment reaches `append`); -Infinity before the first one.
+   */
+  writtenTo: number;
+  /**
+   * Audio switch: the previous track stays buffered up to here while the new one overwrites it.
+   * Until `writtenTo` passes it, `sb.buffered` mostly shows the old track, so back-pressure
+   * follows `writtenTo` instead. -Infinity when nothing is being replaced.
+   */
+  replaceUntil: number;
 }
 
 export interface MsePlayerOptions {
@@ -288,7 +294,8 @@ export class MsePlayer {
 
   /**
    * Switches the audio track, restarting only the audio pipeline at the playhead: video keeps
-   * playing, and the old track stays buffered for `SWITCH_KEEP_S` so the gap stays under a second.
+   * playing, and the old track stays buffered until the new one's fragments overwrite it, so
+   * playback never waits on the new pipeline's warm-up (decoder/encoder start, first fragment).
    * Rejects (and goes back to the previous track) when the new one can't start.
    */
   async selectAudioTrack(id: number): Promise<void> {
@@ -310,10 +317,13 @@ export class MsePlayer {
       p.conversion = null;
       p.done = false;
       await c?.cancel().catch(() => {});
-      const t = this.video.currentTime;
-      await this.resetBuffer(p, t + SWITCH_KEEP_S);
+      // Keep what is buffered (only reset the parser); the new appends replace it from `t` on.
+      await this.resetBuffer(p, Infinity);
       if (g !== p.gen || this.destroyed) return;
-      await this.startPipeline(p, toSourceTime(this.timeline, t), g);
+      const t = this.video.currentTime;
+      const { buffered } = p.sb;
+      const keptUntil = buffered.length ? buffered.end(buffered.length - 1) : -Infinity;
+      await this.startPipeline(p, toSourceTime(this.timeline, t), g, keptUntil);
     };
     Object.assign(p, { trackId: id, decision, mime: decision.mime });
     try {
@@ -363,6 +373,8 @@ export class MsePlayer {
       gen: 0,
       conversion: null,
       done: false,
+      writtenTo: -Infinity,
+      replaceUntil: -Infinity,
     });
   }
 
@@ -451,11 +463,23 @@ export class MsePlayer {
     if (this.mediaSource.readyState === 'open') p.sb.abort();
   }
 
-  /** Starts `p` at source time `k` (a keyframe, or the first frame). */
-  private async startPipeline(p: Pipeline, k: number, gen: number) {
+  /**
+   * Starts `p` at source time `k` (a keyframe, or the first frame). `replaceUntil`: element time up
+   * to which another track's media is still buffered and gets overwritten (audio switch).
+   */
+  private async startPipeline(p: Pipeline, k: number, gen: number, replaceUntil = -Infinity) {
     const { mb } = this;
+    const offset = appendOffset(this.timeline, k);
+    p.writtenTo = -Infinity;
+    p.replaceUntil = replaceUntil;
     const output = new mb.Output({
-      format: new mb.Mp4OutputFormat({ fastStart: 'fragmented', minimumFragmentDuration: 1 }),
+      format: new mb.Mp4OutputFormat({
+        fastStart: 'fragmented',
+        minimumFragmentDuration: 1,
+        onMoof: (_data, _pos, timestamp) => {
+          if (gen === p.gen) p.writtenTo = offset + timestamp;
+        },
+      }),
       target: new mb.AppendOnlyStreamTarget(
         new WritableStream<Uint8Array>({ write: (data) => this.append(p, gen, data) }),
       ),
@@ -496,7 +520,7 @@ export class MsePlayer {
       p.sbMime = p.mime;
     }
     // Conversion output starts at 0 for trim.start = k; place it on the 0-based element timeline.
-    p.sb.timestampOffset = appendOffset(this.timeline, k);
+    p.sb.timestampOffset = offset;
     conversion.execute().then(
       () => {
         if (gen !== p.gen) return;
@@ -515,7 +539,7 @@ export class MsePlayer {
   private async append(p: Pipeline, gen: number, data: Uint8Array) {
     const stale = () => gen !== p.gen || this.destroyed;
     if (stale()) throw new StalePipeline();
-    while (bufferedAhead(p.sb.buffered, this.video.currentTime) > this.bufferAhead) {
+    while (this.appendedAhead(p) > this.bufferAhead) {
       await this.playbackProgress();
       if (stale()) throw new StalePipeline();
     }
@@ -541,6 +565,12 @@ export class MsePlayer {
         await this.playbackProgress();
       }
     }
+  }
+
+  /** Seconds of `p`'s media ahead of the playhead, for back-pressure (see `replaceUntil`). */
+  private appendedAhead(p: Pipeline): number {
+    const t = this.video.currentTime;
+    return p.writtenTo < p.replaceUntil ? p.writtenTo - t : bufferedAhead(p.sb.buffered, t);
   }
 
   /** Resolves when the playhead moves (or after a second), so back-pressure loops re-check. */
