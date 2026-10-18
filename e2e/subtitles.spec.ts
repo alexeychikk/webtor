@@ -42,7 +42,8 @@ test('a sidecar .srt in the torrent is listed, shows its cue at 1–3 s, and Off
   await expect(select.locator('optgroup[label="In torrent"] option')).toHaveText([
     'English · sidecar.en.srt',
   ]);
-  await expect(select.locator('optgroup[label="Embedded"]')).toHaveCount(0);
+  // sample.mkv's own tracks are listed too, in their own group.
+  await expect(select.locator('optgroup[label="Embedded"] option')).toHaveCount(2);
 
   await select.selectOption({ label: 'English · sidecar.en.srt' });
   await seekTo(page, 2);
@@ -120,4 +121,46 @@ test('a subtitle file dropped on the player is decoded (windows-1251) and shown'
   await expect(page.locator('[data-testid="notice"][data-code="subtitle-failed"]')).toBeVisible();
   // The failed file changes nothing.
   await expect(page.getByTestId('subtitles')).toHaveValue('upload:1');
+});
+
+test('embedded MKV tracks are listed; English shows at 2 s, also after seeking away and back', async ({
+  page,
+}) => {
+  await playFixture(page, 'sample.mkv');
+  const select = page.getByTestId('subtitles');
+  // Neither track is flagged default or forced: Off.
+  await expect(select).toHaveValue('');
+  await expect(select.locator('optgroup[label="Embedded"] option')).toHaveText([
+    'English · SRT',
+    'Russian · ASS',
+  ]);
+
+  await select.selectOption({ label: 'English · SRT' });
+  await expect(select).toHaveValue('embedded:4');
+  await seekTo(page, 2);
+  await expect.poll(() => shownCues(page)).toEqual(['Hello from English SRT']);
+  await seekTo(page, 10);
+  await expect.poll(() => shownCues(page)).toEqual([]);
+  await seekTo(page, 6);
+  await expect.poll(() => shownCues(page)).toEqual(['Second english cue']);
+  await seekTo(page, 2);
+  await expect.poll(() => shownCues(page)).toEqual(['Hello from English SRT']);
+
+  // ASS is shown as plain text (override tags dropped) until styled rendering lands.
+  await select.selectOption({ label: 'Russian · ASS' });
+  await seekTo(page, 3);
+  await expect.poll(() => shownCues(page)).toEqual(['Привет из ASS']);
+  await select.selectOption({ label: 'Off' });
+  await expect.poll(() => shownCues(page)).toEqual([]);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+  await expect(page.locator('[data-testid="notice"][data-code="subtitle-failed"]')).toHaveCount(0);
+});
+
+test('an embedded track picked after seeking far ahead finds its cues there', async ({ page }) => {
+  // A short buffer window, so the video pipeline restarts at the seek target too.
+  await page.addInitScript(() => localStorage.setItem('webtor:buffer-ahead-s', '3'));
+  await playFixture(page, 'sample.mkv');
+  await seekTo(page, 6.5);
+  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await expect.poll(() => shownCues(page), { timeout: 15_000 }).toEqual(['Second english cue']);
 });
