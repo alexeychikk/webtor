@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { PLAYBACK_ERROR_MESSAGES } from './errors';
+  import { relaySettings } from '../torrent/relay-settings.svelte';
+  import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
   import { formatPercent, formatSpeed } from './format';
   import type { PlayerController, Phase } from './controller.svelte';
 
@@ -18,6 +19,12 @@
     error: 'Stopped',
   };
 
+  const isRelayError = (code: PlaybackErrorCode) => code.startsWith('relay-');
+  const phaseText = $derived(
+    controller.phase === 'connecting' && controller.viaRelay
+      ? 'Relay is finding peers…'
+      : PHASE_TEXT[controller.phase],
+  );
   const busy = $derived(['connecting', 'metadata', 'buffering'].includes(controller.phase));
 </script>
 
@@ -27,7 +34,7 @@
 
   <p class="status" data-testid="status" data-phase={controller.phase} aria-live="polite">
     {#if busy}<span class="spinner" aria-hidden="true"></span>{/if}
-    <span>{PHASE_TEXT[controller.phase]}</span>
+    <span>{phaseText}</span>
     {#if controller.fileName}<span class="file" title={controller.fileName}
         >{controller.fileName}</span
       >{/if}
@@ -37,6 +44,9 @@
         {controller.stats.numPeers === 1 ? 'peer' : 'peers'} · ↓ {formatSpeed(
           controller.stats.downloadSpeed,
         )} · {formatPercent(controller.stats.progress)}
+        {#if controller.stats.relayPeers !== undefined}
+          <span data-testid="relay-peers">· {controller.stats.relayPeers} via relay</span>
+        {/if}
       </span>
     {/if}
   </p>
@@ -44,10 +54,18 @@
   {#if controller.error}
     <p class="error" role="alert" data-testid="error" data-code={controller.error.code}>
       {controller.error.message}
+      {#if isRelayError(controller.error.code)}
+        <button type="button" onclick={() => relaySettings.openDialog()}>Relay settings</button>
+      {/if}
     </p>
   {/if}
   {#each controller.notices as code (code)}
-    <p class="notice" data-testid="notice" data-code={code}>{PLAYBACK_ERROR_MESSAGES[code]}</p>
+    <p class="notice" data-testid="notice" data-code={code}>
+      {PLAYBACK_ERROR_MESSAGES[code]}
+      {#if code === 'no-peers' && !controller.viaRelay}
+        <button type="button" onclick={() => relaySettings.openDialog()}>Connect a relay</button>
+      {/if}
+    </p>
   {/each}
 </section>
 
@@ -84,6 +102,10 @@
   }
   .error {
     background: color-mix(in srgb, crimson 20%, transparent);
+  }
+  .error button,
+  .notice button {
+    margin-left: 0.5rem;
   }
   .notice {
     background: color-mix(in srgb, orange 18%, transparent);

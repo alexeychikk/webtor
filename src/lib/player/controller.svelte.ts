@@ -4,8 +4,16 @@
  */
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
 import { torrentByteSource } from '../torrent/byte-source';
-import { addTorrent, destroyTorrent } from '../torrent/client';
+import { addRelayTorrent, addTorrent, destroyTorrent } from '../torrent/client';
 import { pickVideoFile } from '../torrent/files';
+import {
+  mergeRelayStats,
+  relayEndpoints,
+  relayTorrentRef,
+  type RelayStats,
+} from '../torrent/relay';
+import { fetchRelayMetainfo, fetchRelayStats } from '../torrent/relay-client';
+import { relaySettings } from '../torrent/relay-settings.svelte';
 import { isTorrentId } from '../torrent/trackers';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
@@ -13,7 +21,7 @@ import type { TorrentStats } from './types';
 import { nextStarvedFor, watchdogNotice } from './watchdog';
 
 /**
- * - `connecting`: looking for peers / metadata
+ * - `connecting`: looking for peers / metadata (with a relay: waiting for the relay's metainfo)
  * - `metadata`: torrent info known, reading the video file's header
  * - `buffering`: the player waits for data
  * - `playing` / `paused`
@@ -23,6 +31,8 @@ export type Phase =
   'idle' | 'connecting' | 'metadata' | 'buffering' | 'playing' | 'paused' | 'error';
 
 const TICK_MS = 1000;
+const RELAY_STATS_MS = 2000;
+const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
 const HAVE_FUTURE_DATA = 3;
 
 export class PlayerController {
@@ -32,6 +42,8 @@ export class PlayerController {
   notices = $state<PlaybackErrorCode[]>([]);
   error = $state<PlaybackError | null>(null);
   fileName = $state<string | null>(null);
+  /** This playback goes through the user's relay (docs/decisions/0006). */
+  viaRelay = $state(false);
 
   private run = 0;
   private torrent: Torrent | null = null;
@@ -42,6 +54,9 @@ export class PlayerController {
   private startedAt = 0;
   private starvedFor = 0;
   private lastDownloaded = 0;
+  private relayAbort: AbortController | null = null;
+  private relayTimer: ReturnType<typeof setInterval> | undefined;
+  private relayStats: RelayStats | null = null;
 
   /** Starts playing `input` (magnet or info hash) in `video`, replacing the current playback. */
   async load(input: string, video: HTMLVideoElement): Promise<void> {
@@ -52,7 +67,10 @@ export class PlayerController {
     this.error = null;
     this.notices = [];
     this.fileName = null;
-    this.stats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
+    this.stats = NO_STATS;
+    const relayBase = relaySettings.base;
+    this.viaRelay = relayBase !== null;
+    this.relayStats = null;
 
     if (!isTorrentId(input)) return this.fail(new PlaybackError('invalid-input'));
     if (!mediaSourceClass()) return this.fail(new PlaybackError('no-mse'));
@@ -61,9 +79,13 @@ export class PlayerController {
 
     let torrent: Torrent;
     try {
-      torrent = await addTorrent(input);
+      torrent = relayBase ? await this.addViaRelay(input, relayBase) : await addTorrent(input);
     } catch (err) {
-      if (run === this.run) this.fail(new PlaybackError('torrent-failed', String(err)));
+      if (run === this.run) {
+        this.fail(
+          err instanceof PlaybackError ? err : new PlaybackError('torrent-failed', String(err)),
+        );
+      }
       return;
     }
     if (run !== this.run) return void destroyTorrent(torrent);
@@ -115,10 +137,44 @@ export class PlayerController {
     });
   }
 
+  /**
+   * The relay joins the swarm (TCP/uTP/DHT/trackers) and hands over the info dict; WebTorrent then
+   * gets the data through the relay's web seed, plus any WebRTC peers. The relay's swarm stats are
+   * polled for the UI from the start, so "finding peers" shows how many it found.
+   */
+  private async addViaRelay(input: string, base: string): Promise<Torrent> {
+    const ref = relayTorrentRef(input);
+    if (!ref) throw new PlaybackError('invalid-input');
+    const urls = relayEndpoints(base, ref.infoHash, ref.magnetQuery);
+    const abort = new AbortController();
+    this.relayAbort = abort;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      const stats = await fetchRelayStats(urls.stats, abort.signal);
+      polling = false;
+      if (abort.signal.aborted || !stats) return;
+      this.relayStats = stats;
+      if (!this.torrent) this.stats = mergeRelayStats(NO_STATS, 0, stats);
+    };
+    this.relayTimer = setInterval(() => void poll(), RELAY_STATS_MS);
+    const torrentFile = await fetchRelayMetainfo(urls.metainfo, abort.signal);
+    void poll();
+    return addRelayTorrent(torrentFile, input, [urls.webseed, ...ref.ws]);
+  }
+
+  private stopRelay() {
+    clearInterval(this.relayTimer);
+    this.relayAbort?.abort();
+    this.relayAbort = null;
+  }
+
   /** Stops playback and drops the torrent and its stored pieces. */
   async stop(): Promise<void> {
     this.run++;
     clearInterval(this.timer);
+    this.stopRelay();
     this.videoEvents?.abort();
     this.videoEvents = null;
     this.player?.destroy();
@@ -139,6 +195,7 @@ export class PlayerController {
     this.player?.destroy();
     this.player = null;
     clearInterval(this.timer);
+    this.stopRelay();
     // A fatal error ends this playback: stop downloading.
     const torrent = this.torrent;
     this.torrent = null;
@@ -164,12 +221,14 @@ export class PlayerController {
   private tick() {
     const t = this.torrent;
     if (!t) return;
-    this.stats = {
+    const stats = {
       numPeers: t.numPeers,
       downloadSpeed: t.downloadSpeed,
       uploadSpeed: t.uploadSpeed,
       progress: t.progress,
     };
+    const webSeeds = t.wires.filter((w) => w.type === 'webSeed').length;
+    this.stats = mergeRelayStats(stats, webSeeds, this.relayStats);
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';
     this.starvedFor = nextStarvedFor(this.starvedFor, {
       waiting: waitingForData,
