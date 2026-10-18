@@ -4,7 +4,7 @@
  */
 import type WebTorrentType from 'webtorrent/dist/webtorrent.min.js';
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
-import { prepareTorrentId } from './trackers';
+import { announceList, prepareTorrentId } from './trackers';
 
 let clientPromise: Promise<WebTorrentType> | null = null;
 
@@ -22,6 +22,11 @@ function getClient(): Promise<WebTorrentType> {
 export async function addTorrent(input: string): Promise<Torrent> {
   const { torrentId, announce } = prepareTorrentId(input);
   return addTorrentId(torrentId, announce, []);
+}
+
+/** Adds a .torrent file the user opened, with the default WebSocket trackers on top of its own. */
+export async function addTorrentFile(torrentFile: Uint8Array): Promise<Torrent> {
+  return addTorrentId(torrentFile, announceList([]), []);
 }
 
 /**
