@@ -38,18 +38,58 @@ export type VideoFilePick =
   | { ok: true; file: VideoFileEntry }
   | { ok: false; code: 'no-playable-file' | 'unsupported-container' };
 
-/** The largest playable video file; tells "only AVI/WMV/…" apart from "no video at all". */
-export function pickVideoFile(files: readonly FileLike[]): VideoFilePick {
-  let best: VideoFileEntry | null = null;
+/**
+ * The file to play: `preferred` (an index into `files`, e.g. from `#file=`) when it is a playable
+ * video, else the largest playable one. Tells "only AVI/WMV/…" apart from "no video at all".
+ */
+export function pickVideoFile(
+  files: readonly FileLike[],
+  preferred: number | null = null,
+): VideoFilePick {
+  const entry = (index: number): VideoFileEntry => {
+    const f = files[index]!;
+    return { index, path: f.path, name: f.name, length: f.length };
+  };
+  if (
+    preferred !== null &&
+    files[preferred] &&
+    classifyFile(files[preferred].name) === 'playable'
+  ) {
+    return { ok: true, file: entry(preferred) };
+  }
+  let best: number | null = null;
   let sawUnsupported = false;
   files.forEach((f, index) => {
     const kind = classifyFile(f.name);
     if (kind === 'unsupported') sawUnsupported = true;
-    if (kind !== 'playable' || (best && best.length >= f.length)) return;
-    best = { index, path: f.path, name: f.name, length: f.length };
+    if (kind !== 'playable' || (best !== null && files[best]!.length >= f.length)) return;
+    best = index;
   });
-  if (best) return { ok: true, file: best };
+  if (best !== null) return { ok: true, file: entry(best) };
   return { ok: false, code: sawUnsupported ? 'unsupported-container' : 'no-playable-file' };
+}
+
+export interface VideoFileListEntry extends VideoFileEntry {
+  /** `unsupported` entries are listed greyed out (AVI, WMV, …). */
+  kind: 'playable' | 'unsupported';
+}
+
+/** Video files of a torrent for the file picker, in path order (episodes sort naturally). */
+export function listVideoFiles(files: readonly FileLike[]): VideoFileListEntry[] {
+  const entries: VideoFileListEntry[] = [];
+  files.forEach((f, index) => {
+    const kind = classifyFile(f.name);
+    if (kind === 'other') return;
+    entries.push({ index, path: f.path, name: f.name, length: f.length, kind });
+  });
+  return entries.sort((a, b) =>
+    a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' }),
+  );
+}
+
+/** A dropped or picked file that should be opened as a torrent (by extension or MIME type). */
+export function isTorrentFile(file: { name: string; type: string }): boolean {
+  return extensionOf(file.name) === 'torrent' || file.type === 'application/x-bittorrent';
 }
 
 const SUBTITLE_FORMATS = new Set<SubtitleFileEntry['format']>(['srt', 'vtt', 'ass', 'ssa']);

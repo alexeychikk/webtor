@@ -58,6 +58,7 @@ By the owner's decision CI is **manual-only** (`.github/workflows/ci.yml` has ju
 ```
 src/App.svelte                 shell: input → player
 src/lib/torrent/               WebTorrent client, trackers, file classification
+  files.ts FileList.svelte     video file list (playable / greyed-out unsupported), pick, picker UI
   webtorrent.d.ts              typings for the WebTorrent API subset we use; extend as needed
 src/lib/player/                MSE session, Mediabunny conversions, codec decisions
   types.ts                     contracts between torrent layer, pipeline and UI
@@ -99,7 +100,14 @@ docs/decisions/                ADRs
   this way automatically.
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
-- UI test hooks: `data-testid` `video`, `status` (with `data-phase`), `error` and `notice` (with
+- **Files.** `#magnet=<encoded>&file=<n>`: `n` is the index into `torrent.files` of the file playing
+  (`readFileFromHash`; an unplayable or missing `n` falls back to the largest playable video). The
+  hash follows the controller (`magnet`, `fileIndex`) with `replaceState`. `controller.selectFile(n)`
+  destroys the MsePlayer and subtitle sources and opens a new one on the same torrent; after a fatal
+  error it reloads the torrent on that file. An opened/dropped `.torrent` (`TorrentInput` =
+  `Uint8Array`) goes straight to WebTorrent (no relay); its `magnetURI` then goes into the hash.
+- UI test hooks: `data-testid` `file-list` / `file` (`data-index`, `data-kind`, `aria-current`; shown
+  only with 2+ video files), `torrent-file` (the .torrent input), `video`, `status` (with `data-phase`), `error` and `notice` (with
   `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
   `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off) and `subtitle-upload` (file
   input). The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
@@ -112,6 +120,9 @@ docs/decisions/                ADRs
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the
   server root). `with-sidecar/` = `sample.mkv` + `sidecar.en.srt` (symlinks to the top-level files).
+- `multi-file/` = `episode-1.ts` (→ offset.ts, file 0) + `episode-2.mkv` (→ sample.mkv, file 1,
+  largest) + `extras.avi` (fake, unsupported) + `readme.txt`. `<FIXTURE_BASE>/<name>.torrent` is the
+  .torrent for any fixture (for upload tests).
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the

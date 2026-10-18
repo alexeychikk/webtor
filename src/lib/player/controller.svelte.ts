@@ -1,11 +1,17 @@
 /**
  * Drives one playback: torrent → file pick → MsePlayer, plus the status the UI shows
- * (phase, stats, notices, fatal error). One instance per page; `load()` replaces what is playing.
+ * (phase, stats, notices, fatal error). One instance per page; `load()` replaces what is playing,
+ * `selectFile()` swaps the file within the same torrent (a fresh MsePlayer, same torrent).
  */
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
 import { torrentByteSource } from '../torrent/byte-source';
-import { addRelayTorrent, addTorrent, destroyTorrent } from '../torrent/client';
-import { listSubtitleFiles, pickVideoFile } from '../torrent/files';
+import { addRelayTorrent, addTorrent, addTorrentFile, destroyTorrent } from '../torrent/client';
+import {
+  listSubtitleFiles,
+  listVideoFiles,
+  pickVideoFile,
+  type VideoFileListEntry,
+} from '../torrent/files';
 import {
   mergeRelayStats,
   relayEndpoints,
@@ -36,6 +42,15 @@ const TICK_MS = 1000;
 const RELAY_STATS_MS = 2000;
 const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
 const HAVE_FUTURE_DATA = 3;
+/** Notices about the torrent, not the file: they survive a file switch. */
+const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
+
+/** A magnet link or info hash, or the bytes of a .torrent file the user opened. */
+export type TorrentInput = string | Uint8Array;
+
+/** Cheap sanity check before WebTorrent parses it: a .torrent is a bencoded dictionary. */
+const looksLikeTorrentFile = (bytes: Uint8Array) =>
+  bytes.length > 0 && bytes.length <= 16 * 1024 * 1024 && bytes[0] === 0x64; /* 'd' */
 
 export class PlayerController {
   phase = $state<Phase>('idle');
@@ -53,8 +68,16 @@ export class PlayerController {
   readonly subtitles = new SubtitleManager();
   /** This playback goes through the user's relay (docs/decisions/0006). */
   viaRelay = $state(false);
+  /** Video files of the torrent (playable and greyed-out unsupported ones), once its info is known. */
+  files = $state<readonly VideoFileListEntry[]>([]);
+  /** Index into the torrent's files of the file being played (`#file=`). */
+  fileIndex = $state<number | null>(null);
+  /** Magnet for the URL hash: the input, or for an opened .torrent file its magnet once known. */
+  magnet = $state<string | null>(null);
 
+  /** Bumped by every load, file switch, stop and failure: async work of an older one bails out. */
   private run = 0;
+  private input: TorrentInput | null = null;
   private torrent: Torrent | null = null;
   private player: MsePlayer | null = null;
   private video: HTMLVideoElement | null = null;
@@ -67,32 +90,72 @@ export class PlayerController {
   private relayTimer: ReturnType<typeof setInterval> | undefined;
   private relayStats: RelayStats | null = null;
 
-  /** Starts playing `input` (magnet or info hash) in `video`, replacing the current playback. */
-  async load(input: string, video: HTMLVideoElement): Promise<void> {
+  /**
+   * Starts playing `input` (magnet, info hash or .torrent bytes) in `video`, replacing the current
+   * playback. `fileIndex` (from `#file=`) picks the file when it is playable; else the largest video.
+   */
+  load(input: TorrentInput, video: HTMLVideoElement, fileIndex: number | null = null) {
+    return this.start(input, video, fileIndex, []);
+  }
+
+  /**
+   * Plays another file of the torrent: the current MsePlayer (MediaSource, SourceBuffers,
+   * conversions) and subtitle sources are torn down and a fresh one opens on the same torrent.
+   * After a fatal error the torrent is gone, so it is loaded again on that file.
+   */
+  async selectFile(index: number): Promise<void> {
+    const entry = this.files.find((f) => f.index === index);
+    const video = this.video;
+    if (!entry || entry.kind !== 'playable' || !video || this.input === null) return;
+    const torrent = this.torrent;
+    if (!torrent || this.phase === 'error') {
+      return this.start(this.input, video, index, this.files);
+    }
+    if (index === this.fileIndex) return;
+    const run = ++this.run;
+    this.closeFile();
+    this.phase = 'metadata';
+    this.starvedFor = 0;
+    this.lastDownloaded = torrent.downloaded;
+    await this.openFile(run, torrent, index);
+  }
+
+  private async start(
+    input: TorrentInput,
+    video: HTMLVideoElement,
+    fileIndex: number | null,
+    files: readonly VideoFileListEntry[],
+  ): Promise<void> {
     await this.stop();
     const run = ++this.run;
+    this.input = input;
     this.video = video;
     this.subtitles.attach(video);
     this.phase = 'connecting';
     this.error = null;
     this.notices = [];
     this.fileName = null;
-    this.audioTracks = [];
-    this.audioTrackId = null;
-    this.audioCodec = null;
+    this.files = files;
+    this.fileIndex = files.length ? fileIndex : null;
+    this.magnet = typeof input === 'string' ? input.trim() : null;
+    this.resetFileState();
     this.stats = NO_STATS;
-    const relayBase = relaySettings.base;
+    // An opened .torrent already has the info dict, so it goes straight to WebTorrent.
+    const relayBase = typeof input === 'string' ? relaySettings.base : null;
     this.viaRelay = relayBase !== null;
     this.relayStats = null;
 
-    if (!isTorrentId(input)) return this.fail(new PlaybackError('invalid-input'));
+    const valid = typeof input === 'string' ? isTorrentId(input) : looksLikeTorrentFile(input);
+    if (!valid) return this.fail(new PlaybackError('invalid-input'));
     if (!mediaSourceClass()) return this.fail(new PlaybackError('no-mse'));
     // Web seeds and xs= still work without WebRTC, so this is a notice, not a failure.
     if (typeof RTCPeerConnection === 'undefined') this.notices = ['no-webrtc'];
 
     let torrent: Torrent;
     try {
-      torrent = relayBase ? await this.addViaRelay(input, relayBase) : await addTorrent(input);
+      if (typeof input !== 'string') torrent = await addTorrentFile(input);
+      else if (relayBase) torrent = await this.addViaRelay(input, relayBase);
+      else torrent = await addTorrent(input);
     } catch (err) {
       if (run === this.run) {
         this.fail(
@@ -107,11 +170,14 @@ export class PlayerController {
     this.starvedFor = 0;
     this.lastDownloaded = torrent.downloaded;
     torrent.on('error', (err) => {
-      if (run === this.run) this.fail(new PlaybackError('torrent-failed', String(err)));
+      if (torrent !== this.torrent) return;
+      // WebTorrent's word for a .torrent file it cannot parse.
+      const unreadable = typeof input !== 'string' && /invalid torrent/i.test(String(err));
+      this.fail(new PlaybackError(unreadable ? 'invalid-input' : 'torrent-failed', String(err)));
     });
     torrent.on('warning', (err) => console.warn('torrent:', err));
     torrent.on('metadata', () => {
-      if (run === this.run && this.phase === 'connecting') this.phase = 'metadata';
+      if (torrent === this.torrent && this.phase === 'connecting') this.phase = 'metadata';
     });
     this.timer = setInterval(() => this.tick(), TICK_MS);
 
@@ -120,10 +186,19 @@ export class PlayerController {
       if (run !== this.run) return;
     }
     this.phase = 'metadata';
+    this.files = listVideoFiles(torrent.files);
+    if (typeof input !== 'string') this.magnet = torrent.magnetURI;
 
-    const pick = pickVideoFile(torrent.files);
+    const pick = pickVideoFile(torrent.files, fileIndex);
     if (!pick.ok) return this.fail(new PlaybackError(pick.code));
-    const file = torrent.files[pick.file.index]!;
+    await this.openFile(run, torrent, pick.file.index);
+  }
+
+  /** Opens file `index` of `torrent` in a new MsePlayer, with its sidecar subtitles. */
+  private async openFile(run: number, torrent: Torrent, index: number): Promise<void> {
+    const video = this.video!;
+    const file = torrent.files[index]!;
+    this.fileIndex = index;
     this.fileName = file.name;
     this.subtitles.addSidecars(listSubtitleFiles(torrent.files, file.name), async (entry) => {
       const sidecar = torrent.files[entry.index];
@@ -137,6 +212,7 @@ export class PlayerController {
         onError: (err) => {
           if (run === this.run) this.fail(err);
         },
+        isStale: () => run !== this.run,
       });
     } catch (err) {
       if (run === this.run) {
@@ -156,6 +232,24 @@ export class PlayerController {
       // Autoplay blocked (no user gesture, e.g. #magnet= on page load): wait for the play button.
       if (run === this.run && (err as Error)?.name === 'NotAllowedError') this.updatePhase();
     });
+  }
+
+  /** Tears down the playing file (MsePlayer and its SourceBuffers, subtitle sources), keeps the torrent. */
+  private closeFile() {
+    this.videoEvents?.abort();
+    this.videoEvents = null;
+    this.player?.destroy();
+    this.player = null;
+    this.subtitles.reset();
+    this.fileName = null;
+    this.resetFileState();
+    this.notices = this.notices.filter((n) => TORRENT_NOTICES.includes(n));
+  }
+
+  private resetFileState() {
+    this.audioTracks = [];
+    this.audioTrackId = null;
+    this.audioCodec = null;
   }
 
   /** Switches the audio track (video keeps playing) and remembers its language for next time. */
@@ -226,6 +320,8 @@ export class PlayerController {
     const torrent = this.torrent;
     this.torrent = null;
     this.phase = 'idle';
+    this.files = [];
+    this.fileIndex = null;
     if (torrent) await destroyTorrent(torrent);
   }
 
