@@ -39,5 +39,12 @@ export default defineConfig({
       url: 'http://127.0.0.1:9000/magnet/sample.mkv',
       reuseExistingServer: !process.env.CI,
     },
+    {
+      // webtor-relay + a TCP-only seeder of sample.mkv (Go; the first build takes a while).
+      command: 'node e2e/support/relay-stack.mjs',
+      url: 'http://127.0.0.1:9100/magnet',
+      reuseExistingServer: !process.env.CI,
+      timeout: 300_000,
+    },
   ],
 });

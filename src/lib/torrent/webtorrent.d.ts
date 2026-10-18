@@ -45,6 +45,8 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     readonly files: TorrentFile[];
     readonly length: number;
     readonly ready: boolean;
+    /** Every connection, web seeds included (`type: 'webSeed'`); `numPeers` is its length. */
+    readonly wires: ReadonlyArray<{ readonly type?: string }>;
     readonly numPeers: number;
     readonly downloadSpeed: number;
     readonly uploadSpeed: number;

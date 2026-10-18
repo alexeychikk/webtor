@@ -61,6 +61,8 @@ export interface TorrentStats {
   downloadSpeed: number;
   uploadSpeed: number;
   progress: number;
+  /** Swarm peers behind the relay (included in `numPeers`); absent without a relay. */
+  relayPeers?: number;
 }
 
 /** One playing file. Created per (torrent, file) pair; destroyed when the user picks another file. */
