@@ -8,7 +8,9 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
 
 - **Peers must speak WebRTC.** Browsers can't reach TCP/UDP peers, DHT or UDP trackers. Most public
   torrents have zero WebRTC peers and will not start. Web seeds (`ws=`) and `xs=` .torrent URLs
-  help. See `docs/decisions/0002-torrent-engine.md`.
+  help. See `docs/decisions/0002-torrent-engine.md`. The opt-in way past this is **`webtor-relay`**
+  (`relay/`, Go), a BitTorrent client the user runs themselves. The app uses it as an `xs=` source
+  and a web seed (`docs/decisions/0006-regular-peers-relay.md`). The team runs no public relay.
 - **Video is never transcoded.** HEVC and 10-bit H.264 play only where the browser decodes them.
   Audio the browser can't play (AC-3, E-AC-3, DTS, Vorbis…) is transcoded in-browser to Opus/AAC.
   TrueHD and bitmap subtitles (PGS) are unsupported.
@@ -16,8 +18,9 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
 ## Stack
 
 Vite 8 · Svelte 5 (runes) · TypeScript 6 (not 7: svelte-check) · pnpm 12 · Vitest 5 ·
-Playwright 1.64 (Chromium). SPA without SvelteKit. Decisions: `docs/decisions/` (0001 stack & hosting,
-0002 torrent engine, 0003 media pipeline, 0004 subtitles).
+Playwright 1.64 (Chromium). SPA without SvelteKit. Relay: Go (version in `mise.toml`) +
+anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torrent engine, 0003
+media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay).
 
 ## Commands
 
@@ -31,6 +34,7 @@ pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
+cd relay && go test ./...  # relay checks: gofmt -l . && go vet ./... && go test ./...  (relay/CLAUDE.md)
 ```
 
 ## Checks and release: local only, no GitHub Actions
@@ -61,6 +65,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy, buffer math, no-peers/stalled)
 src/lib/subtitles/             MKV subtitle extractor, SRT/VTT parsing, JASSUB glue
+src/lib/torrent/relay.ts       URL contract with webtor-relay (validation, endpoints)
+relay/                         Go module: cmd/webtor-relay, cmd/tcp-seeder (test seeder), internal/relay
 e2e/                           Playwright specs; e2e/support/fixture-server.mjs; e2e/fixtures/
 docs/decisions/                ADRs
 ```
