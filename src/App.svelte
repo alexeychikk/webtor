@@ -1,14 +1,45 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { PlayerController } from './lib/player/controller.svelte';
+  import Player from './lib/player/Player.svelte';
   import { isTorrentId } from './lib/torrent/trackers';
+  import { magnetHash, readMagnetFromHash } from './lib/url-hash';
 
+  const controller = new PlayerController();
   let input = $state('');
-  let submitted = $state<string | null>(null);
+  let video = $state<HTMLVideoElement>();
+  let current: string | null = null;
   const valid = $derived(isTorrentId(input));
+
+  function play(torrentId: string) {
+    current = torrentId;
+    if (video) void controller.load(torrentId, video);
+  }
 
   function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (valid) submitted = input.trim();
+    if (!valid) return;
+    const torrentId = input.trim();
+    // Shareable: the same URL autoplays this torrent (pushState does not fire hashchange).
+    history.pushState(null, '', magnetHash(torrentId));
+    play(torrentId);
   }
+
+  function playFromHash() {
+    const torrentId = readMagnetFromHash(location.hash);
+    if (!torrentId || torrentId === current) return;
+    input = torrentId;
+    play(torrentId);
+  }
+
+  onMount(() => {
+    playFromHash();
+    window.addEventListener('hashchange', playFromHash);
+    return () => {
+      window.removeEventListener('hashchange', playFromHash);
+      void controller.stop();
+    };
+  });
 </script>
 
 <main>
@@ -26,9 +57,7 @@
     />
     <button type="submit" disabled={!valid}>Play</button>
   </form>
-  {#if submitted}
-    <p data-testid="status">Playback is not implemented yet.</p>
-  {/if}
+  <Player {controller} bind:video />
 </main>
 
 <style>
