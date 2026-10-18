@@ -48,8 +48,16 @@ export interface SubtitleTrackInfo {
   kind: SubtitleSourceKind;
   /** `text` → native VTTCue track; `ass` → JASSUB canvas overlay. */
   renderer: 'text' | 'ass';
+  /** Normalised language code (`normalizeLanguage`), "" when unknown. */
   language: string;
+  /** Track name or file name; the selector adds the language (`subtitleTrackText`). */
   label: string;
+  /** Embedded `FlagDefault`. */
+  isDefault?: boolean;
+  /** Embedded `FlagForced`, or `.forced.` in a sidecar filename. */
+  forced?: boolean;
+  /** Listed but not selectable (bitmap PGS / VobSub). */
+  unsupported?: boolean;
 }
 
 export interface TorrentStats {
@@ -57,6 +65,8 @@ export interface TorrentStats {
   downloadSpeed: number;
   uploadSpeed: number;
   progress: number;
+  /** Swarm peers behind the relay (included in `numPeers`); absent without a relay. */
+  relayPeers?: number;
 }
 
 /** One playing file. Created per (torrent, file) pair; destroyed when the user picks another file. */

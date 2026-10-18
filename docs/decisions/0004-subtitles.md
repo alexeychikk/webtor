@@ -8,7 +8,10 @@ Date: 2026-10-18 · Status: accepted
 user-uploaded file (file input + drop on the player). The selector shows "Off" plus every track,
 grouped Embedded / In torrent / Uploaded. Bitmap tracks (PGS `S_HDMV/PGS`, VobSub) are listed as
 "unsupported" and disabled. The default is Off, unless an embedded track is flagged forced or
-default, or matches the user's last chosen subtitle language (localStorage).
+default, or matches the user's last chosen subtitle language (localStorage). Precedence: the last
+chosen language (any source) → an embedded forced track → an embedded default track, which is
+skipped when the user's last choice was Off. Languages are normalised to ISO 639-1 (`eng` → `en`), so
+MKV tags and filenames (`Movie.en.srt`) compare equal.
 
 **Embedded extraction:** Mediabunny 1.61 exposes no subtitle input tracks (verified: our fixture's
 SRT and ASS tracks don't appear in `getTracks()`). So we keep a small EBML reader in

@@ -1,9 +1,10 @@
 /**
  * URL contract with the user-run Go relay (`relay/`, docs/decisions/0006). Pure helpers only; the
- * settings UI and the controller wiring build on these.
+ * fetch glue is `relay-client.ts`, the setting `relay-settings.svelte.ts`.
  *
  * A relay URL is `scheme://host[:port]/<token>` — the token is the password, keep it out of logs.
  */
+import type { TorrentStats } from '../player/types';
 
 export type RelayUrlCheck =
   { ok: true; base: string } | { ok: false; reason: 'invalid' | 'mixed-content' | 'no-token' };
@@ -37,7 +38,10 @@ export function checkRelayUrl(input: string, pageProtocol: string): RelayUrlChec
 export interface RelayEndpoints {
   /** `GET` → `{name: 'webtor-relay', version, api: 1}`. */
   info: string;
-  /** `GET` → .torrent (info dict only) once the swarm delivered it; 504 after ~90 s without. */
+  /**
+   * `GET` → .torrent (info dict only) once the swarm delivered it; 504 after ~90 s without; 429
+   * `{error, maxTorrents}` when the relay already has its maximum of torrents open.
+   */
   metainfo: string;
   /** `GET` → `[{index, path, length, webseedPath}]` (503 before metainfo). */
   files: string;
@@ -63,5 +67,142 @@ export function relayEndpoints(
     files: `${t}/files`,
     stats: `${t}/stats`,
     webseed: `${t}/webseed/`,
+  };
+}
+
+/** Messages for `checkRelayUrl` failures, shown under the URL field. */
+export const RELAY_URL_PROBLEMS: Record<Exclude<RelayUrlCheck, { ok: true }>['reason'], string> = {
+  invalid: 'That is not a relay URL. Paste the "Relay URL" line webtor-relay printed.',
+  'no-token':
+    'The URL needs the secret token path webtor-relay printed, like http://127.0.0.1:7881/<token>.',
+  'mixed-content':
+    'This page is served over HTTPS, so a relay on another machine needs an https:// URL (put it ' +
+    'behind TLS). Plain http:// only works for 127.0.0.1 or localhost.',
+};
+
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
+
+function base32ToHex(s: string): string | null {
+  let bits = '';
+  for (const c of s.toLowerCase()) {
+    const v = BASE32.indexOf(c);
+    if (v < 0) return null;
+    bits += v.toString(2).padStart(5, '0');
+  }
+  let hex = '';
+  for (let i = 0; i + 4 <= bits.length; i += 4)
+    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  return hex;
+}
+
+function normaliseInfoHash(s: string): string | null {
+  if (/^[0-9a-f]{40}$/i.test(s)) return s.toLowerCase();
+  if (/^[a-z2-7]{32}$/i.test(s)) return base32ToHex(s);
+  return null;
+}
+
+/**
+ * What the relay needs from user input (check `isTorrentId` first): the info hash as 40 hex digits
+ * (base32 converted) and the magnet's query string, untouched, so the relay sees every `tr=` (UDP
+ * and HTTP too), `dn=`, `x.pe=` and `ws=`. `ws` lists the magnet's own web seeds for WebTorrent.
+ */
+export function relayTorrentRef(
+  input: string,
+): { infoHash: string; magnetQuery: string; ws: string[] } | null {
+  const s = input.trim();
+  if (!s.toLowerCase().startsWith('magnet:?')) {
+    const infoHash = normaliseInfoHash(s);
+    return infoHash ? { infoHash, magnetQuery: `xt=urn:btih:${infoHash}`, ws: [] } : null;
+  }
+  const magnetQuery = s.slice('magnet:?'.length);
+  const params = new URLSearchParams(magnetQuery);
+  for (const xt of params.getAll('xt')) {
+    const m = /^urn:btih:(.+)$/i.exec(xt);
+    const infoHash = m ? normaliseInfoHash(m[1]!) : null;
+    if (infoHash) {
+      return { infoHash, magnetQuery, ws: params.getAll('ws').filter((u) => /^https?:/i.test(u)) };
+    }
+  }
+  return null;
+}
+
+/** How a call to the relay went wrong; `relayErrorCode` turns it into what the user sees. */
+export type RelayFailure =
+  /** `fetch` rejected: relay not running, wrong host/port, CORS, or a denied Local Network Access prompt. */
+  | { kind: 'network' }
+  /** Our own deadline passed before the relay answered. */
+  | { kind: 'timeout' }
+  | { kind: 'http'; status: number; message?: string }
+  /** 200, but not what a webtor-relay sends (e.g. the URL points at some other web server). */
+  | { kind: 'bad-response' };
+
+export type RelayErrorCode = 'relay-unreachable' | 'relay-no-metadata' | 'relay-error';
+
+/** Error code for a failed metainfo fetch. 504 is the relay saying the swarm gave no metadata. */
+export function relayErrorCode(f: RelayFailure): RelayErrorCode {
+  if (f.kind === 'network') return 'relay-unreachable';
+  if (f.kind === 'timeout') return 'relay-no-metadata';
+  if (f.kind === 'http' && f.status === 504) return 'relay-no-metadata';
+  return 'relay-error';
+}
+
+/** Technical detail appended to the message (never contains the relay URL: the token is a password). */
+export function relayErrorDetail(f: RelayFailure): string | undefined {
+  if (f.kind === 'http') {
+    const hint = f.status === 404 ? ' — wrong token or not a webtor-relay?' : '';
+    return `HTTP ${f.status}${f.message ? `: ${f.message}` : ''}${hint}`;
+  }
+  if (f.kind === 'bad-response') return 'unexpected response — is this a webtor-relay URL?';
+  return undefined;
+}
+
+export interface RelayInfo {
+  name: 'webtor-relay';
+  version: string;
+  api: number;
+}
+
+/** Validates `GET /v1/info`; `null` when the body isn't a webtor-relay's. */
+export function parseRelayInfo(json: unknown): RelayInfo | null {
+  if (typeof json !== 'object' || json === null) return null;
+  const { name, version, api } = json as Record<string, unknown>;
+  if (name !== 'webtor-relay' || typeof api !== 'number') return null;
+  return { name, version: typeof version === 'string' ? version : '?', api };
+}
+
+/** The part of `GET …/stats` the UI uses. */
+export interface RelayStats {
+  /** Peers the relay is connected to right now. */
+  activePeers: number;
+  seeders: number;
+  hasMetadata: boolean;
+}
+
+export function parseRelayStats(json: unknown): RelayStats | null {
+  if (typeof json !== 'object' || json === null) return null;
+  const { activePeers, seeders, hasMetadata } = json as Record<string, unknown>;
+  if (typeof activePeers !== 'number') return null;
+  return {
+    activePeers,
+    seeders: typeof seeders === 'number' ? seeders : 0,
+    hasMetadata: hasMetadata === true,
+  };
+}
+
+/**
+ * Peer count to show with a relay. WebTorrent sees the relay as one web-seed wire; the swarm behind
+ * it is in the relay's `/stats`. So: WebTorrent's wires minus its web seeds, plus the relay's peers.
+ * Speeds and progress stay WebTorrent's (everything the page gets passes through it).
+ */
+export function mergeRelayStats(
+  base: TorrentStats,
+  webSeedWires: number,
+  relay: RelayStats | null,
+): TorrentStats {
+  if (!relay) return base;
+  return {
+    ...base,
+    numPeers: Math.max(0, base.numPeers - webSeedWires) + relay.activePeers,
+    relayPeers: relay.activePeers,
   };
 }

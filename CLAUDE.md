@@ -30,6 +30,7 @@ pnpm dev            # http://localhost:5173
 pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
+                    #   and the relay stack (:9100, relay :7882; needs Go, first build is slow)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
@@ -65,8 +66,13 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
-src/lib/subtitles/             MKV subtitle extractor, SRT/VTT parsing, JASSUB glue
-src/lib/torrent/relay.ts       URL contract with webtor-relay (validation, endpoints)
+src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
+  manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick
+  srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ASS/SSA as plain text until JASSUB)
+  encoding.ts language.ts tracks.ts   BOM/UTF-8/1251/1252 decode, filename language, default rule
+src/lib/torrent/relay.ts       webtor-relay contract: URL check, endpoints, error mapping, stats merge
+  relay-client.ts              fetch glue (metainfo, /v1/info, /stats); relay-settings.svelte.ts
+  RelayDialog.svelte           settings dialog (setup steps, Test, privacy copy)
 relay/                         Go module: cmd/webtor-relay, cmd/tcp-seeder (test seeder), internal/relay
 e2e/                           Playwright specs; e2e/support/fixture-server.mjs; e2e/fixtures/
 docs/decisions/                ADRs
@@ -94,14 +100,30 @@ docs/decisions/                ADRs
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
 - UI test hooks: `data-testid` `video`, `status` (with `data-phase`), `error` and `notice` (with
-  `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`). The video carries
-  `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty when muted) and
-  `data-audio-track` (the selected `AudioTrackInfo.id`).
+  `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
+  `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off) and `subtitle-upload` (file
+  input). The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
+  when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Check shown cues through
+  `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
+- New subtitle sources (embedded MKV, JASSUB) plug into `SubtitleManager`: list a
+  `SubtitleTrackInfo` (key `<kind>:<id>`) with a loader for its cues; the selector groups by `kind`.
+  The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
+- A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the
+  server root). `with-sidecar/` = `sample.mkv` + `sidecar.en.srt` (symlinks to the top-level files).
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
   playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
+- **Relay (opt-in, ADR 0006).** The setting is `localStorage['webtor:relay-url']` (normalised base);
+  `#relay=<url>` (the relay's printed Open link) saves it and is stripped with `replaceState`. With a
+  relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,
+urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer count. No relay set =
+  the original path, untouched. Never log or show the relay URL: the token is a password.
+- Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns a magnet that only a TCP seeder on
+  loopback has (no `xs=`/`ws=`) and the URL of a webtor-relay that reaches it
+  (`e2e/support/relay-stack.mjs`, builds both Go commands). Relay test hooks: `relay-button`,
+  `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`.
 - Web seeds need CORS that allows the `Range` and `Cache-Control` request headers (WebTorrent sends
   both).

@@ -1,4 +1,4 @@
-import type { VideoFileEntry } from '../player/types';
+import type { SubtitleFileEntry, VideoFileEntry } from '../player/types';
 
 /** Containers Mediabunny demuxes (docs/decisions/0003). */
 const PLAYABLE_VIDEO_EXTENSIONS = new Set([
@@ -50,4 +50,29 @@ export function pickVideoFile(files: readonly FileLike[]): VideoFilePick {
   });
   if (best) return { ok: true, file: best };
   return { ok: false, code: sawUnsupported ? 'unsupported-container' : 'no-playable-file' };
+}
+
+const SUBTITLE_FORMATS = new Set<SubtitleFileEntry['format']>(['srt', 'vtt', 'ass', 'ssa']);
+
+const stem = (name: string) => name.replace(/\.[^.]*$/, '').toLowerCase();
+
+/**
+ * Subtitle files in the torrent (docs/decisions/0004): those whose name starts with the video's
+ * basename first (`Movie.mkv` → `Movie.en.srt`), then the rest, each group in path order.
+ */
+export function listSubtitleFiles(
+  files: readonly FileLike[],
+  videoName: string | null,
+): SubtitleFileEntry[] {
+  const video = videoName ? stem(videoName) : null;
+  const entries: (SubtitleFileEntry & { matches: boolean })[] = [];
+  files.forEach((f, index) => {
+    const format = extensionOf(f.name) as SubtitleFileEntry['format'];
+    if (!SUBTITLE_FORMATS.has(format)) return;
+    const matches = video !== null && f.name.toLowerCase().startsWith(video);
+    entries.push({ index, path: f.path, name: f.name, length: f.length, format, matches });
+  });
+  return entries
+    .sort((a, b) => Number(b.matches) - Number(a.matches) || a.path.localeCompare(b.path))
+    .map(({ matches: _, ...entry }) => entry);
 }

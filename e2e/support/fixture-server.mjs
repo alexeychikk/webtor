@@ -5,8 +5,10 @@
 //   http://127.0.0.1:9000/magnet/<name>     a magnet with xs= + ws= + tr=      → play with zero peers
 //   ws://127.0.0.1:8000                     WebSocket tracker for real WebRTC swarms between pages
 //
-// <name> is any file in e2e/fixtures. Info hashes are deterministic (fixed piece length, no dates
-// inside the info dict).
+// <name> is any file in e2e/fixtures, or any directory there: a directory becomes a multi-file
+// torrent named after it, whose web seed is the server root (BEP-19: <ws>/<name>/<path>). Symlinks
+// are followed, so a directory can reuse the top-level fixtures. Info hashes are deterministic
+// (fixed piece length, no dates inside the info dict).
 import { createServer } from 'node:http';
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -25,15 +27,15 @@ const TRACKER = `ws://${HOST}:${TRACKER_PORT}`;
 /** @type {Map<string, { torrent: Buffer, infoHash: string }>} */
 const torrents = new Map();
 for (const name of readdirSync(ROOT)) {
-  if (!statSync(join(ROOT, name)).isFile()) continue;
+  const isDir = statSync(join(ROOT, name)).isDirectory();
   const torrent = await new Promise((res, rej) =>
     createTorrent(
-      readFileSync(join(ROOT, name)),
+      isDir ? join(ROOT, name) : readFileSync(join(ROOT, name)),
       {
         name,
         pieceLength: 16384,
         announceList: [[TRACKER]],
-        urlList: [`${BASE}/${name}`],
+        urlList: [isDir ? `${BASE}/` : `${BASE}/${name}`],
         createdBy: 'webtor-e2e',
         creationDate: 0,
       },
@@ -46,10 +48,11 @@ for (const name of readdirSync(ROOT)) {
 const magnetFor = (name) => {
   const t = torrents.get(name);
   if (!t) return null;
+  const isDir = statSync(join(ROOT, name)).isDirectory();
   const q = new URLSearchParams({
     dn: name,
     xs: `${BASE}/${name}.torrent`,
-    ws: `${BASE}/${name}`,
+    ws: isDir ? `${BASE}/` : `${BASE}/${name}`,
     tr: TRACKER,
   });
   return `magnet:?xt=urn:btih:${t.infoHash}&${q}`;
@@ -76,7 +79,7 @@ createServer((req, res) => {
     return res.end(torrents.get(path.slice(0, -'.torrent'.length))?.torrent);
   }
   const file = join(ROOT, path);
-  if (!path || path.includes('..') || !existsSync(file)) {
+  if (!path || path.includes('..') || !existsSync(file) || !statSync(file).isFile()) {
     res.writeHead(404);
     return res.end();
   }

@@ -12,17 +12,19 @@ package relay
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -32,21 +34,37 @@ import (
 // Version is reported by GET {base}/v1/info; set with -ldflags at release time.
 var Version = "dev"
 
+// Defaults for zero Options fields.
+const (
+	DefaultMaxTorrents     = 3
+	DefaultMetadataTimeout = 90 * time.Second
+	DefaultIdleTimeout     = 10 * time.Minute
+	DefaultEvictAfter      = time.Minute
+	DefaultReadahead       = 32 << 20
+)
+
 // Options configure a Server.
 type Options struct {
-	// Token is the secret first path segment of every URL ({base} = scheme://host/{token}). Required.
+	// Token is the secret first path segment of every API URL ({base} = scheme://host/{token}). Required.
 	Token string
-	// MetadataTimeout bounds how long a metainfo request waits for the swarm.
+	// MaxTorrents caps the torrents held at once; adding one more answers 429.
+	MaxTorrents int
+	// MetadataTimeout bounds how long a metainfo request waits for the swarm (then 504).
 	MetadataTimeout time.Duration
-	// IdleTimeout drops a torrent (and its downloaded data) after no request touched it for this long.
+	// IdleTimeout drops a torrent (and deletes its data) once no request has touched it for this long.
 	IdleTimeout time.Duration
+	// EvictAfter: when MaxTorrents is reached, a torrent idle for this long is dropped to make room
+	// for a new one instead of answering 429 (the tab that opened it has moved on).
+	EvictAfter time.Duration
 	// ExtraTrackers are announced to for every torrent, in addition to the magnet's own `tr=`.
 	ExtraTrackers []string
 	// Readahead is how far past each served range the relay keeps downloading.
 	Readahead int64
-	// DataDir, when set, holds each torrent's pieces in DataDir/<infohash>; it is deleted on drop.
+	// DataDir, when set, is the client's NewStorage directory: a torrent's data dir is deleted on drop.
 	DataDir string
-	Logger  *slog.Logger
+	// App, when set, is served at "/" (the embedded web app).
+	App    fs.FS
+	Logger *slog.Logger
 }
 
 // Server is the HTTP side of the relay. It owns no listener; mount Handler() anywhere.
@@ -57,29 +75,46 @@ type Server struct {
 
 	mu       sync.Mutex
 	torrents map[metainfo.Hash]*entry
+	closed   bool
 }
 
 type entry struct {
-	t        *torrent.Torrent
+	ih metainfo.Hash
+	t  *torrent.Torrent
+	// active counts requests in flight; a torrent is never dropped while one runs.
+	active   int
 	lastUsed time.Time
-	// prefetch sits at the end of the last served range so the next pieces keep downloading between
-	// the browser's requests.
+	// prefetch sits at the end of the last requested range so the next pieces keep downloading
+	// between the browser's requests.
 	prefetch torrent.Reader
+	// lastNudge rate-limits watchStall's re-requests.
+	lastNudge time.Time
 }
 
-// New wraps an existing client. Callers own the client's lifetime.
+// ErrTooManyTorrents is returned (as 429) when MaxTorrents torrents are busy.
+var ErrTooManyTorrents = errors.New("too many torrents open on this relay")
+
+var errClosed = errors.New("relay is shutting down")
+
+// New wraps an existing client. Callers own the client's lifetime; call Close before closing it.
 func New(cl *torrent.Client, opts Options) (*Server, error) {
-	if len(opts.Token) < 8 {
-		return nil, errors.New("relay: token must be at least 8 characters")
+	if len(opts.Token) < 8 || strings.ContainsAny(opts.Token, "/?#%") {
+		return nil, errors.New("relay: token must be at least 8 characters, without / ? # %")
 	}
-	if opts.MetadataTimeout == 0 {
-		opts.MetadataTimeout = 90 * time.Second
+	if opts.MaxTorrents <= 0 {
+		opts.MaxTorrents = DefaultMaxTorrents
 	}
-	if opts.IdleTimeout == 0 {
-		opts.IdleTimeout = 10 * time.Minute
+	if opts.MetadataTimeout <= 0 {
+		opts.MetadataTimeout = DefaultMetadataTimeout
 	}
-	if opts.Readahead == 0 {
-		opts.Readahead = 32 << 20
+	if opts.IdleTimeout <= 0 {
+		opts.IdleTimeout = DefaultIdleTimeout
+	}
+	if opts.EvictAfter <= 0 {
+		opts.EvictAfter = min(DefaultEvictAfter, opts.IdleTimeout)
+	}
+	if opts.Readahead <= 0 {
+		opts.Readahead = DefaultReadahead
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -89,43 +124,115 @@ func New(cl *torrent.Client, opts Options) (*Server, error) {
 
 // RunJanitor drops idle torrents until ctx is done.
 func (s *Server) RunJanitor(ctx context.Context) {
-	tick := time.NewTicker(30 * time.Second)
+	tick := time.NewTicker(min(30*time.Second, max(s.opts.IdleTimeout/4, 10*time.Millisecond)))
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-tick.C:
-			s.mu.Lock()
-			for ih, e := range s.torrents {
-				if now.Sub(e.lastUsed) > s.opts.IdleTimeout {
-					s.log.Info("dropping idle torrent", "infohash", ih.HexString())
-					if e.prefetch != nil {
-						e.prefetch.Close()
-					}
-					e.t.Drop()
-					delete(s.torrents, ih)
-					if s.opts.DataDir != "" {
-						_ = os.RemoveAll(filepath.Join(s.opts.DataDir, ih.HexString()))
-					}
-				}
-			}
-			s.mu.Unlock()
+			s.dropIdle(now)
 		}
 	}
 }
 
-// Handler serves {token}/v1/... with CORS for any origin (the token is the access control).
+func (s *Server) dropIdle(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.torrents {
+		if e.active == 0 && now.Sub(e.lastUsed) > s.opts.IdleTimeout {
+			s.dropLocked(e, "idle")
+		}
+	}
+}
+
+// Close drops every torrent and deletes its data. New requests get 503 afterwards.
+func (s *Server) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	for _, e := range s.torrents {
+		s.dropLocked(e, "shutdown")
+	}
+}
+
+// Torrents is the number of torrents held.
+func (s *Server) Torrents() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.torrents)
+}
+
+func (s *Server) dropLocked(e *entry, reason string) {
+	s.log.Info("dropping torrent", "infohash", e.ih.HexString(), "reason", reason)
+	if e.prefetch != nil {
+		e.prefetch.Close()
+		e.prefetch = nil
+	}
+	e.t.Drop()
+	delete(s.torrents, e.ih)
+	if s.opts.DataDir != "" {
+		if err := os.RemoveAll(TorrentDir(s.opts.DataDir, e.ih)); err != nil {
+			s.log.Warn("deleting torrent data", "infohash", e.ih.HexString(), "err", err)
+		}
+	}
+}
+
+// Handler serves the API under /{token}/v1/ (CORS for any origin: the token is the access control)
+// and Options.App everywhere else.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	p := "/" + s.opts.Token + "/v1"
-	mux.HandleFunc("GET "+p+"/info", s.handleInfo)
-	mux.HandleFunc("GET "+p+"/torrents/{ih}/metainfo", s.handleMetainfo)
-	mux.HandleFunc("GET "+p+"/torrents/{ih}/stats", s.handleStats)
-	mux.HandleFunc("GET "+p+"/torrents/{ih}/files", s.handleFiles)
-	mux.HandleFunc("GET "+p+"/torrents/{ih}/webseed/{path...}", s.handleWebseed)
-	mux.HandleFunc("HEAD "+p+"/torrents/{ih}/webseed/{path...}", s.handleWebseed)
-	return cors(mux)
+	mux.HandleFunc("GET /v1/info", s.handleInfo)
+	mux.HandleFunc("GET /v1/torrents/{ih}/metainfo", s.handleMetainfo)
+	mux.HandleFunc("GET /v1/torrents/{ih}/stats", s.handleStats)
+	mux.HandleFunc("GET /v1/torrents/{ih}/files", s.handleFiles)
+	mux.HandleFunc("GET /v1/torrents/{ih}/webseed/{path...}", s.handleWebseed)
+	mux.HandleFunc("HEAD /v1/torrents/{ih}/webseed/{path...}", s.handleWebseed)
+	api := cors(s.logRequests(mux))
+	app := appHandler(s.opts.App)
+	prefix := "/" + s.opts.Token
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if seg, rest, ok := splitFirstSegment(r.URL.Path); ok &&
+			subtle.ConstantTimeCompare([]byte(seg), []byte(s.opts.Token)) == 1 {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = rest
+			r2.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, prefix)
+			api.ServeHTTP(w, r2)
+			return
+		}
+		app.ServeHTTP(w, r)
+	})
+}
+
+// splitFirstSegment splits "/seg/rest" into "seg" and "/rest"; ok is false without a second slash.
+func splitFirstSegment(p string) (seg, rest string, ok bool) {
+	if !strings.HasPrefix(p, "/") {
+		return "", "", false
+	}
+	i := strings.IndexByte(p[1:], '/')
+	if i < 0 {
+		return "", "", false
+	}
+	return p[1 : i+1], p[i+1:], true
+}
+
+func appHandler(app fs.FS) http.Handler {
+	if app == nil {
+		return http.NotFoundHandler()
+	}
+	files := http.FileServerFS(app)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h := w.Header()
+		h.Set("Cache-Control", "no-cache")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		files.ServeHTTP(w, r)
+	})
 }
 
 func cors(next http.Handler) http.Handler {
@@ -149,6 +256,40 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
+// logRequests logs API requests at debug level, and failures at info/warn. It runs after the token
+// was stripped from the path, so it can never log the token.
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		lvl := slog.LevelDebug
+		switch {
+		case sw.code >= 500 && sw.code != http.StatusGatewayTimeout:
+			lvl = slog.LevelWarn
+		case sw.code >= 400:
+			lvl = slog.LevelInfo
+		}
+		s.log.Log(r.Context(), lvl, "request", "method", r.Method, "path", r.URL.Path,
+			"range", r.Header.Get("Range"), "status", sw.code, "took", time.Since(start).Round(time.Millisecond))
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	code        int
+	wroteHeader bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.code, w.wroteHeader = code, true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"name": "webtor-relay", "version": Version, "api": 1})
 }
@@ -156,11 +297,17 @@ func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
 // handleMetainfo adds the torrent (magnet params in the query: tr=, dn=, x.pe=, ws=) and waits for
 // its info dictionary.
 func (s *Server) handleMetainfo(w http.ResponseWriter, r *http.Request) {
-	e, err := s.add(r.PathValue("ih"), r.URL.Query())
+	ih, err := parseInfoHash(r.PathValue("ih"))
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	e, err := s.acquire(ih, r.URL.Query())
+	if err != nil {
+		s.addError(w, err)
+		return
+	}
+	defer s.release(e)
 	ctx, cancel := context.WithTimeout(r.Context(), s.opts.MetadataTimeout)
 	defer cancel()
 	select {
@@ -169,14 +316,28 @@ func (s *Server) handleMetainfo(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusGatewayTimeout, errors.New("no metadata from the swarm yet"))
 		return
 	}
-	s.touch(e)
 	// Only the info dictionary: the page can't use the UDP/HTTP trackers the relay knows, and the
 	// app passes its own WebSocket trackers to WebTorrent.
 	mi := metainfo.MetaInfo{InfoBytes: e.t.Metainfo().InfoBytes}
 	w.Header().Set("Content-Type", "application/x-bittorrent")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := mi.Write(w); err != nil {
-		s.log.Warn("writing metainfo", "err", err)
+		s.log.Debug("writing metainfo", "err", err)
+	}
+}
+
+func (s *Server) addError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrTooManyTorrents):
+		w.Header().Set("Retry-After", fmt.Sprint(int(s.opts.EvictAfter.Seconds())))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":       fmt.Sprintf("%v (max %d); close another one or wait", err, s.opts.MaxTorrents),
+			"maxTorrents": s.opts.MaxTorrents,
+		})
+	case errors.Is(err, errClosed):
+		httpError(w, http.StatusServiceUnavailable, err)
+	default:
+		httpError(w, http.StatusBadRequest, err)
 	}
 }
 
@@ -193,21 +354,14 @@ type Stats struct {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	ih, err := parseInfoHash(r.PathValue("ih"))
-	if err != nil {
-		httpError(w, http.StatusBadRequest, err)
+	e, ok := s.existing(w, r, http.StatusNotFound)
+	if !ok {
 		return
 	}
-	s.mu.Lock()
-	e := s.torrents[ih]
-	s.mu.Unlock()
-	if e == nil {
-		httpError(w, http.StatusNotFound, errors.New("torrent not added"))
-		return
-	}
+	defer s.release(e)
 	st := e.t.Stats()
 	out := Stats{
-		InfoHash:        ih.HexString(),
+		InfoHash:        e.ih.HexString(),
 		Peers:           st.TotalPeers,
 		ActivePeers:     st.ActivePeers,
 		Seeders:         st.ConnectedSeeders,
@@ -234,6 +388,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer s.release(e)
 	files := e.t.Files()
 	out := make([]FileInfo, len(files))
 	for i, f := range files {
@@ -246,8 +401,9 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// withInfo finds an added torrent that has its metadata, or answers the request with an error.
-func (s *Server) withInfo(w http.ResponseWriter, r *http.Request) (*entry, bool) {
+// existing finds an added torrent and marks a request on it as active (release it when done), or
+// answers with missingCode.
+func (s *Server) existing(w http.ResponseWriter, r *http.Request, missingCode int) (*entry, bool) {
 	ih, err := parseInfoHash(r.PathValue("ih"))
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -255,15 +411,28 @@ func (s *Server) withInfo(w http.ResponseWriter, r *http.Request) (*entry, bool)
 	}
 	s.mu.Lock()
 	e := s.torrents[ih]
+	if e != nil {
+		e.active++
+	}
 	s.mu.Unlock()
-	if e == nil || e.t.Info() == nil {
+	if e == nil {
 		// The app always fetches metainfo first; anything else is a stale tab or a relay restart.
-		// 503 makes WebTorrent retry the piece later.
-		httpError(w, http.StatusServiceUnavailable, errors.New("torrent not added; fetch metainfo first"))
+		// For the web seed, 503 makes WebTorrent retry the piece later.
+		httpError(w, missingCode, errors.New("torrent not added; fetch metainfo first"))
 		return nil, false
 	}
-	s.touch(e)
 	return e, true
+}
+
+// withInfo is existing for a torrent that has its metadata.
+func (s *Server) withInfo(w http.ResponseWriter, r *http.Request) (*entry, bool) {
+	e, ok := s.existing(w, r, http.StatusServiceUnavailable)
+	if ok && e.t.Info() == nil {
+		s.release(e)
+		httpError(w, http.StatusServiceUnavailable, errors.New("no metadata yet; fetch metainfo first"))
+		return nil, false
+	}
+	return e, ok
 }
 
 func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
@@ -271,42 +440,141 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer s.release(e)
 	files := e.t.Files()
-	paths := make([]string, len(files))
+	wf := make([]WebseedFile, len(files))
 	for i, f := range files {
-		paths[i] = f.Path()
+		wf[i] = WebseedFile{Path: f.Path(), Length: f.Length()}
 	}
-	idx, ok := ResolveWebseedPath(e.t.Info().Name, paths, r.PathValue("path"), r.URL.RawQuery)
+	query := ""
+	if r.URL.RawQuery != "" || r.URL.ForceQuery {
+		query = "?" + r.URL.RawQuery
+	}
+	idx, ok := ResolveWebseedPath(wf, r.PathValue("path"), query, RangeMinLength(r.Header.Get("Range")))
 	if !ok {
 		httpError(w, http.StatusNotFound, fmt.Errorf("no such file: %q", r.PathValue("path")))
 		return
 	}
 	f := files[idx]
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if r.Method == http.MethodHead {
+		http.ServeContent(w, r, "", time.Time{}, io.NewSectionReader(nopReaderAt{}, 0, f.Length()))
+		return
+	}
+	// Download the whole requested range at once, and the Readahead after it with a lower priority,
+	// so the next request (WebTorrent asks piece by piece) usually finds its data already here. A
+	// seek simply moves both: data around the old position stops being prioritised.
+	end := RangeEnd(r.Header.Get("Range"), f.Length())
+	if end < f.Length() {
+		s.prefetchFrom(e, f, end)
+	}
 	rd := f.NewReader()
 	defer rd.Close()
 	rd.SetContext(r.Context())
 	// The page re-verifies every piece hash, so don't wait for the relay's own verification.
 	rd.SetResponsive()
 	ra := s.opts.Readahead
-	rd.SetReadaheadFunc(func(torrent.ReadaheadContext) int64 { return ra })
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/octet-stream")
-	sr := &endTracker{ReadSeeker: rd}
-	http.ServeContent(w, r, "", time.Time{}, sr)
-	s.prefetchFrom(e, f, sr.pos)
+	rd.SetReadaheadFunc(func(rc torrent.ReadaheadContext) int64 {
+		if end < f.Length() {
+			return max(end-rc.CurrentPos, 0)
+		}
+		return ra
+	})
+	pr := &progressReader{ReadSeeker: rd}
+	defer s.watchStall(r.Context(), e, pr)()
+	http.ServeContent(w, r, "", time.Time{}, pr)
 }
+
+// stallCheck is how long a webseed read may go without any data, from this request or from the
+// torrent's peers, before the relay re-requests its pieces. A var so tests can shorten it.
+var stallCheck = 3 * time.Second
+
+// progressReader counts the bytes served, so watchStall can tell a slow read from a stuck one.
+type progressReader struct {
+	io.ReadSeeker
+	n atomic.Int64
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.ReadSeeker.Read(b)
+	// nudge turns download off for an instant; anacrolix fails waiting reads meanwhile.
+	for tries := 0; n == 0 && err != nil && err.Error() == errDownloadDisabled && tries < 50; tries++ {
+		time.Sleep(10 * time.Millisecond)
+		n, err = p.ReadSeeker.Read(b)
+	}
+	p.n.Add(int64(n))
+	return n, err
+}
+
+// errDownloadDisabled is the text of anacrolix's unexported read error while DisallowDataDownload
+// is in effect.
+const errDownloadDisabled = "torrent data downloading disabled"
+
+// watchStall works around a missed request update in anacrolix/torrent: now and then a connection
+// to a seeder stays interested and unchoked but holds no requests while a reader waits, and nothing
+// wakes it until the keep-alive reconnect a minute later (the browser gives up after 60 s). When
+// neither this read nor the torrent made progress for a stallCheck, the relay reconnects. Returns the function that stops it.
+func (s *Server) watchStall(ctx context.Context, e *entry, pr *progressReader) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		tick := time.NewTicker(stallCheck)
+		defer tick.Stop()
+		served, chunks := pr.n.Load(), usefulChunks(e.t)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			nowServed, nowChunks := pr.n.Load(), usefulChunks(e.t)
+			if nowServed == served && nowChunks == chunks && !e.t.Complete().Bool() {
+				s.nudge(e)
+			}
+			served, chunks = nowServed, nowChunks
+		}
+	}()
+	return cancel
+}
+
+func usefulChunks(t *torrent.Torrent) int64 {
+	st := t.Stats()
+	return st.ChunksReadUseful.Int64()
+}
+
+// nudge makes the client re-request the torrent's wanted pieces, at most once per stallCheck.
+func (s *Server) nudge(e *entry) {
+	s.mu.Lock()
+	if s.torrents[e.ih] != e || time.Since(e.lastNudge) < stallCheck {
+		s.mu.Unlock()
+		return
+	}
+	e.lastNudge = time.Now()
+	s.mu.Unlock()
+	s.log.Info("no data for a while, re-requesting pieces", "infohash", e.ih.HexString())
+	// Only cancelling every request unsticks it (just recomputing requests doesn't); in the browser
+	// that happens when its 60 s timeout closes the readers. Readers fail while download is off;
+	// progressReader retries that.
+	e.t.DisallowDataDownload()
+	e.t.AllowDataDownload()
+}
+
+// nopReaderAt lets ServeContent answer HEAD (it only needs the size) without touching the torrent.
+type nopReaderAt struct{}
+
+func (nopReaderAt) ReadAt([]byte, int64) (int, error) { return 0, io.EOF }
 
 // prefetchFrom moves the torrent's prefetch reader to off within f, so the next Readahead bytes keep
 // downloading while the browser is busy elsewhere.
 func (s *Server) prefetchFrom(e *entry, f *torrent.File, off int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.torrents[e.ih] != e {
+		return // dropped meanwhile
+	}
 	if e.prefetch != nil {
 		e.prefetch.Close()
-	}
-	if off >= f.Length() {
 		e.prefetch = nil
-		return
 	}
 	rd := f.NewReader()
 	ra := s.opts.Readahead
@@ -318,30 +586,22 @@ func (s *Server) prefetchFrom(e *entry, f *torrent.File, off int64) {
 	e.prefetch = rd
 }
 
-// endTracker remembers the furthest offset read, i.e. where the browser will most likely read next.
-type endTracker struct {
-	io.ReadSeeker
-	pos int64
-}
-
-func (t *endTracker) Read(p []byte) (int, error) {
-	n, err := t.ReadSeeker.Read(p)
-	if cur, serr := t.ReadSeeker.Seek(0, io.SeekCurrent); serr == nil && cur > t.pos {
-		t.pos = cur
-	}
-	return n, err
-}
-
-func (s *Server) add(ihStr string, q url.Values) (*entry, error) {
-	ih, err := parseInfoHash(ihStr)
-	if err != nil {
-		return nil, err
-	}
+// acquire finds or adds the torrent and marks a request on it as active.
+func (s *Server) acquire(ih metainfo.Hash, q url.Values) (*entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errClosed
+	}
 	if e := s.torrents[ih]; e != nil {
-		e.lastUsed = time.Now()
+		e.active++
 		return e, nil
+	}
+	if len(s.torrents) >= s.opts.MaxTorrents {
+		s.evictLocked(time.Now())
+	}
+	if len(s.torrents) >= s.opts.MaxTorrents {
+		return nil, ErrTooManyTorrents
 	}
 	spec := &torrent.TorrentSpec{
 		DisplayName: q.Get("dn"),
@@ -354,14 +614,28 @@ func (s *Server) add(ihStr string, q url.Values) (*entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.log.Info("added torrent", "infohash", ih.HexString(), "name", spec.DisplayName)
-	e := &entry{t: t, lastUsed: time.Now()}
+	s.log.Info("added torrent", "infohash", ih.HexString(), "name", spec.DisplayName, "torrents", len(s.torrents)+1)
+	e := &entry{ih: ih, t: t, lastUsed: time.Now(), active: 1}
 	s.torrents[ih] = e
 	return e, nil
 }
 
-func (s *Server) touch(e *entry) {
+// evictLocked drops the least recently used torrent that has been idle for EvictAfter, if any.
+func (s *Server) evictLocked(now time.Time) {
+	var lru *entry
+	for _, e := range s.torrents {
+		if e.active == 0 && now.Sub(e.lastUsed) >= s.opts.EvictAfter && (lru == nil || e.lastUsed.Before(lru.lastUsed)) {
+			lru = e
+		}
+	}
+	if lru != nil {
+		s.dropLocked(lru, "evicted for a new torrent")
+	}
+}
+
+func (s *Server) release(e *entry) {
 	s.mu.Lock()
+	e.active--
 	e.lastUsed = time.Now()
 	s.mu.Unlock()
 }

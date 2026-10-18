@@ -33,16 +33,24 @@ and a default public tracker list. WebRTC and seeding-after-done are off. API (`
 - `GET {base}/v1/info` → `{name, version, api}`. Use it for "test connection".
 - `GET {base}/v1/torrents/{ih}/metainfo?<magnet query>` adds the torrent (`tr=` of every scheme,
   `dn=`, `x.pe=`, `ws=`) and waits up to 90 s for the info dict. It answers with a .torrent that
-  holds only `info`, or 504 when the swarm gave no metadata.
+  holds only `info`, or 504 when the swarm gave no metadata. With `-max-torrents` (default 3)
+  torrents busy it answers 429 `{error, maxTorrents}`; a torrent idle for a minute is evicted
+  instead.
 - `GET {base}/v1/torrents/{ih}/files` → `[{index, path, length, webseedPath}]`.
 - `GET {base}/v1/torrents/{ih}/stats` → swarm peers/seeders, bytes. This is what the UI shows,
   because WebTorrent only sees one wire, the web seed.
 - `GET|HEAD {base}/v1/torrents/{ih}/webseed/[<name>/<path>]` returns file bytes with `Range`
   (`http.ServeContent` over an anacrolix `Reader`). The reader is responsive (the page re-hashes)
-  with a 32 MiB readahead. A prefetch reader stays at the end of the last range served.
-  `ResolveWebseedPath` copes with WebTorrent not percent-encoding `#`/`?` in file names.
-- Torrents idle for 10 min are dropped and their pieces deleted. Nothing survives a restart. The
-  token is generated once and kept in the data dir.
+  and reads ahead to the end of the requested range. A prefetch reader parks at that end with a
+  32 MiB readahead. `ResolveWebseedPath` copes with WebTorrent not percent-encoding `#`/`?` in file
+  names (a `#` loses the rest of the path: the relay matches the unique file it can still be).
+  anacrolix sometimes leaves a seeder connection interested and unchoked but sending no requests
+  (about 1 cold 200 MB run in 10 on loopback), until the readers go away when the browser times
+  out after 60 s. So a read that gets no data for 3 s toggles the torrent's data download off and
+  on, which cancels every request; readers retry the error this causes. Stalls then last 3–6 s.
+- Anything outside `/<token>/` is the web app embedded in the binary (`GET /` → `index.html`).
+- Torrents idle for 10 min are dropped and their pieces deleted, as at shutdown and startup. Nothing
+  survives a restart. The token is generated once and kept in the data dir. Logs never contain it.
 
 **The app** keeps WebTorrent. With a relay configured, it fetches `metainfo` itself, so it controls
 the timeout, retries and error codes. It then calls `client.add(torrentBytes, {announce: <ws

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFile, pickVideoFile } from './files';
+import { classifyFile, listSubtitleFiles, pickVideoFile } from './files';
 
 const f = (name: string, length: number) => ({ name, path: `t/${name}`, length });
 
@@ -29,5 +29,25 @@ describe('pickVideoFile', () => {
   });
   it('reports no playable file when there is no video', () => {
     expect(pickVideoFile([f('a.txt', 1)])).toEqual({ ok: false, code: 'no-playable-file' });
+  });
+});
+
+describe('listSubtitleFiles', () => {
+  const f = (path: string) => ({ path, name: path.split('/').pop()!, length: 100 });
+  it('lists srt/vtt/ass/ssa with the video basename first', () => {
+    const files = [
+      f('t/Movie.mkv'),
+      f('t/Subs/English.srt'),
+      f('t/Movie.ru.ass'),
+      f('t/Movie.en.srt'),
+      f('t/notes.txt'),
+      f('t/Other.vtt'),
+    ];
+    expect(listSubtitleFiles(files, 'Movie.mkv').map((e) => [e.index, e.format])).toEqual([
+      [3, 'srt'],
+      [2, 'ass'],
+      [5, 'vtt'],
+      [1, 'srt'],
+    ]);
   });
 });
