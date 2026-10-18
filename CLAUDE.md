@@ -65,7 +65,10 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   mse-player.ts                Input → per-SourceBuffer Conversion → MSE; back-pressure, seek restart
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy, buffer math, no-peers/stalled)
-src/lib/subtitles/             MKV subtitle extractor, SRT/VTT parsing, JASSUB glue
+src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
+  manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick
+  srt.ts vtt.ts ass.ts         own parsers → SubtitleCue (ASS/SSA as plain text until JASSUB)
+  encoding.ts language.ts tracks.ts   BOM/UTF-8/1251/1252 decode, filename language, default rule
 src/lib/torrent/relay.ts       webtor-relay contract: URL check, endpoints, error mapping, stats merge
   relay-client.ts              fetch glue (metainfo, /v1/info, /stats); relay-settings.svelte.ts
   RelayDialog.svelte           settings dialog (setup steps, Test, privacy copy)
@@ -96,9 +99,16 @@ docs/decisions/                ADRs
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
 - UI test hooks: `data-testid` `video`, `status` (with `data-phase`), `error` and `notice` (with
-  `data-code` = the `PlaybackErrorCode`).
+  `data-code` = the `PlaybackErrorCode`), `subtitles` (the `<select>`; values `sidecar:<file index>`,
+  `upload:<n>`, `""` = Off) and `subtitle-upload` (file input). Check shown cues through
+  `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
+- New subtitle sources (embedded MKV, JASSUB) plug into `SubtitleManager`: list a
+  `SubtitleTrackInfo` (key `<kind>:<id>`) with a loader for its cues; the selector groups by `kind`.
+  The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
+- A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the
+  server root). `with-sidecar/` = `sample.mkv` + `sidecar.en.srt` (symlinks to the top-level files).
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the

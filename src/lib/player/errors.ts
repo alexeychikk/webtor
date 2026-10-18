@@ -15,6 +15,7 @@ export type PlaybackErrorCode =
   | 'no-playable-audio'
   | 'torrent-failed'
   | 'playback-failed'
+  | 'subtitle-failed'
   | 'relay-unreachable'
   | 'relay-no-metadata'
   | 'relay-error';
@@ -42,6 +43,8 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
     'None of the audio tracks in this video can be played in this browser, so it plays muted.',
   'torrent-failed': 'The torrent could not be loaded.',
   'playback-failed': 'The browser failed to play this video.',
+  'subtitle-failed':
+    'This subtitle file could not be read. Supported: SRT, WebVTT and ASS/SSA (shown as plain text).',
   'relay-unreachable':
     'Cannot reach your relay. Check that webtor-relay is running and the relay URL is right. If the ' +
     'browser asked to allow access to local network devices or apps, allow it and try again.',

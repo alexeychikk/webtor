@@ -5,7 +5,7 @@
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
 import { torrentByteSource } from '../torrent/byte-source';
 import { addRelayTorrent, addTorrent, destroyTorrent } from '../torrent/client';
-import { pickVideoFile } from '../torrent/files';
+import { listSubtitleFiles, pickVideoFile } from '../torrent/files';
 import {
   mergeRelayStats,
   relayEndpoints,
@@ -14,6 +14,7 @@ import {
 } from '../torrent/relay';
 import { fetchRelayMetainfo, fetchRelayStats } from '../torrent/relay-client';
 import { relaySettings } from '../torrent/relay-settings.svelte';
+import { SubtitleManager } from '../subtitles/manager.svelte';
 import { isTorrentId } from '../torrent/trackers';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
@@ -42,6 +43,8 @@ export class PlayerController {
   notices = $state<PlaybackErrorCode[]>([]);
   error = $state<PlaybackError | null>(null);
   fileName = $state<string | null>(null);
+  /** Subtitle selector state; sources are reset with every `load()`. */
+  readonly subtitles = new SubtitleManager();
   /** This playback goes through the user's relay (docs/decisions/0006). */
   viaRelay = $state(false);
 
@@ -63,6 +66,7 @@ export class PlayerController {
     await this.stop();
     const run = ++this.run;
     this.video = video;
+    this.subtitles.attach(video);
     this.phase = 'connecting';
     this.error = null;
     this.notices = [];
@@ -112,6 +116,11 @@ export class PlayerController {
     if (!pick.ok) return this.fail(new PlaybackError(pick.code));
     const file = torrent.files[pick.file.index]!;
     this.fileName = file.name;
+    this.subtitles.addSidecars(listSubtitleFiles(torrent.files, file.name), async (entry) => {
+      const sidecar = torrent.files[entry.index];
+      if (!sidecar) throw new Error(`no file ${entry.index}`);
+      return new Uint8Array(await sidecar.arrayBuffer());
+    });
 
     let player: MsePlayer;
     try {
@@ -179,6 +188,7 @@ export class PlayerController {
     this.videoEvents = null;
     this.player?.destroy();
     this.player = null;
+    this.subtitles.reset();
     const torrent = this.torrent;
     this.torrent = null;
     this.phase = 'idle';
@@ -194,6 +204,7 @@ export class PlayerController {
     this.phase = 'error';
     this.player?.destroy();
     this.player = null;
+    this.subtitles.reset();
     clearInterval(this.timer);
     this.stopRelay();
     // A fatal error ends this playback: stop downloading.
