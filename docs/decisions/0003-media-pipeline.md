@@ -47,12 +47,17 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   `codec === null`) are listed as unsupported. If no audio track is playable, play the video muted
   with a notice.
 - **Audio track switching** (`HTMLMediaElement.audioTracks` is not used anywhere):
-  1. Cancel the audio conversion, then `abort()` and `remove(0, Infinity)` on the audio SourceBuffer.
-  2. Call `changeType(mime)` if the new output codec differs.
-  3. Set `timestampOffset = s`, where `s = max(0, currentTime - 0.25)`, and restart with
-     `trim.start = s`.
-     Video keeps playing; the audio gap is under a second. The default track is the user's last
-     chosen language (localStorage), else the `default`-flagged track, else the first one.
+  1. Cancel the audio conversion, then `remove(t + 1, Infinity)` and `abort()` on the audio
+     SourceBuffer, where `t = currentTime`. The old track stays buffered for one more second, so
+     the element never waits on an empty audio buffer (clearing it all stalled playback until the
+     first new fragment arrived).
+  2. Call `changeType(mime)` if the new output codec differs (e.g. AAC copy → Opus transcode).
+  3. Set `timestampOffset = t` and restart with `trim.start = t`. The new track's appends
+     overwrite the old one from `t` on. Video keeps playing; the audio gap is under a second.
+     If the new track fails to start, the player goes back to the previous one.
+     The default track is the user's last chosen language (`localStorage['webtor:audio-lang']`),
+     else the `default`-flagged track, else the first one; unsupported tracks are skipped.
+     The decision table is `decideAudio` / `pickTranscodeTarget` in `src/lib/player/codecs.ts`.
 - **Loading:** `mediabunny` is imported dynamically when the first torrent is added; codec extensions
   load only when a track needs them (each is ~1–2 MB of wasm).
 

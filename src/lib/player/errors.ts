@@ -13,6 +13,7 @@ export type PlaybackErrorCode =
   | 'unsupported-audio-codec'
   | 'no-mse'
   | 'no-playable-audio'
+  | 'audio-convert-failed'
   | 'torrent-failed'
   | 'playback-failed';
 
@@ -36,6 +37,8 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'no-mse': 'This browser cannot stream video (Media Source Extensions missing; iOS needs 17.1+).',
   'no-playable-audio':
     'None of the audio tracks in this video can be played in this browser, so it plays muted.',
+  'audio-convert-failed':
+    'This audio track could not be converted in the browser. Pick another audio track.',
   'torrent-failed': 'The torrent could not be loaded.',
   'playback-failed': 'The browser failed to play this video.',
 };

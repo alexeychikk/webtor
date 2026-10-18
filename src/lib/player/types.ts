@@ -34,6 +34,10 @@ export interface AudioTrackInfo {
   isDefault: boolean;
   /** `copy`: MSE plays it as is; `transcode`: decoded + re-encoded in-browser; `unsupported`: greyed out. */
   playback: 'copy' | 'transcode' | 'unsupported';
+  /** Mediabunny codec of what reaches MSE (`aac`, `opus`, …); `null` when unsupported. */
+  outputCodec: string | null;
+  /** Why an `unsupported` track can't play, for the selector. */
+  reason?: string;
 }
 
 export type SubtitleSourceKind = 'embedded' | 'sidecar' | 'upload';

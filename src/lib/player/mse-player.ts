@@ -1,11 +1,20 @@
 /**
  * MSE glue (docs/decisions/0003): one Mediabunny `Input` over the torrent file, one `Conversion` per
- * SourceBuffer (video copy, audio copy) remuxing to fragmented MP4. Decisions live in pure modules
- * (`codecs.ts`, `buffer.ts`); this file only wires them to the DOM.
+ * SourceBuffer (video copy; audio copy or transcode) remuxing to fragmented MP4. Decisions live in
+ * pure modules (`codecs.ts`, `buffer.ts`); this file only wires them to the DOM.
  */
 import type { Conversion, Input, InputVideoTrack } from 'mediabunny';
 import { BUFFER_AHEAD_S, bufferedAhead, evictionRange, gapJumpTarget, isBuffered } from './buffer';
-import { audioMime, audioPlayback, decideVideo, pickAudioTrack } from './codecs';
+import { preferredAudioLanguage } from './audio-preference';
+import { loadCodecExtensions } from './codec-extensions';
+import {
+  decideAudio,
+  decideVideo,
+  pickAudioTrack,
+  pickTranscodeTarget,
+  TRANSCODE_AUDIO,
+  type AudioDecision,
+} from './codecs';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import {
   appendOffset,
@@ -37,6 +46,11 @@ export function mediaSourceClass(): { MS: typeof MediaSource; managed: boolean }
 class StalePipeline extends Error {}
 
 const SEEK_DEBOUNCE_MS = 150;
+/**
+ * On an audio switch the old track stays buffered this far past the playhead, so playback never
+ * waits on an empty audio buffer; the new track's first appends overwrite it.
+ */
+const SWITCH_KEEP_S = 1;
 
 /** e2e uses a few seconds so the 12 s fixture exercises back-pressure and seek restarts. */
 function bufferAheadSeconds(): number {
@@ -51,6 +65,11 @@ interface Pipeline {
   kind: 'video' | 'audio';
   trackId: number;
   sb: SourceBuffer;
+  /** MIME type the next start needs; `sbMime` is what the SourceBuffer is set to (`changeType`). */
+  mime: string;
+  sbMime: string;
+  /** Audio only: copy or transcode. */
+  decision?: AudioDecision;
   /** Bumped on every (re)start; work belonging to an older generation stops. */
   gen: number;
   conversion: Conversion | null;
@@ -72,6 +91,7 @@ export class MsePlayer {
   private seekGen = 0;
   private readonly abort = new AbortController();
   private readonly bufferAhead = bufferAheadSeconds();
+  private switchGen = 0;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -84,6 +104,7 @@ export class MsePlayer {
     /** Element-timeline duration (starts at 0), NaN if unknown. */
     readonly duration: number,
     audioTracks: AudioTrackInfo[],
+    private readonly audioDecisions: ReadonlyMap<number, AudioDecision>,
     notices: PlaybackErrorCode[],
     private readonly opts: MsePlayerOptions,
   ) {
@@ -133,26 +154,49 @@ export class MsePlayer {
       );
       if (!video_.ok) throw new PlaybackError(video_.code, video_.detail);
 
+      const canEncode = (codec: 'opus' | 'aac') =>
+        mb.canEncodeAudio(codec, TRANSCODE_AUDIO).catch(() => false);
+      const target = pickTranscodeTarget(
+        { encodeOpus: await canEncode('opus'), encodeAac: await canEncode('aac') },
+        isTypeSupported,
+      );
+      const audioDecisions = new Map<number, AudioDecision>();
       const audioTracks = await Promise.all(
         (await input.getAudioTracks()).map(async (t, i): Promise<AudioTrackInfo> => {
+          const codec = await t.getCodec();
           const codecString = await t.getCodecParameterString();
           const language = await t.getLanguageCode();
           const name = await t.getName();
+          const decision = decideAudio(
+            { codec, codecString, decodable: await t.canDecode().catch(() => false) },
+            isTypeSupported,
+            target,
+          );
+          audioDecisions.set(t.id, decision);
           return {
             id: t.id,
-            codec: await t.getCodec(),
+            codec,
             codecString,
             language,
             label: name || (language !== 'und' ? language : `Track ${i + 1}`),
             channels: await t.getNumberOfChannels(),
             isDefault: (await t.getDisposition()).default,
-            playback: audioPlayback(codecString, isTypeSupported),
+            playback: decision.playback,
+            outputCodec: decision.playback === 'unsupported' ? null : decision.outputCodec,
+            reason: decision.playback === 'unsupported' ? decision.reason : undefined,
           };
         }),
       );
-      const audio = pickAudioTrack(audioTracks);
+      const audio = pickAudioTrack(audioTracks, preferredAudioLanguage());
+      const audioDecision = audio ? audioDecisions.get(audio.id) : undefined;
       const notices: PlaybackErrorCode[] = [];
       if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
+      // Before the MediaSource opens: a SourceBuffer can't be added once media has been appended.
+      if (audioDecision) {
+        await loadCodecExtensions(audioDecision).catch((err: unknown) => {
+          throw new PlaybackError('audio-convert-failed', String(err));
+        });
+      }
 
       // The element timeline starts at 0 even when the file's first frame does not.
       const tl = timeline(await videoTrack.getFirstTimestamp());
@@ -182,14 +226,15 @@ export class MsePlayer {
         tl,
         duration,
         audioTracks,
+        audioDecisions,
         notices,
         opts,
       );
       try {
         try {
           player.addPipeline('video', videoTrack.id, video_.mime);
-          if (audio?.codecString) {
-            player.addPipeline('audio', audio.id, audioMime(audio.codecString));
+          if (audio && audioDecision && audioDecision.playback !== 'unsupported') {
+            player.addPipeline('audio', audio.id, audioDecision.mime, audioDecision);
           }
         } catch (err) {
           throw new PlaybackError('unsupported-video-codec', String(err));
@@ -208,7 +253,59 @@ export class MsePlayer {
   }
 
   get audioTrackId(): number | null {
-    return this.pipelines.find((p) => p.kind === 'audio')?.trackId ?? null;
+    return this.audioPipeline?.trackId ?? null;
+  }
+
+  /** Mediabunny codec fed to the audio SourceBuffer (`aac`, `opus`, …); `null` when muted. */
+  get audioCodec(): string | null {
+    const d = this.audioPipeline?.decision;
+    return d && d.playback !== 'unsupported' ? d.outputCodec : null;
+  }
+
+  private get audioPipeline(): Pipeline | undefined {
+    return this.pipelines.find((p) => p.kind === 'audio');
+  }
+
+  /**
+   * Switches the audio track, restarting only the audio pipeline at the playhead: video keeps
+   * playing, and the old track stays buffered for `SWITCH_KEEP_S` so the gap stays under a second.
+   * Rejects (and goes back to the previous track) when the new one can't start.
+   */
+  async selectAudioTrack(id: number): Promise<void> {
+    const p = this.audioPipeline;
+    const decision = this.audioDecisions.get(id);
+    if (!p || !decision || decision.playback === 'unsupported') {
+      throw new PlaybackError('unsupported-audio-codec');
+    }
+    const sg = ++this.switchGen;
+    if (p.trackId === id && p.conversion) return;
+    await loadCodecExtensions(decision).catch((err: unknown) => {
+      throw new PlaybackError('audio-convert-failed', String(err));
+    });
+    if (sg !== this.switchGen || this.destroyed) return;
+    const prev = { trackId: p.trackId, decision: p.decision, mime: p.mime };
+    const restart = async () => {
+      const g = ++p.gen;
+      const c = p.conversion;
+      p.conversion = null;
+      p.done = false;
+      await c?.cancel().catch(() => {});
+      const t = this.video.currentTime;
+      await this.resetBuffer(p, t + SWITCH_KEEP_S);
+      if (g !== p.gen || this.destroyed) return;
+      await this.startPipeline(p, toSourceTime(this.timeline, t), g);
+    };
+    Object.assign(p, { trackId: id, decision, mime: decision.mime });
+    try {
+      await restart();
+    } catch (err) {
+      if (sg !== this.switchGen || this.destroyed) return;
+      Object.assign(p, prev);
+      await restart().catch((e: unknown) => this.fail(e));
+      throw err instanceof PlaybackError
+        ? err
+        : new PlaybackError('audio-convert-failed', String(err));
+    }
   }
 
   destroy(): void {
@@ -226,9 +323,24 @@ export class MsePlayer {
     URL.revokeObjectURL(this.objectUrl);
   }
 
-  private addPipeline(kind: Pipeline['kind'], trackId: number, mime: string) {
+  private addPipeline(
+    kind: Pipeline['kind'],
+    trackId: number,
+    mime: string,
+    decision?: AudioDecision,
+  ) {
     const sb = this.mediaSource.addSourceBuffer(mime);
-    this.pipelines.push({ kind, trackId, sb, gen: 0, conversion: null, done: false });
+    this.pipelines.push({
+      kind,
+      trackId,
+      sb,
+      mime,
+      sbMime: mime,
+      decision,
+      gen: 0,
+      conversion: null,
+      done: false,
+    });
   }
 
   private listen() {
@@ -303,12 +415,14 @@ export class MsePlayer {
     }
   }
 
-  private async resetBuffer(p: Pipeline) {
+  /** Drops everything buffered from element time `from` on and resets the parser. */
+  private async resetBuffer(p: Pipeline, from = 0) {
     await settled(p.sb);
     if (this.destroyed) return;
     // remove() also re-opens an `ended` MediaSource, after which abort() is allowed.
-    if (p.sb.buffered.length > 0) {
-      p.sb.remove(0, Infinity);
+    const { buffered } = p.sb;
+    if (buffered.length > 0 && buffered.end(buffered.length - 1) > from) {
+      p.sb.remove(from, Infinity);
       await settled(p.sb);
     }
     if (this.mediaSource.readyState === 'open') p.sb.abort();
@@ -323,14 +437,21 @@ export class MsePlayer {
         new WritableStream<Uint8Array>({ write: (data) => this.append(p, gen, data) }),
       ),
     });
+    const d = p.decision;
+    const transcode = d?.playback === 'transcode' ? d : null;
     const conversion = await mb.Conversion.init({
       input: this.input,
       output,
       video: (t) => (p.kind === 'video' && t.id === p.trackId ? {} : { discard: true }),
-      audio: (t) => (p.kind === 'audio' && t.id === p.trackId ? {} : { discard: true }),
+      audio: (t) => {
+        if (p.kind !== 'audio' || t.id !== p.trackId) return { discard: true };
+        return transcode
+          ? { codec: transcode.target.codec, ...TRANSCODE_AUDIO, forceTranscode: true }
+          : {};
+      },
       trim: { start: k },
-      // Never transcode here: video can't be encoded in real time; audio transcoding is separate work.
-      copy: { mode: 'forced' },
+      // Video is never transcoded (it can't be encoded in real time); copied audio must stay copied.
+      copy: transcode ? false : { mode: 'forced' },
       showWarnings: false,
     });
     if (gen !== p.gen || this.destroyed) return void conversion.cancel().catch(() => {});
@@ -344,6 +465,13 @@ export class MsePlayer {
       );
     }
     p.conversion = conversion;
+    if (p.sbMime !== p.mime) {
+      await settled(p.sb);
+      if (gen !== p.gen || this.destroyed) return void conversion.cancel().catch(() => {});
+      // Another audio codec (e.g. AAC → Opus): the SourceBuffer must expect the new init segment.
+      p.sb.changeType(p.mime);
+      p.sbMime = p.mime;
+    }
     // Conversion output starts at 0 for trim.start = k; place it on the 0-based element timeline.
     p.sb.timestampOffset = appendOffset(this.timeline, k);
     conversion.execute().then(

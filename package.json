@@ -19,6 +19,9 @@
     "deploy:pages": "scripts/deploy-pages.sh"
   },
   "dependencies": {
+    "@mediabunny/aac-encoder": "^1.61.6",
+    "@mediabunny/ac3": "^1.61.6",
+    "@mediabunny/dts": "^1.61.6",
     "mediabunny": "^1.61.6",
     "webtorrent": "^3.0.21"
   },

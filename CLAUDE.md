@@ -63,7 +63,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   errors.ts                    PlaybackError codes + user-facing copy
   mse-player.ts                Input → per-SourceBuffer Conversion → MSE; back-pressure, seek restart
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
-  codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy, buffer math, no-peers/stalled)
+  codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
+  codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
 src/lib/subtitles/             MKV subtitle extractor, SRT/VTT parsing, JASSUB glue
 src/lib/torrent/relay.ts       URL contract with webtor-relay (validation, endpoints)
 relay/                         Go module: cmd/webtor-relay, cmd/tcp-seeder (test seeder), internal/relay
@@ -93,7 +94,9 @@ docs/decisions/                ADRs
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
 - UI test hooks: `data-testid` `video`, `status` (with `data-phase`), `error` and `notice` (with
-  `data-code` = the `PlaybackErrorCode`).
+  `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`). The video carries
+  `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty when muted) and
+  `data-audio-track` (the selected `AudioTrackInfo.id`).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
