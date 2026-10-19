@@ -22,12 +22,8 @@ import type { SubtitleFileEntry, SubtitleTrackInfo } from '../player/types';
 import { shiftCues, SUBTITLE_DELAY_STEP_S, type SubtitleCue } from './cue';
 import { guessLanguageFromFilename, isForcedFilename } from './language';
 import { isAssFormat, readSubtitleFile, subtitleFormatOf } from './parse';
-import {
-  defaultSubtitleKey,
-  nextSubtitleKey,
-  subtitleTrackText,
-  type SubtitlePreference,
-} from './tracks';
+import { initialSubtitleKey, subtitleRef, type SubtitleTrackRef } from '../player/watch-state';
+import { nextSubtitleKey, subtitleTrackText, type SubtitlePreference } from './tracks';
 
 const PREFERENCE_KEY = 'webtor:subtitle-language';
 /** Text subtitles are tiny; anything bigger is not a subtitle file. */
@@ -55,6 +51,15 @@ interface Source {
   fonts?: () => Promise<Uint8Array[]>;
   /** JASSUB could not run for this source: plain text from now on. */
   styledFailed?: boolean;
+  /** Uploads: the file's text, kept with the video's watch state when the user picks it. */
+  upload?: { name: string; text: string };
+}
+
+/** What the user picked, for the per-video watch state (watch-state.ts). */
+export interface SubtitleChoiceListener {
+  /** A track (`upload` set for a user's file) or Off (`null`). */
+  choice(track: SubtitleTrackInfo | null, upload?: { name: string; text: string }): void;
+  delay(seconds: number): void;
 }
 
 /** Styled options for embedded tracks, from the file's header. */
@@ -95,6 +100,15 @@ export class SubtitleManager {
   private overlay: OverlayEntry | null = null;
   private capabilities: DisplayCapabilities | null = null;
   private videoFullscreen = false;
+  /**
+   * This video's stored choice (watch-state.ts): a track, Off (`null`), or none (`undefined`: the
+   * language default). `listed`: every source of the file is in, so a stored track that is still
+   * missing is gone.
+   */
+  private stored: SubtitleTrackRef | null | undefined = undefined;
+  private listed = false;
+  /** Hears the user's choices (not defaults or restores). */
+  listener: SubtitleChoiceListener | null = null;
 
   attach(video: HTMLVideoElement, capabilities = detectDisplayCapabilities()) {
     if (this.video === video) return;
@@ -136,6 +150,23 @@ export class SubtitleManager {
     this.loading = null;
     this.notice = null;
     this.delay = 0;
+    this.stored = undefined;
+    this.listed = false;
+  }
+
+  /**
+   * After `reset()`, before the sources: what the user picked for this video last time (`stored`:
+   * a track, `null` = Off, `undefined` = nothing) and the delay they set.
+   */
+  restore(stored: SubtitleTrackRef | null | undefined, delay = 0) {
+    this.stored = stored;
+    this.delay = Number.isFinite(delay) ? delay : 0;
+  }
+
+  /** Every source of the file is listed (embedded tracks read, or none): settles a pending restore. */
+  listingDone() {
+    this.listed = true;
+    void this.applyDefault();
   }
 
   /**
@@ -144,6 +175,7 @@ export class SubtitleManager {
    */
   async setDelay(delay: number): Promise<void> {
     this.delay = Math.round(delay * 1000) / 1000;
+    this.listener?.delay(this.delay);
     const source = this.selectedSource();
     if (!source) return;
     if (this.overlay?.key === source.info.key) this.overlay.overlay?.setDelay(this.delay);
@@ -256,6 +288,22 @@ export class SubtitleManager {
       return;
     }
     if (generation !== this.generation) return;
+    await this.select(this.addUpload(file.name, parsed));
+  }
+
+  /**
+   * Re-adds the user's file stored with this video's watch state (not selected: the stored choice
+   * decides). An unreadable one is dropped silently.
+   */
+  restoreUpload(name: string, text: string) {
+    try {
+      this.addUpload(name, readSubtitleFile(new TextEncoder().encode(text), name));
+    } catch (err) {
+      console.warn('subtitles: stored upload unreadable:', err);
+    }
+  }
+
+  private addUpload(name: string, parsed: ReturnType<typeof readSubtitleFile>): string {
     const key = `upload:${++this.uploads}`;
     const ass = isAssFormat(parsed.format);
     this.add(
@@ -263,13 +311,15 @@ export class SubtitleManager {
         key,
         kind: 'upload',
         renderer: ass ? 'ass' : 'text',
-        language: guessLanguageFromFilename(file.name),
-        label: file.name,
+        language: guessLanguageFromFilename(name),
+        label: name,
       },
       () => Promise.resolve(parsed.cues),
     );
-    if (ass) this.sources.get(key)!.assScript = parsed.text;
-    await this.select(key);
+    const source = this.sources.get(key)!;
+    if (ass) source.assScript = parsed.text;
+    source.upload = { name, text: parsed.text };
+    return key;
   }
 
   /** Selects a track (`null` = Off). `remember`: a user choice, stored as the preferred language. */
@@ -278,7 +328,11 @@ export class SubtitleManager {
     if (key !== null && (!source || source.info.unsupported)) return;
     this.selected = key;
     this.notice = null;
-    if (remember) rememberChoice(source?.info ?? null);
+    if (remember) {
+      rememberChoice(source?.info ?? null);
+      this.stored = source ? subtitleRef(source.info) : null;
+      this.listener?.choice(source?.info ?? null, source?.upload);
+    }
     this.onEmbeddedSelect?.(source?.info.kind === 'embedded' ? key : null);
     // Hide the previous track right away, even if the new one still has to load.
     for (const s of this.sources.values()) if (s !== source && s.track) s.track.mode = 'disabled';
@@ -388,9 +442,14 @@ export class SubtitleManager {
     this.overlay = null;
   }
 
+  /**
+   * Selects this video's stored track (Off stays off), else the language default, unless something
+   * is selected already. A stored track not listed yet waits for `listingDone`.
+   */
   private async applyDefault() {
-    const key = defaultSubtitleKey(this.tracks, readPreference());
-    if (key !== null && this.selected === null) await this.select(key, { remember: false });
+    if (this.selected !== null) return;
+    const key = initialSubtitleKey(this.tracks, this.stored, readPreference(), this.listed);
+    if (key !== null && key !== 'wait') await this.select(key, { remember: false });
   }
 
   /** (Re)fills the source's track with its cues shifted by the current delay, if not done yet. */

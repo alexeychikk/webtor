@@ -156,6 +156,13 @@ export interface MsePlayerOptions {
   remoteVideo?(): Promise<RemoteVideo>;
   /** A non-fatal condition that came up while playing (e.g. `relay-transcode-slow`). */
   onNotice?(code: PlaybackErrorCode): void;
+  /** The audio track the user picked for this video before (watch-state.ts), if still there. */
+  restoreAudio?(tracks: readonly AudioTrackInfo[]): AudioTrackInfo | null;
+  /**
+   * Resume (watch-state.ts): element time to start at, given the element-timeline duration (NaN if
+   * unknown); null = from the start. Not asked for an AVI without an index (seeks can't reach far).
+   */
+  startAt?(duration: number): number | null;
 }
 
 export class MsePlayer {
@@ -172,6 +179,13 @@ export class MsePlayer {
   private slowNoticed = false;
   /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
   private seekLimit: (() => number | null) | null = null;
+  /** Element time playback was resumed at (`startAt`), null when it started from the beginning. */
+  resumedAt: number | null = null;
+  /**
+   * The element's own seek to the resume point once metadata is in: the pipelines already start
+   * there, so it needs no restart.
+   */
+  private initialSeek: number | null = null;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -290,8 +304,11 @@ export class MsePlayer {
       );
       // Before the MediaSource opens: a SourceBuffer can't be added once media has been appended.
       // A track whose wasm extension fails to load is marked unsupported and another one is picked.
-      const picked = await pickLoadableAudioTrack(initialTracks, preferredAudioLanguage(), (t) =>
-        loadCodecExtensions(audioDecisions.get(t.id)!),
+      const picked = await pickLoadableAudioTrack(
+        initialTracks,
+        preferredAudioLanguage(),
+        (t) => loadCodecExtensions(audioDecisions.get(t.id)!),
+        opts.restoreAudio,
       );
       const audioTracks = picked.tracks;
       const audio = picked.track;
@@ -316,6 +333,19 @@ export class MsePlayer {
         (await input.getDurationFromMetadata().catch(() => null)) ??
           (await input.computeDuration()),
       );
+      // Resume: both pipelines start at the keyframe before the resume point, so nothing is
+      // fetched from the start of the file. The relay converts from the exact time (ffmpeg -ss).
+      const resumeAt = avi?.indexMode === 'scan' ? null : (opts.startAt?.(duration) ?? null);
+      let k = tl.startTime;
+      if (resumeAt !== null && !remote) {
+        const key = await new mb.EncodedPacketSink(videoTrack).getKeyPacket(
+          toSourceTime(tl, resumeAt),
+          { verifyKeyPackets: true },
+        );
+        k = restartPoint(tl, key?.timestamp);
+      } else if (resumeAt !== null) {
+        k = toSourceTime(tl, resumeAt);
+      }
 
       const mediaSource = new MS();
       if (managed) video.disableRemotePlayback = true;
@@ -344,6 +374,13 @@ export class MsePlayer {
         remote,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
+      if (resumeAt !== null) {
+        // Before any media: the element keeps it as its start position and seeks there once the
+        // init segments are in (one `seeking`, see `onSeeking`).
+        player.resumedAt = resumeAt;
+        player.initialSeek = resumeAt;
+        video.currentTime = resumeAt;
+      }
       try {
         try {
           player.addPipeline('video', videoTrack.id, video_.mime);
@@ -355,7 +392,7 @@ export class MsePlayer {
           throw new PlaybackError('unsupported-video-codec', String(err));
         }
         player.listen();
-        for (const p of player.pipelines) await player.startPipeline(p, tl.startTime, p.gen);
+        for (const p of player.pipelines) await player.startPipeline(p, k, p.gen);
         return player;
       } catch (err) {
         player.destroy();
@@ -559,6 +596,9 @@ export class MsePlayer {
   /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
   private onSeeking() {
     const t = this.video.currentTime;
+    const initial = this.initialSeek;
+    this.initialSeek = null;
+    if (initial !== null && Math.abs(t - initial) < 0.01) return;
     // An AVI without an index: seeks stop at what has been scanned (this fires `seeking` again).
     const limit = this.seekLimit?.();
     if (limit != null) {

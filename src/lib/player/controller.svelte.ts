@@ -44,6 +44,17 @@ import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import { nextStarvedFor, watchdogNotice } from './watchdog';
+import {
+  audioRef,
+  matchAudioTrack,
+  readUpload,
+  readWatch,
+  resumePoint,
+  subtitleRef,
+  watchKey,
+  writeUpload,
+  writeWatch,
+} from './watch-state';
 
 /**
  * - `connecting`: looking for peers / metadata (with a relay: waiting for the relay's metainfo)
@@ -59,6 +70,11 @@ const TICK_MS = 1000;
 const RELAY_STATS_MS = 2000;
 const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
 const HAVE_FUTURE_DATA = 3;
+const HAVE_METADATA = 1;
+/** The playback position is saved this often while playing (and on pause, seek, page hide). */
+const SAVE_POSITION_MS = 5000;
+/** The "Resumed at" toast goes once the playhead is this far from where it resumed. */
+const RESUME_TOAST_S = 15;
 /** Notices about the torrent, not the file: they survive a file switch. */
 const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
 /** Opened .torrent files that got the relay's web seed (ADR 0007 §2). */
@@ -97,6 +113,8 @@ export class PlayerController {
   downloaded = $state<FractionRanges>([]);
   /** Buffer window and quota hits of the playing file (stats panel); 1 s tick, null without a file. */
   buffer = $state<BufferInfo | null>(null);
+  /** Element time this file resumed at (watch state), for the "Resumed at" toast; null = none. */
+  resumedAt = $state<number | null>(null);
 
   /** Bumped by every load, file switch, stop and failure: async work of an older one bails out. */
   private run = 0;
@@ -113,6 +131,23 @@ export class PlayerController {
   private relayAbort: AbortController | null = null;
   private relayTimer: ReturnType<typeof setInterval> | undefined;
   private relayStats: RelayStats | null = null;
+  /** Watch-state key (watch-state.ts) of the file playing; null when none. */
+  private watch: string | null = null;
+  private positionSavedAt = 0;
+
+  constructor() {
+    // The user's subtitle choices are remembered per video (the defaults it applies are not).
+    this.subtitles.listener = {
+      choice: (track, upload) => {
+        if (!this.watch) return;
+        writeWatch(this.watch, { subtitle: track ? subtitleRef(track) : null });
+        if (upload) writeUpload(this.watch, upload);
+      },
+      delay: (delay) => {
+        if (this.watch) writeWatch(this.watch, { delay });
+      },
+    };
+  }
 
   /**
    * Starts playing `input` (magnet, info hash or .torrent bytes) in `video`, replacing the current
@@ -224,6 +259,15 @@ export class PlayerController {
     const file = torrent.files[index]!;
     this.fileIndex = index;
     this.fileName = file.name;
+    // What the user picked for this video last time, and where they were (watch-state.ts).
+    const watch = watchKey(torrent.infoHash, file.path);
+    this.watch = watch;
+    const stored = readWatch(watch);
+    this.subtitles.restore(stored?.subtitle, stored?.delay);
+    if (stored?.subtitle?.kind === 'upload') {
+      const upload = readUpload(watch);
+      if (upload) this.subtitles.restoreUpload(upload.name, upload.text);
+    }
     this.subtitles.addSidecars(listSubtitleFiles(torrent.files, file.name), async (entry) => {
       const sidecar = torrent.files[entry.index];
       if (!sidecar) throw new Error(`no file ${entry.index}`);
@@ -246,6 +290,8 @@ export class PlayerController {
             this.notices = [...this.notices, code];
           }
         },
+        restoreAudio: (tracks) => matchAudioTrack(tracks, stored?.audio),
+        startAt: (duration) => resumePoint(stored?.position, duration),
       });
     } catch (err) {
       if (run === this.run) {
@@ -259,6 +305,7 @@ export class PlayerController {
     this.audioTracks = player.audioTracks;
     this.audioTrackId = player.audioTrackId;
     this.audioCodec = player.audioCodec;
+    this.resumedAt = player.resumedAt;
     this.phase = 'buffering';
     this.watchVideo(video);
     void this.listEmbeddedSubtitles(run, source, video, player.startTime);
@@ -283,9 +330,11 @@ export class PlayerController {
       header = await readEmbeddedHeader(source);
     } catch (err) {
       console.warn('subtitles: no embedded tracks:', err);
+      if (run === this.run) this.subtitles.listingDone();
       return;
     }
-    if (run !== this.run || !header || header.subtitleTracks.length === 0) return;
+    if (run !== this.run) return;
+    if (!header || header.subtitleTracks.length === 0) return this.subtitles.listingDone();
     const scan = new EmbeddedSubtitleScan(source, header, video, startTime, {
       onCues: (key, cues) => this.subtitles.appendCues(key, cues),
       onError: (err) => {
@@ -305,10 +354,12 @@ export class PlayerController {
       (key) => scan.setActive(key !== null),
       { headers, fonts: () => (fonts ??= readFontAttachments(source, header)) },
     );
+    this.subtitles.listingDone();
   }
 
   /** Tears down the playing file (MsePlayer and its SourceBuffers, subtitle sources), keeps the torrent. */
   private closeFile() {
+    this.savePosition();
     this.videoEvents?.abort();
     this.videoEvents = null;
     this.player?.destroy();
@@ -322,6 +373,8 @@ export class PlayerController {
   }
 
   private resetFileState() {
+    this.watch = null;
+    this.resumedAt = null;
     this.downloaded = [];
     this.buffer = null;
     this.audioTracks = [];
@@ -340,6 +393,7 @@ export class PlayerController {
       await player.selectAudioTrack(id);
       if (player !== this.player) return;
       rememberAudioLanguage(track.language);
+      if (this.watch) writeWatch(this.watch, { audio: audioRef(track) });
       this.notices = others();
     } catch (err) {
       if (player !== this.player) return;
@@ -437,6 +491,7 @@ export class PlayerController {
 
   /** Stops playback and drops the torrent and its stored pieces. */
   async stop(): Promise<void> {
+    this.savePosition();
     this.run++;
     clearInterval(this.timer);
     this.stopRelay();
@@ -452,6 +507,8 @@ export class PlayerController {
     this.phase = 'idle';
     this.files = [];
     this.fileIndex = null;
+    this.watch = null;
+    this.resumedAt = null;
     if (torrent) await destroyTorrent(torrent);
   }
 
@@ -475,12 +532,55 @@ export class PlayerController {
     if (torrent) void destroyTorrent(torrent);
   }
 
+  /** "Start over" on the resume toast. */
+  startOver() {
+    this.resumedAt = null;
+    if (this.video && this.player) this.video.currentTime = 0;
+  }
+
+  dismissResume() {
+    this.resumedAt = null;
+  }
+
   private watchVideo(video: HTMLVideoElement) {
     this.videoEvents = new AbortController();
     const { signal } = this.videoEvents;
     for (const type of ['playing', 'waiting', 'pause', 'play', 'seeking', 'seeked', 'canplay']) {
       video.addEventListener(type, () => this.updatePhase(), { signal });
     }
+    // Resume (watch-state.ts): the position is saved every few seconds and whenever it matters.
+    this.positionSavedAt = performance.now();
+    video.addEventListener(
+      'timeupdate',
+      () => {
+        const at = this.resumedAt;
+        if (at !== null && Math.abs(video.currentTime - at) > RESUME_TOAST_S) this.resumedAt = null;
+        if (performance.now() - this.positionSavedAt >= SAVE_POSITION_MS) this.savePosition();
+      },
+      { signal },
+    );
+    for (const type of ['pause', 'seeked', 'ended']) {
+      video.addEventListener(type, () => this.savePosition(), { signal });
+    }
+    window.addEventListener('pagehide', () => this.savePosition(), { signal });
+    document.addEventListener(
+      'visibilitychange',
+      () => document.visibilityState === 'hidden' && this.savePosition(),
+      { signal },
+    );
+  }
+
+  /** Remembers where the playing file is (once the element knows; never while it fails). */
+  private savePosition() {
+    const v = this.video;
+    const player = this.player;
+    if (!v || !player || !this.watch || this.phase === 'error') return;
+    if (v.readyState < HAVE_METADATA) return;
+    const duration = Number.isFinite(player.duration) ? player.duration : undefined;
+    const position = v.ended && duration !== undefined ? duration : v.currentTime;
+    if (!Number.isFinite(position)) return;
+    this.positionSavedAt = performance.now();
+    writeWatch(this.watch, { position, duration });
   }
 
   private updatePhase() {

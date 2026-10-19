@@ -348,7 +348,9 @@
 
   // A new notice or error wakes the controls, like a move does.
   $effect(() => {
-    if (controller.notices.length || controller.error || subtitleNotice) untrack(() => wake());
+    if (controller.notices.length || controller.error || subtitleNotice || controller.resumedAt) {
+      untrack(() => wake());
+    }
   });
 
   $effect(() => () => {
@@ -648,6 +650,9 @@
       shown={controlsShown}
       {onretry}
       ondismiss={(code) => (dismissed = new Set([...dismissed, code]))}
+      resumedAt={controller.resumedAt}
+      onstartover={() => controller.startOver()}
+      ondismissresume={() => controller.dismissResume()}
     />
     {#if dragging}
       <div class="drop-overlay" data-testid="drop-overlay" aria-hidden="true">
