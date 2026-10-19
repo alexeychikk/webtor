@@ -3,9 +3,14 @@
 //
 //   tcp-seeder   seeds a copy of e2e/fixtures/sample.mkv over TCP on 127.0.0.1 only (no DHT, no
 //                trackers, no WebRTC); its magnet has just xt=, dn= and x.pe= (no xs=, no ws=)
-//   webtor-relay http://127.0.0.1:7882/<RELAY_TOKEN>, no DHT, no default trackers
-//   http://127.0.0.1:9100/magnet     the seeder's magnet
-//   http://127.0.0.1:9100/relay-url  the relay URL
+//   tcp-seeder   the same for e2e/fixtures/avi-xvid-ac3.avi (video only the relay can convert)
+//   webtor-relay http://127.0.0.1:7882/<RELAY_TOKEN>, no DHT, no default trackers; it converts
+//                video when it finds ffmpeg (WEBTOR_RELAY_FFMPEG or PATH, ADR 0007)
+//   webtor-relay http://127.0.0.1:7883/<RELAY_TOKEN>, the same with -no-transcode
+//   http://127.0.0.1:9100/magnet                   the sample.mkv seeder's magnet
+//   http://127.0.0.1:9100/avi-magnet               the avi-xvid-ac3.avi seeder's magnet
+//   http://127.0.0.1:9100/relay-url                the relay URL
+//   http://127.0.0.1:9100/no-transcode-relay-url   the -no-transcode relay's URL
 //
 // Both Go commands are built once (`go build`, cached by Go) and run as direct children, so killing
 // this process tree stops them.
@@ -18,10 +23,11 @@ import { createInterface } from 'node:readline';
 
 export const STACK_PORT = 9100;
 export const RELAY_ADDR = '127.0.0.1:7882';
+export const NO_TRANSCODE_RELAY_ADDR = '127.0.0.1:7883';
 export const RELAY_TOKEN = 'e2e-relay-token';
 const HOST = '127.0.0.1';
 const RELAY_DIR = resolve(import.meta.dirname, '../../relay');
-const FIXTURE = resolve(import.meta.dirname, '../fixtures/sample.mkv');
+const FIXTURES = resolve(import.meta.dirname, '../fixtures');
 
 const work = mkdtempSync(join(tmpdir(), 'webtor-e2e-relay-'));
 const children = [];
@@ -56,29 +62,46 @@ function start(name, args, pattern) {
 
 // Seed from a copy: anacrolix keeps its piece-completion db next to the data, and every file in
 // e2e/fixtures is served by the fixture server.
-mkdirSync(join(work, 'seed'));
-copyFileSync(FIXTURE, join(work, 'seed', 'sample.mkv'));
-const magnet = await start('tcp-seeder', [join(work, 'seed', 'sample.mkv')], /^(magnet:\?\S+)/);
-const relayUrl = await start(
-  'webtor-relay',
-  [
-    '-listen',
-    RELAY_ADDR,
-    '-token',
-    RELAY_TOKEN,
-    '-data-dir',
-    join(work, 'relay'),
-    '-peer-port',
-    '0',
-    '-no-dht',
-    '-no-default-trackers',
-  ],
-  /^Relay URL:\s+(\S+)/,
+const seed = (name) => {
+  mkdirSync(join(work, 'seed', name), { recursive: true });
+  copyFileSync(join(FIXTURES, name), join(work, 'seed', name, name));
+  return start('tcp-seeder', [join(work, 'seed', name, name)], /^(magnet:\?\S+)/);
+};
+const relay = (addr, dir, ...extra) =>
+  start(
+    'webtor-relay',
+    [
+      '-listen',
+      addr,
+      '-token',
+      RELAY_TOKEN,
+      '-data-dir',
+      join(work, dir),
+      '-peer-port',
+      '0',
+      '-no-dht',
+      '-no-default-trackers',
+      ...extra,
+    ],
+    /^Relay URL:\s+(\S+)/,
+  );
+const magnet = await seed('sample.mkv');
+const aviMagnet = await seed('avi-xvid-ac3.avi');
+const relayUrl = await relay(RELAY_ADDR, 'relay');
+const noTranscodeRelayUrl = await relay(
+  NO_TRANSCODE_RELAY_ADDR,
+  'relay-no-transcode',
+  '-no-transcode',
 );
 
 createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  const body = { '/magnet': magnet, '/relay-url': relayUrl }[req.url ?? ''];
+  const body = {
+    '/magnet': magnet,
+    '/avi-magnet': aviMagnet,
+    '/relay-url': relayUrl,
+    '/no-transcode-relay-url': noTranscodeRelayUrl,
+  }[req.url ?? ''];
   res.writeHead(body ? 200 : 404, { 'Content-Type': 'text/plain' });
   res.end(body ?? 'not found');
 }).listen(STACK_PORT, HOST, () => {

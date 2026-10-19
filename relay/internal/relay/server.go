@@ -196,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/info", s.handleInfo)
 	mux.HandleFunc("GET /v1/torrents/{ih}/metainfo", s.handleMetainfo)
+	mux.HandleFunc("POST /v1/torrents/{ih}/metainfo", s.handlePostMetainfo)
 	mux.HandleFunc("GET /v1/torrents/{ih}/stats", s.handleStats)
 	mux.HandleFunc("GET /v1/torrents/{ih}/files", s.handleFiles)
 	mux.HandleFunc("GET /v1/torrents/{ih}/webseed/{path...}", s.handleWebseed)
@@ -256,7 +257,7 @@ func cors(next http.Handler) http.Handler {
 		if r.Method == http.MethodOptions {
 			// WebTorrent sends Range, Cache-Control and User-Agent; Chrome's old Private Network
 			// Access preflight asked for the last header (harmless under Local Network Access).
-			h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+			h.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
 			if req := r.Header.Get("Access-Control-Request-Headers"); req != "" {
 				h.Set("Access-Control-Allow-Headers", req)
 			}
@@ -348,14 +349,53 @@ func (s *Server) handleMetainfo(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusGatewayTimeout, errors.New("no metadata from the swarm yet"))
 		return
 	}
-	// Only the info dictionary: the page can't use the UDP/HTTP trackers the relay knows, and the
-	// app passes its own WebSocket trackers to WebTorrent.
+	s.writeInfoDict(w, e)
+}
+
+// writeInfoDict answers a metainfo request: only the info dictionary, because the page can't use
+// the UDP/HTTP trackers the relay knows, and the app passes its own WebSocket trackers to WebTorrent.
+func (s *Server) writeInfoDict(w http.ResponseWriter, e *entry) {
 	mi := metainfo.MetaInfo{InfoBytes: e.t.Metainfo().InfoBytes}
 	w.Header().Set("Content-Type", "application/x-bittorrent")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := mi.Write(w); err != nil {
 		s.log.Debug("writing metainfo", "err", err)
 	}
+}
+
+// maxTorrentFile caps a POSTed .torrent (the app's own limit is the same).
+const maxTorrentFile = 16 << 20
+
+// handlePostMetainfo adds a torrent from its .torrent file (the request body) and answers like GET.
+// The app uses it for a .torrent the user opened (ADR 0007 §2): the relay then needs no metadata
+// from the swarm, and gets the file's trackers and web seeds.
+func (s *Server) handlePostMetainfo(w http.ResponseWriter, r *http.Request) {
+	ih, err := parseInfoHash(r.PathValue("ih"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	mi, err := metainfo.Load(http.MaxBytesReader(w, r.Body, maxTorrentFile))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("not a .torrent file: %w", err))
+		return
+	}
+	if mi.HashInfoBytes() != ih {
+		httpError(w, http.StatusBadRequest, errors.New("the .torrent is for another info hash"))
+		return
+	}
+	spec, err := torrent.TorrentSpecFromMetaInfoErr(mi)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	e, err := s.acquireSpec(ih, spec)
+	if err != nil {
+		s.addError(w, err)
+		return
+	}
+	defer s.release(e)
+	s.writeInfoDict(w, e)
 }
 
 func (s *Server) addError(w http.ResponseWriter, err error) {
@@ -620,31 +660,41 @@ func (s *Server) prefetchFrom(e *entry, f *torrent.File, off int64) {
 
 // acquire finds or adds the torrent and marks a request on it as active.
 func (s *Server) acquire(ih metainfo.Hash, q url.Values) (*entry, error) {
+	return s.acquireSpec(ih, &torrent.TorrentSpec{
+		DisplayName: q.Get("dn"),
+		Trackers:    [][]string{q["tr"]},
+		PeerAddrs:   q["x.pe"],
+		Webseeds:    q["ws"],
+	})
+}
+
+// acquireSpec is acquire for a torrent described by spec (magnet params, or a whole .torrent with
+// InfoBytes). A torrent already open gets what spec adds (info, trackers, web seeds).
+func (s *Server) acquireSpec(ih metainfo.Hash, spec *torrent.TorrentSpec) (*entry, error) {
+	if len(spec.Trackers) == 0 {
+		spec.Trackers = [][]string{nil}
+	}
+	spec.Trackers[0] = dedupe(append(spec.Trackers[0], s.opts.ExtraTrackers...))
+	spec.InfoHash = ih
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, errClosed
 	}
-	if e := s.torrents[ih]; e != nil {
-		e.active++
-		return e, nil
-	}
-	if len(s.torrents) >= s.opts.MaxTorrents {
+	if len(s.torrents) >= s.opts.MaxTorrents && s.torrents[ih] == nil {
 		s.evictLocked(time.Now())
 	}
-	if len(s.torrents) >= s.opts.MaxTorrents {
+	if len(s.torrents) >= s.opts.MaxTorrents && s.torrents[ih] == nil {
 		return nil, ErrTooManyTorrents
 	}
-	spec := &torrent.TorrentSpec{
-		DisplayName: q.Get("dn"),
-		Trackers:    [][]string{dedupe(append(q["tr"], s.opts.ExtraTrackers...))},
-		PeerAddrs:   q["x.pe"],
-		Webseeds:    q["ws"],
-	}
-	spec.InfoHash = ih
+	// For a torrent already open this merges spec in (trackers, web seeds, info bytes).
 	t, _, err := s.cl.AddTorrentSpec(spec)
 	if err != nil {
 		return nil, err
+	}
+	if e := s.torrents[ih]; e != nil {
+		e.active++
+		return e, nil
 	}
 	s.log.Info("added torrent", "infohash", ih.HexString(), "name", spec.DisplayName, "torrents", len(s.torrents)+1)
 	e := &entry{ih: ih, t: t, lastUsed: time.Now(), active: 1}

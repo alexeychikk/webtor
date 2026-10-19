@@ -1,6 +1,13 @@
 <script lang="ts">
   import { PLAYBACK_ERROR_MESSAGES } from '../player/errors';
-  import { checkRelayUrl, RELAY_URL_PROBLEMS, relayEndpoints, relayErrorDetail } from './relay';
+  import {
+    checkRelayUrl,
+    RELAY_URL_PROBLEMS,
+    relayEndpoints,
+    relayErrorDetail,
+    transcodeSummary,
+    type RelayTranscodeInfo,
+  } from './relay';
   import { fetchRelayInfo, RelayRequestError } from './relay-client';
   import { relaySettings } from './relay-settings.svelte';
 
@@ -16,7 +23,7 @@
   let test = $state<
     | { state: 'idle' }
     | { state: 'testing' }
-    | { state: 'ok'; version: string }
+    | { state: 'ok'; version: string; transcode: RelayTranscodeInfo }
     | { state: 'failed'; message: string }
   >({ state: 'idle' });
 
@@ -50,7 +57,9 @@
     const checked = url;
     try {
       const info = await fetchRelayInfo(relayEndpoints(check.base, '').info);
-      if (url === checked) test = { state: 'ok', version: info.version };
+      if (url === checked) {
+        test = { state: 'ok', version: info.version, transcode: info.transcode };
+      }
     } catch (err) {
       if (url !== checked) return;
       const f = err instanceof RelayRequestError ? err.failure : ({ kind: 'network' } as const);
@@ -128,6 +137,16 @@
       {#if test.state === 'testing'}Testing…{:else if test.state === 'ok'}Connected to webtor-relay
         {test.version}.{:else if test.state === 'failed'}{test.message}{/if}
     </p>
+    {#if test.state === 'ok'}
+      <p
+        class="transcode"
+        data-testid="relay-transcode"
+        data-available={test.transcode.available}
+        aria-live="polite"
+      >
+        {transcodeSummary(test.transcode)}
+      </p>
+    {/if}
 
     <p class="privacy">
       <strong>Privacy:</strong> the relay sees every byte and every torrent you open. Swarm peers and
@@ -176,6 +195,12 @@
   }
   .test[data-state='failed'] {
     color: crimson;
+  }
+  .transcode {
+    margin-top: 0;
+  }
+  .transcode[data-available='false'] {
+    color: var(--warning);
   }
   .privacy {
     padding: 0.5rem 0.75rem;

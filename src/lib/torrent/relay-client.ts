@@ -8,6 +8,8 @@ import {
   parseRelayStats,
   relayErrorCode,
   relayErrorDetail,
+  relayTorrentMissing,
+  relayTranscodeErrorCode,
   type RelayFailure,
   type RelayInfo,
   type RelayStats,
@@ -16,6 +18,11 @@ import {
 /** Longer than the relay's own 90 s metadata wait, so its 504 normally arrives first. */
 export const METAINFO_TIMEOUT_MS = 120_000;
 const INFO_TIMEOUT_MS = 8_000;
+/**
+ * The relay answers a transcode request once ffmpeg wrote its first bytes, which needs the start of
+ * the file from the swarm first. The relay itself gives up (504) after its idle timeout.
+ */
+export const TRANSCODE_HEADERS_TIMEOUT_MS = 90_000;
 
 export class RelayRequestError extends Error {
   constructor(readonly failure: RelayFailure) {
@@ -25,21 +32,37 @@ export class RelayRequestError extends Error {
 }
 
 /**
- * GET `url` with a deadline. Rejects with `RelayRequestError` for network failures, timeouts and
+ * GET `url` (POST `body` when given) with a deadline. Rejects with `RelayRequestError` for network failures, timeouts and
  * non-2xx answers; with the caller's `AbortError` when `signal` aborts.
  */
-async function relayGet(url: string, timeoutMs: number, signal?: AbortSignal): Promise<Response> {
-  const deadline = AbortSignal.timeout(timeoutMs);
+async function relayGet(
+  url: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  { bodyTimeout = true, body }: { bodyTimeout?: boolean; body?: Uint8Array<ArrayBuffer> } = {},
+): Promise<Response> {
+  // `bodyTimeout: false`: the deadline covers the response headers only (a streamed body).
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(new DOMException('relay timeout', 'TimeoutError')),
+    timeoutMs,
+  );
   let res: Response;
   try {
     res = await fetch(url, {
-      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+      signal: signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal,
       cache: 'no-store',
+      // No Content-Type: the POST stays a CORS "simple" request.
+      ...(body ? { method: 'POST', body } : {}),
     });
   } catch (err) {
+    clearTimeout(timer);
     if (signal?.aborted) throw err;
-    throw new RelayRequestError(deadline.aborted ? { kind: 'timeout' } : { kind: 'network' });
+    throw new RelayRequestError(
+      deadline.signal.aborted ? { kind: 'timeout' } : { kind: 'network' },
+    );
   }
+  if (!bodyTimeout) clearTimeout(timer);
   if (!res.ok) {
     let message: string | undefined;
     try {
@@ -56,11 +79,16 @@ async function relayGet(url: string, timeoutMs: number, signal?: AbortSignal): P
 
 /**
  * Asks the relay to join the swarm and returns the .torrent (info dict only) once it has the
- * metadata. Fails with a `relay-*` `PlaybackError`.
+ * metadata. With `torrentFile` (a .torrent the user opened) it POSTs that to the bare metainfo
+ * URL, so the relay needs no metadata from the swarm. Fails with a `relay-*` `PlaybackError`.
  */
-export async function fetchRelayMetainfo(url: string, signal?: AbortSignal): Promise<Uint8Array> {
+export async function fetchRelayMetainfo(
+  url: string,
+  signal?: AbortSignal,
+  torrentFile?: Uint8Array<ArrayBuffer>,
+): Promise<Uint8Array> {
   try {
-    const res = await relayGet(url, METAINFO_TIMEOUT_MS, signal);
+    const res = await relayGet(url, METAINFO_TIMEOUT_MS, signal, { body: torrentFile });
     const bytes = new Uint8Array(await res.arrayBuffer());
     // A bencoded dictionary starts with `d`.
     if (bytes[0] !== 0x64) throw new RelayRequestError({ kind: 'bad-response' });
@@ -97,4 +125,33 @@ export async function fetchRelayStats(
   } catch {
     return null;
   }
+}
+
+/**
+ * Starts the relay's H.264 conversion of a file (ADR 0007 §2) and returns the fragmented MP4 body.
+ * Not reading it is the back-pressure: the relay's ffmpeg blocks on its pipe. Abort `signal` to end
+ * the job (a seek or a closed file). When the relay no longer has the torrent (restart, idle drop),
+ * `register` hands it over again and the request is retried once. Fails with a `relay-*`
+ * `PlaybackError`.
+ */
+export async function fetchRelayTranscode(
+  url: string,
+  signal: AbortSignal,
+  register?: (signal: AbortSignal) => Promise<void>,
+): Promise<ReadableStream<Uint8Array>> {
+  let failure: RelayFailure;
+  try {
+    const res = await relayGet(url, TRANSCODE_HEADERS_TIMEOUT_MS, signal, { bodyTimeout: false });
+    if (!res.body) throw new RelayRequestError({ kind: 'bad-response' });
+    return res.body;
+  } catch (err) {
+    if (!(err instanceof RelayRequestError)) throw err;
+    failure = err.failure;
+  }
+  if (register && relayTorrentMissing(failure)) {
+    await register(signal);
+    signal.throwIfAborted();
+    return fetchRelayTranscode(url, signal);
+  }
+  throw new PlaybackError(relayTranscodeErrorCode(failure), relayErrorDetail(failure));
 }

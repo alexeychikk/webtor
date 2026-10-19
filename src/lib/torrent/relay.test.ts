@@ -7,7 +7,10 @@ import {
   relayEndpoints,
   relayErrorCode,
   relayErrorDetail,
+  relayTorrentMissing,
   relayTorrentRef,
+  relayTranscodeErrorCode,
+  transcodeSummary,
 } from './relay';
 
 describe('checkRelayUrl', () => {
@@ -55,7 +58,15 @@ describe('relayEndpoints', () => {
       files: `${t}/files`,
       stats: `${t}/stats`,
       webseed: `${t}/webseed/`,
+      transcode: expect.any(Function),
     });
+  });
+  it('builds the transcode URL with the start in element seconds', () => {
+    const e = relayEndpoints('http://127.0.0.1:7881/tok12345', 'ab'.repeat(20));
+    const t = `http://127.0.0.1:7881/tok12345/v1/torrents/${'ab'.repeat(20)}/transcode`;
+    expect(e.transcode(3, 0)).toBe(`${t}/3?start=0`);
+    expect(e.transcode(0, 8.123456)).toBe(`${t}/0?start=8.123`);
+    expect(e.transcode(0, -1)).toBe(`${t}/0?start=0`);
   });
 });
 
@@ -108,11 +119,26 @@ describe('relay error mapping', () => {
 
 describe('relay responses', () => {
   it('recognises /v1/info', () => {
+    const off = { available: false, ffmpeg: '', maxHeight: 0, preset: '' };
     expect(parseRelayInfo({ name: 'webtor-relay', version: '0.1.0', api: 1 })).toEqual({
       name: 'webtor-relay',
       version: '0.1.0',
       api: 1,
+      transcode: off,
     });
+    const transcode = { available: true, ffmpeg: '7.0.2', maxHeight: 720, preset: 'veryfast' };
+    expect(
+      parseRelayInfo({
+        name: 'webtor-relay',
+        version: '0.2.0',
+        api: 2,
+        transcode: { ...transcode, maxTranscodes: 1 },
+      }),
+    ).toEqual({ name: 'webtor-relay', version: '0.2.0', api: 2, transcode });
+    expect(
+      parseRelayInfo({ name: 'webtor-relay', api: 2, transcode: { ...off, ffmpeg: 'x' } })
+        ?.transcode,
+    ).toEqual(off);
     expect(parseRelayInfo({ name: 'nginx' })).toBeNull();
     expect(parseRelayInfo('<html>')).toBeNull();
     expect(parseRelayInfo(null)).toBeNull();
@@ -151,5 +177,43 @@ describe('mergeRelayStats', () => {
   });
   it('leaves stats alone without relay stats', () => {
     expect(mergeRelayStats(base, 1, null)).toBe(base);
+  });
+});
+
+describe('relay video conversion', () => {
+  it('maps transcode failures to their own codes', () => {
+    const http = (status: number, message?: string) => ({ kind: 'http' as const, status, message });
+    expect(relayTranscodeErrorCode(http(503, 'transcode-unavailable'))).toBe(
+      'relay-transcode-unavailable',
+    );
+    expect(relayTranscodeErrorCode(http(429, 'transcode-busy'))).toBe('relay-transcode-busy');
+    expect(relayTranscodeErrorCode(http(422, 'transcode-failed'))).toBe('relay-transcode-failed');
+    expect(relayTranscodeErrorCode(http(504))).toBe('relay-transcode-failed');
+    expect(relayTranscodeErrorCode({ kind: 'timeout' })).toBe('relay-transcode-failed');
+    expect(relayTranscodeErrorCode(http(503, 'no metadata yet'))).toBe('relay-error');
+    expect(relayTranscodeErrorCode(http(404))).toBe('relay-error');
+    expect(relayTranscodeErrorCode({ kind: 'network' })).toBe('relay-unreachable');
+  });
+  it('summarises the relay’s conversion setting for the dialog', () => {
+    expect(
+      transcodeSummary({ available: true, ffmpeg: '7.0.2', maxHeight: 720, preset: 'veryfast' }),
+    ).toBe('Video conversion: on (ffmpeg 7.0.2, up to 720p).');
+    expect(transcodeSummary({ available: true, ffmpeg: '', maxHeight: 0, preset: '' })).toBe(
+      'Video conversion: on.',
+    );
+    expect(transcodeSummary({ available: false, ffmpeg: '', maxHeight: 0, preset: '' })).toMatch(
+      /^Video conversion: off\. .*install ffmpeg/,
+    );
+  });
+});
+
+describe('relayTorrentMissing', () => {
+  it('spots the relay that lost the torrent, not a wrong token or a bad file index', () => {
+    const http = (status: number, message?: string) => ({ kind: 'http' as const, status, message });
+    expect(relayTorrentMissing(http(404, 'torrent not added; fetch metainfo first'))).toBe(true);
+    expect(relayTorrentMissing(http(404))).toBe(false);
+    expect(relayTorrentMissing(http(404, 'no file 3 in this torrent'))).toBe(false);
+    expect(relayTorrentMissing(http(503, 'torrent not added; fetch metainfo first'))).toBe(false);
+    expect(relayTorrentMissing({ kind: 'network' })).toBe(false);
   });
 });

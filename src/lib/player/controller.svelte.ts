@@ -15,10 +15,17 @@ import {
 import {
   mergeRelayStats,
   relayEndpoints,
+  relayErrorDetail,
   relayTorrentRef,
   type RelayStats,
 } from '../torrent/relay';
-import { fetchRelayMetainfo, fetchRelayStats } from '../torrent/relay-client';
+import {
+  fetchRelayInfo,
+  fetchRelayMetainfo,
+  fetchRelayStats,
+  fetchRelayTranscode,
+  RelayRequestError,
+} from '../torrent/relay-client';
 import { relaySettings } from '../torrent/relay-settings.svelte';
 import { SubtitleManager } from '../subtitles/manager.svelte';
 import {
@@ -33,6 +40,7 @@ import { isTorrentId } from '../torrent/trackers';
 import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
+import type { RemoteVideo } from './remote-video';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import { nextStarvedFor, watchdogNotice } from './watchdog';
 
@@ -52,6 +60,8 @@ const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, 
 const HAVE_FUTURE_DATA = 3;
 /** Notices about the torrent, not the file: they survive a file switch. */
 const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
+/** Opened .torrent files that got the relay's web seed (ADR 0007 §2). */
+const withRelayWebseed = new WeakSet<Torrent>();
 
 /** A magnet link or info hash, or the bytes of a .torrent file the user opened. */
 export type TorrentInput = string | Uint8Array;
@@ -223,6 +233,14 @@ export class PlayerController {
           if (run === this.run) this.fail(err);
         },
         isStale: () => run !== this.run,
+        remoteVideo: relaySettings.base
+          ? () => this.relayVideo(relaySettings.base!, torrent, index)
+          : undefined,
+        onNotice: (code) => {
+          if (run === this.run && !this.notices.includes(code)) {
+            this.notices = [...this.notices, code];
+          }
+        },
       });
     } catch (err) {
       if (run === this.run) {
@@ -351,6 +369,57 @@ export class PlayerController {
     const torrentFile = await fetchRelayMetainfo(urls.metainfo, abort.signal);
     void poll();
     return addRelayTorrent(torrentFile, input, [urls.webseed, ...ref.ws]);
+  }
+
+  /**
+   * The relay's H.264 conversion of file `index` (ADR 0007 §2), for video the browser can't decode.
+   * Rejects with `relay-transcode-unavailable` when the relay has no ffmpeg (or predates api 2).
+   */
+  private async relayVideo(base: string, torrent: Torrent, index: number): Promise<RemoteVideo> {
+    let available: boolean;
+    try {
+      available = (await fetchRelayInfo(relayEndpoints(base, '').info)).transcode.available;
+    } catch (err) {
+      if (!(err instanceof RelayRequestError)) throw err;
+      const f = err.failure;
+      const unreachable = f.kind === 'network' || f.kind === 'timeout';
+      throw new PlaybackError(
+        unreachable ? 'relay-unreachable' : 'relay-error',
+        relayErrorDetail(f),
+      );
+    }
+    if (!available) throw new PlaybackError('relay-transcode-unavailable');
+    const urls = relayEndpoints(base, torrent.infoHash);
+    const input = this.input;
+    // How the relay gets the torrent: the magnet (it joins the swarm) or the opened .torrent.
+    let register: (signal?: AbortSignal) => Promise<unknown>;
+    if (this.viaRelay) {
+      const ref = typeof input === 'string' ? relayTorrentRef(input) : null;
+      if (!ref) throw new PlaybackError('relay-error', 'no magnet for this torrent');
+      const metainfo = relayEndpoints(base, ref.infoHash, ref.magnetQuery).metainfo;
+      register = (signal) => fetchRelayMetainfo(metainfo, signal);
+    } else {
+      // An opened .torrent skipped the relay (ADR 0006): hand it the file first (again after a file
+      // switch: the relay may have dropped it), and let WebTorrent read through its web seed.
+      if (!(input instanceof Uint8Array)) {
+        throw new PlaybackError('relay-error', 'no .torrent for this torrent');
+      }
+      register = (signal) => fetchRelayMetainfo(urls.metainfo, signal, new Uint8Array(input));
+      await register();
+      if (torrent === this.torrent && !withRelayWebseed.has(torrent)) {
+        withRelayWebseed.add(torrent);
+        torrent.addWebSeed(urls.webseed);
+      }
+    }
+    return {
+      // A relay restart or a long pause drops the torrent there: register it again, then retry.
+      open: (start, signal) =>
+        fetchRelayTranscode(
+          urls.transcode(index, start),
+          signal,
+          async (s) => void (await register(s)),
+        ),
+    };
   }
 
   private stopRelay() {
