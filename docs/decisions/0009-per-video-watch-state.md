@@ -21,8 +21,11 @@ torrent>` → JSON `{ audio?, subtitle?, delay?, position?, duration?, updated }
     opened. A stored Off stays off. A stored embedded track waits until the file's embedded tracks are
     listed (`SubtitleManager.listingDone`) before falling back.
 - **Uploads** are kept cheaply: the file's text under `webtor:watch-upload:<infohash>:<path>` when
-  it is at most 1 M characters, one per video, the newest 5 overall (evicted with their video too).
-  Bigger ones are not restored.
+  its stored form is at most 1 M characters, one per video, the newest 5 overall and at most 1.5 M
+  characters together (evicted with their video too). Older uploads are evicted before the new one
+  is written, and a watch entry that finds storage full drops uploads (oldest first) and retries:
+  uploads must never crowd the origin's ~5 M quota and make positions, tracks, the relay URL or the
+  language preferences fail to save. Bigger ones are not restored.
 - **Resume.** The position is saved every 5 s while playing, on pause, seek, `ended`, `pagehide`,
   `visibilitychange` (hidden) and before a file switch or stop. On open, `resumePoint` resumes unless
   the position is under 10 s or in the watched end (the last 5 %, at most 60 s). `MsePlayer.open`

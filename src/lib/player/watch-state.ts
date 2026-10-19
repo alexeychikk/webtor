@@ -16,8 +16,16 @@ export const UPLOAD_PREFIX = 'webtor:watch-upload:';
 export const MAX_WATCHED = 200;
 /** Uploaded subtitle files remembered (they are big next to everything else). */
 export const MAX_UPLOADS = 5;
-/** Uploads above this many characters are not remembered (localStorage holds ~5 M per origin). */
+/**
+ * Uploads whose stored form (JSON, escapes included) is above this many characters are not
+ * remembered. localStorage holds ~5 M characters per origin, shared with everything else.
+ */
 export const MAX_UPLOAD_CHARS = 1_000_000;
+/**
+ * All stored uploads together (keys + values) stay under this many characters, so they never crowd
+ * out the watch entries, the relay URL or the language preferences.
+ */
+export const UPLOAD_BUDGET_CHARS = 1_500_000;
 /** No resume from the first seconds… */
 export const RESUME_MIN_S = 10;
 /** …nor from the end: the last 5 % of the video, at most the last 60 s, counts as watched. */
@@ -121,11 +129,52 @@ export function writeWatch(
     const prev = parse<WatchState>(storage.getItem(key));
     const next: WatchState = { ...prev, ...patch, updated: now };
     if (next.delay === 0) delete next.delay;
-    storage.setItem(key, JSON.stringify(next));
+    setFreeingUploads(storage, key, JSON.stringify(next));
     if (!prev) evict(storage, WATCH_PREFIX, MAX_WATCHED, (k) => storage.removeItem(uploadKey(k)));
   } catch {
     // Storage blocked or full: this video just isn't remembered.
   }
+}
+
+/**
+ * `setItem`, and when storage is full, drops stored uploads (oldest first) until it fits: a
+ * position or track choice is worth more than a cached subtitle file. Throws when it still fails.
+ */
+function setFreeingUploads(storage: WatchStorage, key: string, value: string) {
+  for (;;) {
+    try {
+      storage.setItem(key, value);
+      return;
+    } catch (e) {
+      const oldest = entriesOf(storage, UPLOAD_PREFIX)[0];
+      if (!oldest) throw e;
+      storage.removeItem(oldest.key);
+    }
+  }
+}
+
+interface Entry {
+  key: string;
+  updated: number;
+  /** Characters it takes in storage (key + value). */
+  size: number;
+}
+
+/** The entries under `prefix`, oldest first (by their `updated`). */
+function entriesOf(storage: WatchStorage, prefix: string): Entry[] {
+  const entries: Entry[] = [];
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i);
+    if (!key?.startsWith(prefix)) continue;
+    const raw = storage.getItem(key) ?? '';
+    const updated = Number(parse<{ updated?: unknown }>(raw)?.updated);
+    entries.push({
+      key,
+      updated: Number.isFinite(updated) ? updated : 0,
+      size: key.length + raw.length,
+    });
+  }
+  return entries.sort((a, b) => a.updated - b.updated);
 }
 
 /** Removes the oldest entries under `prefix` beyond `max` (by their `updated`). */
@@ -135,15 +184,8 @@ function evict(
   max: number,
   onEvict?: (key: string) => void,
 ) {
-  const entries: { key: string; updated: number }[] = [];
-  for (let i = 0; i < storage.length; i++) {
-    const key = storage.key(i);
-    if (!key?.startsWith(prefix)) continue;
-    const updated = Number(parse<{ updated?: unknown }>(storage.getItem(key))?.updated);
-    entries.push({ key, updated: Number.isFinite(updated) ? updated : 0 });
-  }
+  const entries = entriesOf(storage, prefix);
   if (entries.length <= max) return;
-  entries.sort((a, b) => a.updated - b.updated);
   for (const { key } of entries.slice(0, entries.length - max)) {
     storage.removeItem(key);
     onEvict?.(key);
@@ -161,8 +203,10 @@ export function readUpload(key: string, storage = defaultStorage()): StoredUploa
 }
 
 /**
- * Keeps the uploaded subtitle file of video `key` (one per video, `MAX_UPLOADS` overall). Returns
- * false when it is too big to keep or storage refused it.
+ * Keeps the uploaded subtitle file of video `key`: one per video, at most `MAX_UPLOADS` and
+ * `UPLOAD_BUDGET_CHARS` overall. Older uploads are evicted *before* it is written, so a full
+ * storage never blocks eviction. Returns false when it is too big to keep or storage refused it
+ * (then the video keeps no upload rather than an older one).
  */
 export function writeUpload(
   key: string,
@@ -170,12 +214,33 @@ export function writeUpload(
   { storage = defaultStorage(), now = Date.now() } = {},
 ): boolean {
   if (!storage || upload.text.length > MAX_UPLOAD_CHARS) return false;
+  const own = uploadKey(key);
+  const value = JSON.stringify({
+    name: upload.name,
+    text: upload.text,
+    updated: now,
+  } satisfies StoredUpload);
+  if (value.length > MAX_UPLOAD_CHARS) return false;
   try {
-    const value: StoredUpload = { name: upload.name, text: upload.text, updated: now };
-    storage.setItem(uploadKey(key), JSON.stringify(value));
-    evict(storage, UPLOAD_PREFIX, MAX_UPLOADS);
+    let room = UPLOAD_BUDGET_CHARS - own.length - value.length;
+    let slots = MAX_UPLOADS - 1;
+    for (const e of entriesOf(storage, UPLOAD_PREFIX).reverse()) {
+      if (e.key === own) continue;
+      if (slots > 0 && e.size <= room) {
+        slots--;
+        room -= e.size;
+      } else {
+        storage.removeItem(e.key);
+      }
+    }
+    storage.setItem(own, value);
     return true;
   } catch {
+    try {
+      storage.removeItem(own);
+    } catch {
+      // Storage blocked: nothing stored either.
+    }
     return false;
   }
 }

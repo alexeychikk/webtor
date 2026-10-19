@@ -4,6 +4,8 @@ import {
   MAX_UPLOADS,
   MAX_UPLOAD_CHARS,
   MAX_WATCHED,
+  UPLOAD_BUDGET_CHARS,
+  UPLOAD_PREFIX,
   audioRef,
   initialSubtitleKey,
   matchAudioTrack,
@@ -34,6 +36,25 @@ class FakeStorage implements WatchStorage {
   }
   removeItem(k: string) {
     this.map.delete(k);
+  }
+}
+
+/** A storage that, like the browser's, throws QuotaExceededError past `quota` characters. */
+class QuotaStorage extends FakeStorage {
+  constructor(public quota: number) {
+    super();
+  }
+  used() {
+    let n = 0;
+    for (const [k, v] of this.map) n += k.length + v.length;
+    return n;
+  }
+  override setItem(k: string, v: string) {
+    const prev = this.map.get(k);
+    const after =
+      this.used() - (prev === undefined ? 0 : k.length + prev.length) + k.length + v.length;
+    if (after > this.quota) throw new DOMException('full', 'QuotaExceededError');
+    super.setItem(k, v);
   }
 }
 
@@ -145,6 +166,77 @@ describe('uploads', () => {
       name: `${MAX_UPLOADS}.srt`,
       text: 'x',
     });
+  });
+
+  it('keeps all uploads within the budget, evicting the oldest before writing', () => {
+    const storage = new FakeStorage();
+    const text = 'x'.repeat(MAX_UPLOAD_CHARS * 0.6);
+    for (let i = 0; i < MAX_UPLOADS; i++) {
+      expect(
+        writeUpload(watchKey('h', `f${i}`), { name: `${i}.ass`, text }, { storage, now: i }),
+      ).toBe(true);
+      const total = [...storage.map]
+        .filter(([k]) => k.startsWith(UPLOAD_PREFIX))
+        .reduce((n, [k, v]) => n + k.length + v.length, 0);
+      expect(total).toBeLessThanOrEqual(UPLOAD_BUDGET_CHARS);
+    }
+    expect(readUpload(watchKey('h', `f${MAX_UPLOADS - 1}`), storage)?.name).toBe(
+      `${MAX_UPLOADS - 1}.ass`,
+    );
+    // 0.6 M each: two fit in the budget.
+    expect(readUpload(watchKey('h', `f${MAX_UPLOADS - 2}`), storage)).not.toBeNull();
+    expect(readUpload(watchKey('h', `f${MAX_UPLOADS - 3}`), storage)).toBeNull();
+  });
+
+  it('counts the stored form: newlines escaped in JSON can make a file too big', () => {
+    const storage = new FakeStorage();
+    const text = '\n'.repeat(MAX_UPLOAD_CHARS * 0.6);
+    expect(writeUpload(watchKey('h', 'a'), { name: 'a.srt', text }, { storage })).toBe(false);
+    expect(storage.length).toBe(0);
+  });
+
+  it('never fills a quota-limited storage: watch entries keep being written', () => {
+    // ~5 M characters per origin, like the browsers.
+    const storage = new QuotaStorage(5_000_000);
+    storage.setItem('webtor:relay-url', 'https://relay.example/');
+    const text = 'x'.repeat(MAX_UPLOAD_CHARS - 100);
+    for (let i = 0; i < MAX_UPLOADS * 2; i++) {
+      const key = watchKey('h', `f${i}`);
+      writeWatch(key, { position: 20 }, { storage, now: i });
+      expect(writeUpload(key, { name: `${i}.ass`, text }, { storage, now: i })).toBe(true);
+    }
+    expect(storage.used()).toBeLessThan(UPLOAD_BUDGET_CHARS + 100_000);
+    for (let i = 0; i < MAX_WATCHED; i++) {
+      writeWatch(watchKey('g', `f${i}`), { position: i + 10 }, { storage, now: 100 + i });
+    }
+    expect(readWatch(watchKey('g', `f${MAX_WATCHED - 1}`), storage)?.position).toBe(
+      MAX_WATCHED + 9,
+    );
+    expect(() => storage.setItem('webtor:subtitle-language', 'eng')).not.toThrow();
+  });
+
+  it('frees stored uploads when a watch entry finds storage full', () => {
+    const text = 'x'.repeat(1000);
+    const storage = new QuotaStorage(2150);
+    expect(writeUpload(watchKey('h', 'a'), { name: 'a.srt', text }, { storage, now: 1 })).toBe(
+      true,
+    );
+    expect(writeUpload(watchKey('h', 'b'), { name: 'b.srt', text }, { storage, now: 2 })).toBe(
+      true,
+    );
+    writeWatch(watchKey('h', 'c'), { position: 30 }, { storage, now: 3 });
+    expect(readWatch(watchKey('h', 'c'), storage)?.position).toBe(30);
+    expect(readUpload(watchKey('h', 'a'), storage)).toBeNull();
+    expect(readUpload(watchKey('h', 'b'), storage)).not.toBeNull();
+  });
+
+  it('a refused upload leaves no older upload of that video behind', () => {
+    const storage = new QuotaStorage(3000);
+    const key = watchKey('h', 'a');
+    expect(writeUpload(key, { name: 'a.srt', text: 'x' }, { storage })).toBe(true);
+    storage.setItem('other', 'y'.repeat(2500));
+    expect(writeUpload(key, { name: 'b.srt', text: 'x'.repeat(1000) }, { storage })).toBe(false);
+    expect(readUpload(key, storage)).toBeNull();
   });
 
   it('refuses big files and blocked storage', () => {

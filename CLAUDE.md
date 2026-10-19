@@ -260,8 +260,8 @@ docs/decisions/                ADRs
   JASSUB uses `requestVideoFrameCallback` `mediaTime` (element timeline), like the text tracks.
   The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
   **Per-video watch state (ADR 0009, `watch-state.ts`)**: `localStorage['webtor:watch:<infohash>:<path>']`
-  keeps the user's audio track, subtitle track (or Off), delay and position (uploads ≤ 1 M chars in
-  `webtor:watch-upload:…`); it wins over the language preferences, which stay the fallback. Resume
+  keeps the user's audio track, subtitle track (or Off), delay and position (uploads ≤ 1 M chars, ≤ 1.5 M all
+  together, in `webtor:watch-upload:…`); it wins over the language preferences, which stay the fallback. Resume
   starts the pipelines at the keyframe before the saved position (`MsePlayer` `startAt`), not under
   10 s or in the last 5 % (≤ 60 s); toast `resume-toast` with `start-over`.
   **Subtitle delay** (`SubtitleManager.delay`, ±0.5 s, reset per file) re-fills the showing track
