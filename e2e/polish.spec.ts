@@ -79,6 +79,48 @@ test('the no-peers card links to the help and the relay, also from fullscreen', 
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'connecting');
 });
 
+test('a tall no-peers card scrolls between the title strip and the control bar', async ({
+  page,
+}) => {
+  // Phone landscape: with "More" open the card is taller than the space it has.
+  await page.setViewportSize({ width: 740, height: 360 });
+  await page.goto(`./#magnet=${'0'.repeat(39)}2`);
+  const notice = page.locator('[data-testid="notice"][data-code="no-peers"]');
+  await expect(notice).toBeVisible({ timeout: 40_000 });
+  await notice.getByRole('button', { name: 'More' }).click();
+  await wakeControls(page);
+
+  const layout = () =>
+    page.evaluate(() => {
+      const card = document.querySelector<HTMLElement>('[data-testid="notice"]')!;
+      const area = card.parentElement!;
+      const caption = area.querySelector<HTMLElement>('.searching')!;
+      const bar = document.querySelector<HTMLElement>('[data-testid="controls"]')!;
+      const header = document.querySelector<HTMLElement>('header');
+      const a = area.getBoundingClientRect();
+      return {
+        overflows: area.scrollHeight > area.clientHeight,
+        areaTop: a.top,
+        areaBottom: a.bottom,
+        barTop: bar.getBoundingClientRect().top,
+        headerBottom: header?.getBoundingClientRect().bottom ?? 0,
+        cardTop: card.getBoundingClientRect().top,
+        captionBottom: caption.getBoundingClientRect().bottom,
+      };
+    });
+
+  // At the top of the scroll: the card starts inside the area, below the header.
+  let box = await layout();
+  expect(box.overflows).toBe(true);
+  expect(box.areaBottom).toBeLessThanOrEqual(box.barTop + 0.5);
+  expect(box.areaTop).toBeGreaterThanOrEqual(box.headerBottom);
+  expect(box.cardTop).toBeGreaterThanOrEqual(box.areaTop - 0.5);
+  // Scrolled to the end: the caption is reachable and stays above the control bar.
+  await notice.evaluate((card) => card.parentElement!.scrollTo(0, 1e6));
+  box = await layout();
+  expect(box.captionBottom).toBeLessThanOrEqual(box.areaBottom + 0.5);
+});
+
 test('the empty page shows only the wordmark, tagline, input, relay and help', async ({ page }) => {
   await page.goto('./');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('webtor');

@@ -242,16 +242,23 @@
     inset: 0;
     background: var(--scrim);
   }
+  /*
+   * The scroll area sits between the title strip and the control bar, so a tall card (phone
+   * landscape, "More" open) scrolls inside it and never runs under either. Centred with auto
+   * margins only (no `justify-content: center`): content taller than the area then starts at its
+   * top instead of overflowing above it, out of scroll reach.
+   */
   .card-area {
     position: absolute;
-    inset: 0;
+    top: 2.75rem;
+    right: 0;
+    bottom: calc(var(--hit) + var(--space-6));
+    left: 0;
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
     align-items: center;
-    justify-content: center;
-    /* Clear of the title strip and the control bar, which stay usable around the card. */
-    padding: 2.75rem var(--space-3) calc(var(--hit) + var(--space-6));
+    padding: 0 var(--space-3);
     overflow: auto;
   }
   .card {
