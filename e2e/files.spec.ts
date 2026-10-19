@@ -83,6 +83,36 @@ test('#file= in the hash selects that file on load', async ({ page }) => {
   await expect(page).toHaveURL(/&file=0$/);
 });
 
+test('Retry after an early error keeps the #file= asked for', async ({ page }) => {
+  const magnet = await fixtureMagnet('multi-file');
+  const bytes = await torrentBytes('multi-file');
+  // A relay that is down at first (no file is open yet when it fails), then hands over the metainfo.
+  // The data comes from the magnet's own web seed; nothing listens on 7899 for the rest.
+  await page.addInitScript(() => {
+    localStorage.setItem('webtor:relay-url', 'http://127.0.0.1:7899/0123456789abcdef');
+  });
+  let relayUp = false;
+  await page.route(/127\.0\.0\.1:7899\/.*\/metainfo/, (route) =>
+    relayUp
+      ? route.fulfill({
+          status: 200,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          contentType: 'application/x-bittorrent',
+          body: bytes,
+        })
+      : route.abort(),
+  );
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}&file=0`);
+  const error = page.getByTestId('error');
+  await expect(error).toHaveAttribute('data-code', 'relay-unreachable');
+  relayUp = true;
+  await error.getByTestId('retry').click();
+  // Not the largest file (episode-2.mkv): the one the link asked for.
+  await expect(page.getByTestId('status')).toContainText('episode-1.ts');
+  await expect(page).toHaveURL(/&file=0$/);
+  await expect(error).toHaveCount(0);
+});
+
 test('#file= pointing at an unplayable file falls back to the largest video', async ({ page }) => {
   const magnet = await fixtureMagnet('multi-file');
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}&file=2`);

@@ -28,6 +28,8 @@
   let video = $state<HTMLVideoElement>();
   /** What is loaded: a magnet / info hash, or the bytes of an opened .torrent file. */
   let current: TorrentInput | null = null;
+  /** The file asked for with `current` (`#file=`); `controller.fileIndex` is null until it opens. */
+  let requestedFile: number | null = null;
   let draggingTorrent = $state(false);
   const valid = $derived(isTorrentId(input));
   /** An invalid value was submitted: danger border and helper until the field changes. */
@@ -37,6 +39,7 @@
 
   function play(torrentId: TorrentInput, fileIndex: number | null = null) {
     current = torrentId;
+    requestedFile = fileIndex;
     if (video) void controller.load(torrentId, video, fileIndex);
   }
 
@@ -82,6 +85,7 @@
     event.preventDefault();
     history.pushState(null, '', `${location.pathname}${location.search}`);
     current = null;
+    requestedFile = null;
     input = '';
     invalid = false;
     void controller.stop();
@@ -149,10 +153,15 @@
     else relaySettings.openDialog(relayUrl);
   }
 
+  /** Play `current` again on the same file: the one open, else the one asked for (early errors). */
+  function replay() {
+    if (current) play(current, controller.fileIndex ?? requestedFile);
+  }
+
   /** After the relay setting changed: retry a playback that is still looking for peers or failed. */
   function relayChanged() {
     if (current && (controller.phase === 'connecting' || controller.phase === 'error')) {
-      play(current, controller.fileIndex);
+      replay();
     }
   }
 
@@ -275,13 +284,7 @@
     </section>
   {/if}
   <main class="watch-body">
-    <Player
-      {controller}
-      bind:video
-      onretry={() => {
-        if (current) play(current, controller.fileIndex);
-      }}
-    />
+    <Player {controller} bind:video onretry={replay} />
   </main>
   {#if draggingTorrent}
     <div class="page-drop" data-testid="page-drop" aria-hidden="true">
@@ -556,8 +559,14 @@
     .app.hero .hero-body {
       padding: 0 var(--space-4) 12vh;
     }
+    /* Mark only, but the home link and the h1 keep their name (sr-only). */
     .wordmark {
-      display: none;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
     .actions {
       gap: 0;

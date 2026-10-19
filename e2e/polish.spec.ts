@@ -259,6 +259,9 @@ test('fits a phone screen without horizontal scrolling', async ({ page }) => {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   expect(overflow).toBeLessThanOrEqual(0);
+  // Mark only, but the home link and the heading keep their name.
+  await expect(page.getByRole('heading', { name: 'webtor' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'webtor' })).toBeVisible();
   // Polled: a sheet slides up from below the viewport.
   const inside = (id: string) =>
     expect
