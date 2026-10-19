@@ -246,6 +246,8 @@ urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer cou
   streams the relay's `transcode` fMP4 into the video SourceBuffer (`remote-video.ts`), and audio
   and subtitles stay local. A seek aborts the fetch and requests `?start=t` (element time,
   `timestampOffset` from `appendOffset`, no keyframe lookup). An opened .torrent is POSTed to the
-  relay's `metainfo` first.
+  relay's `metainfo` first. A transcode 404 "torrent not added" (relay restart, idle drop) registers
+  the torrent again (magnet GET / .torrent POST) and retries once. `relay-transcode-slow` counts its
+  5 s warm-up from the relay's answer, not the request (headers wait for ffmpeg's first bytes).
 - Web seeds need CORS that allows the `Range` and `Cache-Control` request headers (WebTorrent sends
   both).

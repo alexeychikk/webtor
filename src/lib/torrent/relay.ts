@@ -182,6 +182,14 @@ export function relayTranscodeErrorCode(f: RelayFailure): RelayErrorCode {
   return 'relay-error';
 }
 
+/**
+ * The relay doesn't have the torrent (any more): it restarted, or dropped the torrent after its idle
+ * timeout (e.g. a long pause). Registering it again (metainfo) and retrying once recovers.
+ */
+export function relayTorrentMissing(f: RelayFailure): boolean {
+  return f.kind === 'http' && f.status === 404 && /^torrent not added/.test(f.message ?? '');
+}
+
 /** Technical detail appended to the message (never contains the relay URL: the token is a password). */
 export function relayErrorDetail(f: RelayFailure): string | undefined {
   if (f.kind === 'http') {

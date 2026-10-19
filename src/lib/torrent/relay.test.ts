@@ -7,6 +7,7 @@ import {
   relayEndpoints,
   relayErrorCode,
   relayErrorDetail,
+  relayTorrentMissing,
   relayTorrentRef,
   relayTranscodeErrorCode,
   transcodeSummary,
@@ -203,5 +204,16 @@ describe('relay video conversion', () => {
     expect(transcodeSummary({ available: false, ffmpeg: '', maxHeight: 0, preset: '' })).toMatch(
       /^Video conversion: off\. .*install ffmpeg/,
     );
+  });
+});
+
+describe('relayTorrentMissing', () => {
+  it('spots the relay that lost the torrent, not a wrong token or a bad file index', () => {
+    const http = (status: number, message?: string) => ({ kind: 'http' as const, status, message });
+    expect(relayTorrentMissing(http(404, 'torrent not added; fetch metainfo first'))).toBe(true);
+    expect(relayTorrentMissing(http(404))).toBe(false);
+    expect(relayTorrentMissing(http(404, 'no file 3 in this torrent'))).toBe(false);
+    expect(relayTorrentMissing(http(503, 'torrent not added; fetch metainfo first'))).toBe(false);
+    expect(relayTorrentMissing({ kind: 'network' })).toBe(false);
   });
 });

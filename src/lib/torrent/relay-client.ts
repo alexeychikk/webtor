@@ -8,6 +8,7 @@ import {
   parseRelayStats,
   relayErrorCode,
   relayErrorDetail,
+  relayTorrentMissing,
   relayTranscodeErrorCode,
   type RelayFailure,
   type RelayInfo,
@@ -129,20 +130,28 @@ export async function fetchRelayStats(
 /**
  * Starts the relay's H.264 conversion of a file (ADR 0007 §2) and returns the fragmented MP4 body.
  * Not reading it is the back-pressure: the relay's ffmpeg blocks on its pipe. Abort `signal` to end
- * the job (a seek or a closed file). Fails with a `relay-*` `PlaybackError`.
+ * the job (a seek or a closed file). When the relay no longer has the torrent (restart, idle drop),
+ * `register` hands it over again and the request is retried once. Fails with a `relay-*`
+ * `PlaybackError`.
  */
 export async function fetchRelayTranscode(
   url: string,
   signal: AbortSignal,
+  register?: (signal: AbortSignal) => Promise<void>,
 ): Promise<ReadableStream<Uint8Array>> {
+  let failure: RelayFailure;
   try {
     const res = await relayGet(url, TRANSCODE_HEADERS_TIMEOUT_MS, signal, { bodyTimeout: false });
     if (!res.body) throw new RelayRequestError({ kind: 'bad-response' });
     return res.body;
   } catch (err) {
-    if (err instanceof RelayRequestError) {
-      throw new PlaybackError(relayTranscodeErrorCode(err.failure), relayErrorDetail(err.failure));
-    }
-    throw err;
+    if (!(err instanceof RelayRequestError)) throw err;
+    failure = err.failure;
   }
+  if (register && relayTorrentMissing(failure)) {
+    await register(signal);
+    signal.throwIfAborted();
+    return fetchRelayTranscode(url, signal);
+  }
+  throw new PlaybackError(relayTranscodeErrorCode(failure), relayErrorDetail(failure));
 }

@@ -19,6 +19,7 @@ import { PlaybackError, type PlaybackErrorCode } from './errors';
 import {
   MAX_REMOTE_RESUMES,
   REMOTE_VIDEO_MIME,
+  REMOTE_WARMUP_MS,
   remoteResumePoint,
   transcodeSlow,
   type RemoteVideo,
@@ -94,8 +95,8 @@ interface Pipeline {
 interface RemoteState {
   /** Ends the current relay request (seek, restart, destroy). */
   abort: AbortController | null;
-  /** `performance.now()` of the current request, for `transcodeSlow`. */
-  startedAt: number;
+  /** `performance.now()` when the relay answered the current request (`null` before), for `transcodeSlow`. */
+  startedAt: number | null;
   /** Stream cuts in a row without data in between (see `MAX_REMOTE_RESUMES`). */
   cuts: number;
 }
@@ -300,7 +301,7 @@ export class MsePlayer {
       try {
         try {
           player.addPipeline('video', videoTrack.id, video_.mime);
-          if (remote) player.pipelines[0]!.remote = { abort: null, startedAt: 0, cuts: 0 };
+          if (remote) player.pipelines[0]!.remote = { abort: null, startedAt: null, cuts: 0 };
           if (audio && audioDecision && audioDecision.playback !== 'unsupported') {
             player.addPipeline('audio', audio.id, audioDecision.mime, audioDecision);
           }
@@ -478,7 +479,7 @@ export class MsePlayer {
       currentTime: this.video.currentTime,
       seeking: this.video.seeking,
       done: p.done,
-      sinceStartMs: performance.now() - p.remote.startedAt,
+      sinceStartMs: p.remote.startedAt === null ? null : performance.now() - p.remote.startedAt,
     });
     if (!slow) return;
     this.slowNoticed = true;
@@ -620,7 +621,8 @@ export class MsePlayer {
     p.replaceUntil = -Infinity;
     const abort = new AbortController();
     remote.abort = abort;
-    remote.startedAt = performance.now();
+    // The warm-up clock starts when the relay answers: before that, ffmpeg waits for the swarm.
+    remote.startedAt = null;
     let body: ReadableStream<Uint8Array>;
     try {
       body = await this.remote!.open(offset, abort.signal);
@@ -629,6 +631,11 @@ export class MsePlayer {
       throw err;
     }
     if (gen !== p.gen || this.destroyed) return void abort.abort();
+    remote.startedAt = performance.now();
+    // A `waiting` during the warm-up is not re-fired while the element keeps starving: look again.
+    setTimeout(() => {
+      if (gen === p.gen && !this.video.paused) this.checkTranscodeSpeed();
+    }, REMOTE_WARMUP_MS + 100);
     await settled(p.sb);
     if (gen !== p.gen || this.destroyed) return void abort.abort();
     // The relay's output starts at 0 for `start` = offset.

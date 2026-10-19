@@ -149,3 +149,44 @@ test('an opened .torrent registers with the relay before its video is converted'
   expect(metainfo).toEqual(['POST ']);
   expect(starts[0]).toBe(0);
 });
+
+test('a relay that lost the torrent gets it again, and a slow first answer is not "slow"', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { aviMagnet, relayUrl } = await relayStack();
+  test.skip(
+    !(await transcodeAvailable(relayUrl)),
+    'the relay found no ffmpeg (WEBTOR_RELAY_FFMPEG)',
+  );
+  const metainfo: string[] = [];
+  page.on('request', (r) => {
+    if (r.url().includes('/metainfo')) metainfo.push(r.method());
+  });
+  // 1st conversion request: the relay restarted (or dropped the torrent while paused). 2nd: ffmpeg
+  // waits for the swarm before its first bytes, longer than the warm-up.
+  let requests = 0;
+  await page.route(/\/transcode\/\d+\?start=/, async (route) => {
+    requests++;
+    if (requests === 1) {
+      return route.fulfill({
+        status: 404,
+        headers: { 'access-control-allow-origin': '*' },
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'torrent not added; fetch metainfo first' }),
+      });
+    }
+    if (requests === 2) await new Promise((resolve) => setTimeout(resolve, 7_000));
+    await route.continue();
+  });
+  await useRelay(page, relayUrl);
+  await page.goto(`./#magnet=${encodeURIComponent(aviMagnet)}`);
+  await expect.poll(() => currentTime(page), { timeout: 60_000 }).toBeGreaterThan(2);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+  // Registered again with the magnet (GET), then the retry went through.
+  expect(metainfo).toEqual(['GET', 'GET']);
+  expect(requests).toBeGreaterThanOrEqual(2);
+  await expect(
+    page.locator('[data-testid="notice"][data-code="relay-transcode-slow"]'),
+  ).toHaveCount(0);
+});

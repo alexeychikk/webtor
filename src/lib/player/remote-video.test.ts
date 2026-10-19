@@ -17,6 +17,8 @@ describe('transcodeSlow', () => {
   it('ignores seeks, warm-up, the end of the video and a buffer that still has media', () => {
     expect(transcodeSlow({ ...base, seeking: true })).toBe(false);
     expect(transcodeSlow({ ...base, sinceStartMs: 1000 })).toBe(false);
+    // The relay hasn't answered yet: ffmpeg still waits for the swarm, however long that takes.
+    expect(transcodeSlow({ ...base, sinceStartMs: null })).toBe(false);
     expect(transcodeSlow({ ...base, done: true })).toBe(false);
     expect(transcodeSlow({ ...base, videoBuffered: toRanges([[0, 14]]) })).toBe(false);
   });

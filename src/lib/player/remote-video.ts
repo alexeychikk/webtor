@@ -20,7 +20,10 @@ export interface RemoteVideo {
  */
 export const REMOTE_VIDEO_MIME = 'video/mp4; codecs="avc1.640028"';
 
-/** A (re)started conversion needs this long for its first fragments before a drained buffer counts as slow. */
+/**
+ * After the relay answered a (re)started conversion, it gets this long for its first fragments before a
+ * drained buffer counts as slow.
+ */
 export const REMOTE_WARMUP_MS = 5_000;
 /** Below this much video ahead of the playhead the element is starving. */
 const STARVED_S = 0.5;
@@ -35,10 +38,15 @@ export function transcodeSlow(s: {
   seeking: boolean;
   /** The relay's stream ended: nothing more is coming. */
   done: boolean;
-  /** Since the current conversion was requested. */
-  sinceStartMs: number;
+  /**
+   * Since the relay answered the current request; `null` while it hasn't. It answers once ffmpeg
+   * wrote its first bytes, which can take long on a real swarm (file head, an AVI's idx1 at the end).
+   */
+  sinceStartMs: number | null;
 }): boolean {
-  if (s.seeking || s.done || s.sinceStartMs < REMOTE_WARMUP_MS) return false;
+  if (s.seeking || s.done || s.sinceStartMs === null || s.sinceStartMs < REMOTE_WARMUP_MS) {
+    return false;
+  }
   return bufferedAhead(s.videoBuffered, s.currentTime) < STARVED_S;
 }
 
