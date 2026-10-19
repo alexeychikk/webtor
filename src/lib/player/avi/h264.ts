@@ -255,3 +255,33 @@ export function gopPresentationRanks(pocs: ReadonlyArray<number | null>): number
   const keyRank = rank[0] ?? 0;
   return rank.map((r) => r - keyRank);
 }
+
+/**
+ * Key frame test for a chunk without an index flag (the `movi` scan): an IDR slice, or a non-IDR
+ * slice of type I (an open-GOP key frame, which muxers flag as key in `idx1` too).
+ */
+export function isH264KeyFrame(nals: readonly NalUnit[]): boolean {
+  const nal = nals.find((n) => n.type === 1 || n.type === 5);
+  if (!nal) return false;
+  if (nal.type === 5) return true;
+  try {
+    const r = new BitReader(rbsp(nal.data.subarray(0, 16)));
+    r.ue(); // first_mb_in_slice
+    return r.ue() % 5 === 2; // slice_type I
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Key frame test for an MPEG-4 Part 2 (DivX/Xvid) chunk: its first VOP is an I-VOP. Null when the
+ * chunk holds no VOP start code (another codec).
+ */
+export function isMpeg4KeyFrame(chunk: Uint8Array): boolean | null {
+  for (let i = 0; i + 4 < chunk.length; i++) {
+    if (chunk[i] === 0 && chunk[i + 1] === 0 && chunk[i + 2] === 1 && chunk[i + 3] === 0xb6) {
+      return chunk[i + 4]! >> 6 === 0;
+    }
+  }
+  return null;
+}

@@ -25,7 +25,8 @@ export type PlaybackErrorCode =
   | 'relay-transcode-unavailable'
   | 'relay-transcode-busy'
   | 'relay-transcode-failed'
-  | 'relay-transcode-slow';
+  | 'relay-transcode-slow'
+  | 'avi-no-index';
 
 export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'invalid-input': 'That is not a magnet link, info hash or .torrent file.',
@@ -74,6 +75,9 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'relay-transcode-slow':
     'Your relay converts video slower than it plays. Start it with a lower -transcode-max-height ' +
     'or a faster -transcode-preset.',
+  'avi-no-index':
+    'This AVI file has no index, so seeking is limited: it plays from the start, and you can only ' +
+    'seek within the part loaded so far.',
 };
 
 export class PlaybackError extends Error {

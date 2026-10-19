@@ -49,3 +49,25 @@ test('a DivX/Xvid AVI says it needs a relay and offers the relay settings', asyn
   await error.getByRole('button', { name: 'Set up a relay' }).click();
   await expect(page.getByTestId('relay-dialog')).toBeVisible();
 });
+
+test('an AVI without an index plays from 0, says seeking is limited, keeps seeks in range', async ({
+  page,
+}) => {
+  const magnet = await fixtureMagnet('avi-h264-noidx.avi');
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
+  await expect(page.getByTestId('status')).toContainText('avi-h264-noidx.avi');
+  const notice = page.locator('[data-testid="notice"][data-code="avi-no-index"]');
+  await expect(notice).toBeVisible({ timeout: 30_000 });
+  await expect(notice).toContainText('seeking is limited');
+  await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+  const video = page.getByTestId('video');
+  // Duration from avih before the scan reaches the end.
+  const duration = await video.evaluate((v: HTMLVideoElement) => v.duration);
+  expect(duration).toBeGreaterThan(11.5);
+  expect(duration).toBeLessThan(12.5);
+  // A seek (scanned by now: the fixture is small) still plays on.
+  await video.evaluate((v: HTMLVideoElement) => (v.currentTime = 8));
+  await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(8.5);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});
