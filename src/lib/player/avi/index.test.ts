@@ -2,7 +2,7 @@ import * as mb from 'mediabunny';
 import { describe, expect, it } from 'vitest';
 import type { ByteSource } from '../types';
 import { AviDemuxer, type AviAudioBacking, type AviVideoBacking } from './demuxer';
-import { isH264KeyFrame, isMpeg4KeyFrame, nalUnits } from './h264';
+import { hasRecoveryPoint, isH264KeyFrame, isMpeg4KeyFrame, nalUnits } from './h264';
 import { ChunkTable, parseStdIndex, parseSuperIndex } from './riff';
 
 /** Little-endian byte writer with back-patched chunk sizes. */
@@ -417,12 +417,40 @@ describe('OpenDML index parsers', () => {
 });
 
 describe('key frame tests for the movi scan', () => {
-  it('H.264: IDR and I slices are key, P slices are not', () => {
+  it('H.264: IDR and I slices after an SEI recovery point are key; other I and P slices are not', () => {
     expect(isH264KeyFrame(nalUnits(Uint8Array.of(0, 0, 1, 0x65, 0x88)))).toBe(true);
-    // slice_type ue(7) = I (all-I), first_mb 0: bits 1 0001000
-    expect(isH264KeyFrame(nalUnits(Uint8Array.of(0, 0, 1, 0x41, 0x88)))).toBe(true);
+    // slice_type ue(7) = I (all-I), first_mb 0: bits 1 0001000. Without a recovery point it is a
+    // scenecut I (its leading B frames reference the previous GOP): not key.
+    expect(isH264KeyFrame(nalUnits(Uint8Array.of(0, 0, 1, 0x41, 0x88)))).toBe(false);
+    // SEI: user data unregistered (type 5, 2 bytes), then recovery point (type 6, 1 byte), stop bit.
+    const recovery = [0, 0, 1, 0x06, 0x05, 0x02, 0xaa, 0xbb, 0x06, 0x01, 0x84, 0x80];
+    expect(isH264KeyFrame(nalUnits(Uint8Array.of(...recovery, 0, 0, 1, 0x41, 0x88)))).toBe(true);
+    // An SEI without a recovery point (user data only) does not make an I slice key.
+    const userData = [0, 0, 1, 0x06, 0x05, 0x02, 0xaa, 0xbb, 0x80];
+    expect(isH264KeyFrame(nalUnits(Uint8Array.of(...userData, 0, 0, 1, 0x41, 0x88)))).toBe(false);
+    // A P slice after a recovery point is not key either.
+    expect(isH264KeyFrame(nalUnits(Uint8Array.of(...recovery, 0, 0, 1, 0x41, 0x9a)))).toBe(false);
     expect(isH264KeyFrame(nalUnits(Uint8Array.of(0, 0, 1, 0x41, 0x9a)))).toBe(false);
     expect(isH264KeyFrame(nalUnits(Uint8Array.of(0, 0, 1, 0x06, 0x05)))).toBe(false);
+  });
+  it('H.264 SEI: recovery point found past long payload types and sizes', () => {
+    // payloadType 5 with a 300-byte payload (size = 0xff 0x2d), then type 6.
+    const sei = Uint8Array.of(
+      0x06,
+      0x05,
+      0xff,
+      0x2d,
+      ...new Array(300).fill(0x11),
+      0x06,
+      0x01,
+      0x84,
+      0x80,
+    );
+    expect(hasRecoveryPoint(sei)).toBe(true);
+    // payloadType 255 + 6 = 261 is not a recovery point.
+    expect(hasRecoveryPoint(Uint8Array.of(0x06, 0xff, 0x06, 0x01, 0x00, 0x80))).toBe(false);
+    // Truncated SEI.
+    expect(hasRecoveryPoint(Uint8Array.of(0x06, 0x05, 0x40, 0x11))).toBe(false);
   });
   it('MPEG-4 Part 2: I-VOP is key; null without a VOP', () => {
     expect(isMpeg4KeyFrame(Uint8Array.of(0, 0, 1, 0xb6, 0x10))).toBe(true);

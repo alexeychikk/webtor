@@ -231,7 +231,9 @@ they are not used for tuning. Scripts: the ticket's hand-off comment.
   before they load.
 - The scan reads 512 KiB of `movi` per step (`LIST rec ` entered, `ix##`/`JUNK` skipped, `AVIX`
   followed). It stops at the first cut chunk (truncated file) or a non-FourCC id. Key frames come from
-  the data: an H.264 IDR or I slice, an MPEG-4 Part 2 I-VOP. Lookups by time don't scan ahead.
+  the data, as ffmpeg flags them: an H.264 IDR, or an I slice after an SEI recovery point (open
+  GOP); not other I slices (x264 scenecuts, whose leading B frames reference the GOP before); an
+  MPEG-4 Part 2 I-VOP. Lookups by time don't scan ahead.
   `MsePlayer` moves a seek past the last scanned frame back to it.
 
 ## Consequences
