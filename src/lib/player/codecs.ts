@@ -82,11 +82,18 @@ export interface AudioSource {
  * Copy when MSE accepts the stream in MP4; else decode (wasm for AC-3/E-AC-3/DTS, WebCodecs for the
  * rest) and re-encode to stereo `target`; else unsupported, with a reason for the track list.
  */
+/** Codec string of MP3 in MP4 (MPEG-1 audio object type; Mediabunny's muxer writes it). */
+export const MP3_IN_MP4 = 'mp4a.6b';
+
 export function decideAudio(
   track: AudioSource,
   isTypeSupported: IsTypeSupported,
   target: TranscodeTarget | null,
 ): AudioDecision {
+  // MP3 (AVI's usual audio) is muxed into MP4 as `mp4a.6b`: copy it where MSE takes that.
+  if (track.codec === 'mp3' && isTypeSupported(audioMime(MP3_IN_MP4))) {
+    return { playback: 'copy', mime: audioMime(MP3_IN_MP4), outputCodec: 'mp3' };
+  }
   if (track.codecString && isTypeSupported(audioMime(track.codecString))) {
     return {
       playback: 'copy',
