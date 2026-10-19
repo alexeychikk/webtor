@@ -23,6 +23,7 @@
     viaRelay,
     touch,
     shown,
+    covered = false,
     flash,
     ontoggleplay,
     onseek,
@@ -33,6 +34,8 @@
     touch: boolean;
     /** The control layer is shown (the touch row comes and goes with it). */
     shown: boolean;
+    /** A state card covers the picture: the spinner hides under it (the card has its own). */
+    covered?: boolean;
     /** The last play/pause toggle, to flash its new state; `null` before the first. */
     flash: Flash | null;
     ontoggleplay: () => void;
@@ -72,7 +75,7 @@
   );
 </script>
 
-<div class="centre" data-testid="centre" data-state={view}>
+<div class="centre" class:covered data-testid="centre" data-state={view}>
   {#if view === 'loading' || view === 'buffering'}
     <div class="loading" role="presentation">
       <span class="spinner" aria-hidden="true"><LoaderCircle size={40} strokeWidth={2} /></span>
@@ -132,6 +135,9 @@
     display: grid;
     place-items: center;
     pointer-events: none;
+  }
+  .centre.covered {
+    visibility: hidden;
   }
   .centre > * {
     grid-area: 1 / 1;

@@ -93,10 +93,9 @@ test('a torrent nobody seeds shows the no-peers message', async ({ page }) => {
   // The picture shows a spinner with what it waits for.
   await expect(page.getByTestId('centre')).toHaveAttribute('data-state', 'loading');
   await expect(page.getByTestId('centre')).toContainText('Looking for peers…');
-  await expect(page.locator('[data-testid="notice"][data-code="no-peers"]')).toContainText(
-    'No browser-compatible peers found',
-    { timeout: 25_000 },
-  );
+  const card = page.locator('[data-testid="notice"][data-code="no-peers"]');
+  await expect(card).toContainText('No browser-compatible peers found', { timeout: 25_000 });
+  await expect(card).toContainText('No browser peers yet');
   // Not a dead end: it keeps searching.
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'connecting');
 });
@@ -108,9 +107,11 @@ test('a web seed that keeps failing shows the stalled message', async ({ page })
   const magnet = await fixtureMagnet('sample.mkv');
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect(page.getByTestId('status')).toContainText('sample.mkv');
-  await expect(page.locator('[data-testid="notice"][data-code="stalled"]')).toBeVisible({
-    timeout: 40_000,
-  });
+  // A toast: it hides with the controls, so check it is there and says what happened.
+  const stalled = page.locator('[data-testid="notice"][data-code="stalled"]');
+  await expect(stalled).toBeAttached({ timeout: 40_000 });
+  await expect(stalled).toContainText('Download stalled');
+  await expect(stalled.getByTestId('why-link')).toBeAttached();
   await expect(page.getByTestId('error')).toHaveCount(0);
   // Still waiting for data: a spinner, never the play button.
   await expect(page.getByTestId('centre')).toHaveAttribute('data-state', /^(loading|buffering)$/);

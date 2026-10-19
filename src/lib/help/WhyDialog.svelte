@@ -1,30 +1,50 @@
 <script lang="ts">
+  import Waypoints from '@lucide/svelte/icons/waypoints';
+  import X from '@lucide/svelte/icons/x';
+  import { SHORTCUTS } from '../player/shortcuts';
   import { relaySettings } from '../torrent/relay-settings.svelte';
+  import IconButton from '../ui/IconButton.svelte';
+  import { showPageDialog } from '../ui/page-dialog';
   import { helpDialog } from './help-dialog.svelte';
 
   const WEBTORRENT_DESKTOP_URL = 'https://webtorrent.io/desktop/';
 
   let dialog = $state<HTMLDialogElement>();
+  let shortcuts = $state<HTMLElement>();
 
   $effect(() => {
     if (!dialog) return;
-    if (helpDialog.open && !dialog.open) dialog.showModal();
-    else if (!helpDialog.open && dialog.open) dialog.close();
+    if (helpDialog.open && !dialog.open) {
+      const d = dialog;
+      // Opened by `?`: straight to the keyboard shortcuts.
+      void showPageDialog(d, () => helpDialog.open).then(() => {
+        if (helpDialog.section === 'shortcuts') shortcuts?.scrollIntoView({ block: 'start' });
+        else d.scrollTop = 0;
+      });
+    } else if (!helpDialog.open && dialog.open) dialog.close();
   });
 
-  function openRelay() {
+  function close() {
     helpDialog.open = false;
+  }
+
+  function openRelay() {
+    close();
     relaySettings.openDialog();
   }
 </script>
 
 <dialog
   bind:this={dialog}
+  class="page-dialog"
   data-testid="why-dialog"
   aria-labelledby="why-title"
-  onclose={() => (helpDialog.open = false)}
+  onclose={close}
 >
-  <h2 id="why-title">Why won’t my torrent play?</h2>
+  <div class="dialog-header">
+    <h2 id="why-title">Why won’t my torrent play?</h2>
+    <IconButton icon={X} label="Close" onclick={close} />
+  </div>
   <p>
     A browser tab can only download from peers that speak <strong>WebRTC</strong>: other browser
     tabs running webtor or another WebTorrent site,
@@ -49,7 +69,9 @@
     <li>
       <strong>Run a relay.</strong> webtor-relay is a small BitTorrent client you run yourself (on
       this computer or a server). It reaches regular peers and streams to this tab.
-      <button type="button" data-testid="why-relay" onclick={openRelay}>Set up a relay…</button>
+      <button type="button" class="btn relay" data-testid="why-relay" onclick={openRelay}>
+        <Waypoints size={18} aria-hidden="true" />Set up a relay…
+      </button>
     </li>
     <li>
       Magnets with a web seed (<code>ws=</code>) or a .torrent URL (<code>xs=</code>) can play
@@ -60,23 +82,58 @@
       more WebRTC seeders make it faster.
     </li>
   </ul>
-  <form method="dialog">
-    <button type="submit">Close</button>
-  </form>
+  <section bind:this={shortcuts} data-testid="shortcuts-help" aria-labelledby="shortcuts-title">
+    <h3 id="shortcuts-title">Keyboard shortcuts</h3>
+    <dl>
+      {#each SHORTCUTS as s (s.keys)}
+        <div>
+          <dt>
+            {#each s.keys.split(' / ') as key, i (key)}{#if i > 0}<span class="sep">/</span
+                >{/if}<kbd>{key}</kbd>{/each}
+          </dt>
+          <dd>{s.action}</dd>
+        </div>
+      {/each}
+    </dl>
+  </section>
 </dialog>
 
 <style>
-  dialog {
-    max-width: min(40rem, calc(100vw - 2rem));
-    box-sizing: border-box;
-  }
-  h2 {
-    margin-top: 0;
-  }
   li {
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
-  form {
-    text-align: right;
+  ul {
+    padding-left: var(--space-5);
+  }
+  .relay {
+    display: flex;
+    margin-top: var(--space-2);
+  }
+  section {
+    scroll-margin-top: var(--space-4);
+  }
+  dl {
+    display: grid;
+    gap: var(--space-2);
+    margin: 0;
+  }
+  dl div {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+  }
+  dt {
+    display: flex;
+    flex: none;
+    gap: var(--space-1);
+    align-items: center;
+    min-width: 6rem;
+  }
+  dd {
+    margin: 0;
+    color: var(--text-muted);
+  }
+  .sep {
+    color: var(--text-faint);
   }
 </style>

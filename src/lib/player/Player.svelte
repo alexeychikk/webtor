@@ -9,8 +9,9 @@
   import Link from '@lucide/svelte/icons/link';
   import ListVideo from '@lucide/svelte/icons/list-video';
   import Users from '@lucide/svelte/icons/users';
-  import { relaySettings } from '../torrent/relay-settings.svelte';
-  import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
+  import type { PlaybackErrorCode } from './errors';
+  import PlayerStates from './PlayerStates.svelte';
+  import { playerStates } from './states';
   import AudioMenu from './AudioMenu.svelte';
   import { audioTrackTitle } from './audio-options';
   import { formatSpeed } from './format';
@@ -36,14 +37,7 @@
   } from './fullscreen';
   import type { PlayerController, Phase } from './controller.svelte';
   import PlayerControls from './PlayerControls.svelte';
-  import {
-    repeats,
-    seekTarget,
-    shortcutFor,
-    SHORTCUTS,
-    volumeTarget,
-    type ShortcutAction,
-  } from './shortcuts';
+  import { repeats, seekTarget, shortcutFor, volumeTarget, type ShortcutAction } from './shortcuts';
   import StatsPanel from './StatsPanel.svelte';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
   import FileList from '../torrent/FileList.svelte';
@@ -53,7 +47,13 @@
   let {
     controller,
     video = $bindable(),
-  }: { controller: PlayerController; video?: HTMLVideoElement } = $props();
+    onretry,
+  }: {
+    controller: PlayerController;
+    video?: HTMLVideoElement;
+    /** Retry after a fatal error: the page loads the same torrent and file again. */
+    onretry: () => void;
+  } = $props();
 
   const PHASE_TEXT: Record<Phase, string> = {
     idle: '',
@@ -65,7 +65,6 @@
     error: 'Stopped',
   };
 
-  const isRelayError = (code: PlaybackErrorCode) => code.startsWith('relay-');
   const phaseText = $derived(
     controller.phase === 'connecting' && controller.viaRelay
       ? 'Relay is finding peers…'
@@ -326,9 +325,30 @@
     return () => root.removeEventListener('mouseleave', hideControls);
   });
 
+  // Errors and notices (docs/decisions/0008 §5): a card or toasts. A dismissed toast stays away
+  // until the file changes.
+  let dismissed = $state(new Set<PlaybackErrorCode>());
+  $effect(() => {
+    void controller.fileIndex;
+    void controller.magnet;
+    untrack(() => (dismissed = new Set()));
+  });
+  const subtitleNotice = $derived(controller.subtitles.notice);
+  const states = $derived(
+    playerStates({
+      phase: controller.phase,
+      error: controller.error?.code ?? null,
+      notices: controller.notices,
+      subtitleNotice: subtitleNotice
+        ? { code: subtitleNotice.code, detail: subtitleNotice.detail }
+        : null,
+      dismissed,
+    }),
+  );
+
   // A new notice or error wakes the controls, like a move does.
   $effect(() => {
-    if (controller.notices.length || controller.error) untrack(() => wake());
+    if (controller.notices.length || controller.error || subtitleNotice) untrack(() => wake());
   });
 
   $effect(() => () => {
@@ -378,9 +398,6 @@
     dragging = true;
   }
 
-  /** Notices the "Why won't my torrent play?" help explains. */
-  const PEER_NOTICES: readonly PlaybackErrorCode[] = ['no-peers', 'stalled'];
-
   /** A Space keydown we handled: its keyup must not also activate a focused (native) control. */
   let spaceHandled = false;
 
@@ -394,12 +411,12 @@
       return;
     }
     const v = video;
-    if (!v || event.defaultPrevented || controller.phase === 'idle' || controller.phase === 'error')
-      return;
-    wake();
+    if (!v || event.defaultPrevented) return;
     // A key typed in a dialog (relay settings, help) is not meant for the player.
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (target?.closest('dialog')) return;
+    const stopped = controller.phase === 'idle' || controller.phase === 'error';
+    if (!stopped) wake();
     // A menu's keys are its own (arrows move, Enter/Space pick); so are a trigger's Enter, Space
     // and ↓, which open its menu.
     if (inMenu(target)) return;
@@ -417,7 +434,8 @@
       targetEditable: target?.isContentEditable,
       inPlayerControls: onControls(target),
     });
-    if (!action) return;
+    // Only `?` (help) works without a file open.
+    if (!action || (stopped && action.type !== 'help')) return;
     // Handled here only: the window's capture phase runs before the focused element's own
     // listeners (a native controls' play button, our bar's buttons), which would toggle again.
     event.preventDefault();
@@ -455,6 +473,9 @@
         break;
       case 'cycle-subtitles':
         void controller.subtitles.cycle();
+        break;
+      case 'help':
+        helpDialog.show('shortcuts');
         break;
     }
   }
@@ -553,11 +574,14 @@
 
 <section
   class="player"
-  class:dragging
+  data-player-drop
   data-phase={controller.phase}
   hidden={controller.phase === 'idle'}
   ondragover={dragOver}
-  ondragleave={() => (dragging = false)}
+  ondragleave={(e) => {
+    if (!(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)))
+      dragging = false;
+  }}
   ondrop={drop}
   aria-label="Player (drop a subtitle or .torrent file here)"
 >
@@ -565,6 +589,7 @@
     class="screen"
     class:fullscreen
     class:idle={!controlsShown}
+    class:carded={states.card !== null}
     class:lift={controlsShown}
     bind:this={screen}
     bind:clientWidth={screenWidth}
@@ -610,9 +635,27 @@
       phase={controller.phase}
       viaRelay={controller.viaRelay}
       shown={controlsShown}
+      covered={states.card !== null}
       ontoggleplay={togglePlay}
       onseek={seekBy}
     />
+    <PlayerStates
+      card={states.card}
+      toasts={states.toasts}
+      message={controller.error?.message ?? ''}
+      viaRelay={controller.viaRelay}
+      shown={controlsShown}
+      {onretry}
+      ondismiss={(code) => (dismissed = new Set([...dismissed, code]))}
+    />
+    {#if dragging}
+      <div class="drop-overlay" data-testid="drop-overlay" aria-hidden="true">
+        <div class="drop-label">
+          <Captions size={32} aria-hidden="true" />
+          <span>Drop subtitles or a .torrent</span>
+        </div>
+      </div>
+    {/if}
     <input
       bind:this={subtitleInput}
       class="sr-only"
@@ -702,57 +745,14 @@
   <p class="sr-only" data-testid="status" data-phase={controller.phase} aria-live="polite">
     {statusText}
   </p>
-
-  <div class="actions">
-    <details class="shortcuts" data-testid="shortcuts-help">
-      <summary>Keyboard shortcuts</summary>
-      <dl>
-        {#each SHORTCUTS as s (s.keys)}
-          <div>
-            <dt><kbd>{s.keys}</kbd></dt>
-            <dd>{s.action}</dd>
-          </div>
-        {/each}
-      </dl>
-    </details>
-  </div>
-
-  {#if controller.error}
-    <p class="error" role="alert" data-testid="error" data-code={controller.error.code}>
-      {controller.error.message}
-      {#if isRelayError(controller.error.code)}
-        <button type="button" onclick={() => relaySettings.openDialog()}>Relay settings</button>
-      {:else if controller.error.code === 'video-needs-relay'}
-        <button type="button" onclick={() => relaySettings.openDialog()}>Set up a relay</button>
-      {/if}
-    </p>
-  {/if}
-  {#each controller.notices as code (code)}
-    <p class="notice" data-testid="notice" data-code={code}>
-      {PLAYBACK_ERROR_MESSAGES[code]}
-      {#if PEER_NOTICES.includes(code)}
-        <button type="button" data-testid="why-link" onclick={() => (helpDialog.open = true)}
-          >Why won’t it play?</button
-        >
-      {/if}
-      {#if code === 'no-peers' && !controller.viaRelay}
-        <button type="button" onclick={() => relaySettings.openDialog()}>Connect a relay</button>
-      {/if}
-    </p>
-  {/each}
-
-  {#if controller.subtitles.notice && controller.phase !== 'error'}
-    {@const n = controller.subtitles.notice}
-    <p class="notice" data-testid="notice" data-code={n.code}>
-      {PLAYBACK_ERROR_MESSAGES[n.code]}
-      {#if n.detail}<span class="detail">({n.detail})</span>{/if}
-    </p>
-  {/if}
 </section>
 
 <style>
-  .player {
-    margin-top: 1rem;
+  /* Phone: the player is full-bleed (ADR 0008 §1). */
+  @media (max-width: 40rem) {
+    .screen:not(.fullscreen) {
+      border-radius: 0;
+    }
   }
   /*
    * The screen is the fullscreen element and holds everything about playback: video, ASS canvas,
@@ -893,82 +893,40 @@
     color: var(--text);
     font: inherit;
   }
-  .dragging .screen {
-    outline: 2px dashed var(--accent-fg);
-    outline-offset: -12px;
-  }
-  .actions {
+  /* Room for a state card when the picture is small (phone, 16:9 placeholder). */
+  .screen.carded:not(.fullscreen) {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    align-items: flex-start;
-    margin: 0.5rem 0;
+    align-items: center;
+    min-height: min(30rem, 90vh);
   }
-  .shortcuts {
-    position: relative;
-  }
-  .shortcuts summary {
-    cursor: pointer;
-    opacity: 0.85;
-  }
-  .shortcuts dl {
+  .drop-overlay {
     position: absolute;
-    z-index: 1;
-    margin: 0.25rem 0 0;
-    padding: 0.5rem 0.75rem;
-    min-width: 16rem;
-    border-radius: 0.25rem;
-    background: Canvas;
-    color: CanvasText;
-    box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
+    inset: 0;
+    z-index: var(--z-drop);
+    display: grid;
+    place-items: center;
+    background: var(--scrim);
+    pointer-events: none;
   }
-  .shortcuts dl div {
-    display: flex;
-    gap: 0.75rem;
+  .drop-overlay::before {
+    position: absolute;
+    inset: 12px;
+    border: 2px dashed var(--accent-fg);
+    border-radius: var(--radius-lg);
+    content: '';
   }
-  .shortcuts dt {
-    min-width: 4.5rem;
-  }
-  .shortcuts dd {
-    margin: 0;
-  }
-  kbd {
-    font-family: inherit;
-    padding: 0 0.3em;
-    border: 1px solid currentColor;
-    border-radius: 0.2em;
-  }
-  .error,
-  .notice {
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.25rem;
-  }
-  .error {
-    background: color-mix(in srgb, crimson 20%, transparent);
-  }
-  .error button,
-  .notice button {
-    margin-left: 0.5rem;
+  .drop-label {
+    display: grid;
+    gap: var(--space-2);
+    justify-items: center;
+    padding: var(--space-4);
+    color: var(--text);
+    font-weight: var(--weight-medium);
+    text-align: center;
   }
   @media (max-width: 40rem) and (orientation: portrait) {
     video {
       max-height: none;
     }
-  }
-  @media (max-width: 40rem) {
-    .error button,
-    .notice button {
-      margin: 0.5rem 0.5rem 0 0;
-    }
-    .shortcuts dl {
-      position: static;
-      min-width: 0;
-    }
-  }
-  .notice {
-    background: color-mix(in srgb, orange 18%, transparent);
-  }
-  .detail {
-    opacity: 0.75;
   }
 </style>

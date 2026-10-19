@@ -75,7 +75,7 @@ test('one menu at a time; a press outside closes it; the controls stay up while 
   await expect(page.locator('[data-player-menu]')).toHaveCount(1);
 
   const paused = await video(page).evaluate((v: HTMLVideoElement) => v.paused);
-  await page.locator('h1').click();
+  await page.mouse.click(2, 2); // the page, outside the player
   await expect(page.locator('[data-player-menu]')).toHaveCount(0);
   // Closing by a press outside doesn't count as a click on the picture.
   expect(await video(page).evaluate((v: HTMLVideoElement) => v.paused)).toBe(paused);

@@ -6,7 +6,8 @@ export type ShortcutAction =
   | { type: 'fullscreen' }
   | { type: 'mute' }
   | { type: 'volume'; by: number }
-  | { type: 'cycle-subtitles' };
+  | { type: 'cycle-subtitles' }
+  | { type: 'help' };
 
 /** Seconds ←/→ jump. */
 export const SEEK_STEP_S = 5;
@@ -21,6 +22,7 @@ export const SHORTCUTS: readonly { keys: string; action: string }[] = [
   { keys: 'F', action: 'Fullscreen' },
   { keys: 'M', action: 'Mute' },
   { keys: 'C', action: 'Next subtitle track (or off)' },
+  { keys: '?', action: 'Keyboard shortcuts' },
 ];
 
 /** The parts of a `KeyboardEvent` (and its target) the mapping looks at. */
@@ -77,6 +79,8 @@ function keyAction(key: string): ShortcutAction | null {
     case 'c':
     case 'C':
       return { type: 'cycle-subtitles' };
+    case '?':
+      return { type: 'help' };
     default:
       return null;
   }

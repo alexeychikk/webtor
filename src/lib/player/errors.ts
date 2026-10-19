@@ -80,6 +80,34 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
     'seek within the part loaded so far.',
 };
 
+/** Short titles over the message in the player's error cards and toasts (docs/decisions/0008 §5). */
+export const PLAYBACK_ERROR_TITLES: Record<PlaybackErrorCode, string> = {
+  'invalid-input': 'Not a torrent',
+  'no-webrtc': 'No WebRTC in this browser',
+  'no-peers': 'No browser peers yet',
+  stalled: 'Download stalled',
+  'no-playable-file': 'No playable video',
+  'unsupported-container': 'Format not supported',
+  'unsupported-video-codec': 'Video codec not supported',
+  'video-needs-relay': 'Video needs a relay',
+  'unsupported-audio-codec': 'Audio track not supported',
+  'no-mse': 'Streaming not supported',
+  'no-playable-audio': 'Playing without sound',
+  'audio-convert-failed': 'Audio conversion failed',
+  'torrent-failed': 'Torrent failed to load',
+  'playback-failed': 'Playback failed',
+  'subtitle-failed': 'Subtitle file unreadable',
+  'relay-unreachable': 'Relay unreachable',
+  'relay-no-metadata': 'Relay found no peers',
+  'relay-busy': 'Relay is busy',
+  'relay-error': 'Relay error',
+  'relay-transcode-unavailable': 'Relay can’t convert video',
+  'relay-transcode-busy': 'Relay is busy converting',
+  'relay-transcode-failed': 'Relay conversion failed',
+  'relay-transcode-slow': 'Relay converts too slowly',
+  'avi-no-index': 'Seeking is limited',
+};
+
 export class PlaybackError extends Error {
   constructor(
     readonly code: PlaybackErrorCode,

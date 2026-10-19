@@ -21,7 +21,7 @@ test('plays a magnet only regular peers have, through webtor-relay set by #relay
 
   // webtor-relay's printed Open link: saved, then gone from the address bar.
   await page.goto(`./#relay=${encodeURIComponent(relayUrl)}`);
-  await expect(page.getByTestId('relay-button')).toHaveText('Relay: on');
+  await expect(page.getByTestId('relay-button')).toHaveAttribute('aria-label', 'Relay: on');
   expect(page.url()).not.toContain('relay');
   expect(await page.evaluate(() => localStorage.getItem('webtor:relay-url'))).toBe(relayUrl);
 
@@ -44,7 +44,7 @@ test('no peers → "Connect a relay" → test, save, and the torrent starts', as
   test.setTimeout(120_000);
   const { magnet, relayUrl } = await relayStack();
   await page.goto('./');
-  await expect(page.getByTestId('relay-button')).toHaveText('Connect a relay');
+  await expect(page.getByTestId('relay-button')).toHaveAttribute('aria-label', 'Connect a relay');
   await play(page, magnet);
 
   // Without a relay nothing in the browser can reach the TCP seeder.
@@ -89,7 +89,9 @@ test('relay failures end in relay error messages with a way to the settings', as
   await play(page, magnet);
   const error = page.getByTestId('error');
   await expect(error).toHaveAttribute('data-code', 'relay-unreachable');
+  await expect(error).toContainText('Relay unreachable');
   await expect(error).toContainText('Cannot reach your relay');
+  await expect(error.getByTestId('retry')).toBeVisible();
   await error.getByRole('button', { name: 'Relay settings' }).click();
   await expect(page.getByTestId('relay-dialog')).toBeVisible();
   await page.getByRole('button', { name: 'Cancel' }).click();
@@ -112,5 +114,5 @@ test('an invalid #relay= is dropped from the URL and shown in the dialog', async
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('needs the secret token path');
   expect(page.url()).not.toContain('relay');
-  await expect(page.getByTestId('relay-button')).toHaveText('Connect a relay');
+  await expect(page.getByTestId('relay-button')).toHaveAttribute('aria-label', 'Connect a relay');
 });
