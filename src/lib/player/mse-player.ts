@@ -796,7 +796,7 @@ export class MsePlayer {
         p.replaceUntil = from;
         return [from, Infinity];
       },
-      relieve: () => this.relieve(p),
+      relieve: () => this.relieve(p, () => gen !== p.gen),
     };
     await appendChunk(p.sb, data as Uint8Array<ArrayBuffer>, host, p.quota);
     this.jumpGap();
@@ -814,11 +814,11 @@ export class MsePlayer {
    * so free room in the other SourceBuffers: first behind the playhead, else by cutting their media
    * ahead to half (and capping them there), so one pipeline never starves the other.
    */
-  private async relieve(self: Pipeline): Promise<boolean> {
+  private async relieve(self: Pipeline, selfStale: () => boolean): Promise<boolean> {
     const t = this.video.currentTime;
     let freed = false;
     for (const q of this.pipelines) {
-      if (q === self || this.destroyed) continue;
+      if (q === self || this.destroyed || selfStale()) continue;
       try {
         const ev = quotaEvictionRange(q.sb.buffered, t, (cut) => this.safeCut(q, cut));
         if (ev) {
@@ -830,7 +830,7 @@ export class MsePlayer {
         if (ahead < 2 * MIN_AHEAD_S) continue;
         const keep = Math.max(MIN_AHEAD_S, ahead / 2);
         q.quota.cap = Math.min(q.quota.cap, keep);
-        if (await this.trimAhead(q, t + keep)) freed = true;
+        if (await this.trimAhead(q, t + keep, selfStale)) freed = true;
       } catch (err) {
         console.warn('freeing buffer room failed', err);
       }
@@ -838,8 +838,23 @@ export class MsePlayer {
     return freed;
   }
 
-  /** Drops `q`'s media from element time `until` on and restarts it there. False if it can't. */
-  private async trimAhead(q: Pipeline, until: number): Promise<boolean> {
+  /**
+   * Drops `q`'s media from element time `until` on and restarts it there. False if it can't.
+   *
+   * The keyframe lookup is async: a seek (`restartAt`), an audio switch or any other restart may land
+   * meanwhile. Those own `q` now, and stopping it here would bump `q.gen` under them (they then skip
+   * it) and restart it at the stale pre-seek `until`. So bail out when `q`'s run, the seek generation
+   * or the calling pipeline's run (`callerStale`) changed during the await.
+   */
+  private async trimAhead(
+    q: Pipeline,
+    until: number,
+    callerStale: () => boolean,
+  ): Promise<boolean> {
+    const qGen = q.gen;
+    const seekGen = this.seekGen;
+    const stale = () =>
+      this.destroyed || q.gen !== qGen || this.seekGen !== seekGen || callerStale();
     let k = toSourceTime(this.timeline, until);
     if (q.kind === 'video' && !q.remote) {
       const key = await new this.mb.EncodedPacketSink(this.videoTrack).getKeyPacket(k, {
@@ -847,8 +862,9 @@ export class MsePlayer {
       });
       k = restartPoint(this.timeline, key?.timestamp);
     }
+    if (stale()) return false;
     // A long GOP would cut into what is playing now.
-    if (this.destroyed || appendOffset(this.timeline, k) < this.video.currentTime + 1) return false;
+    if (appendOffset(this.timeline, k) < this.video.currentTime + 1) return false;
     const { g, cancel } = this.stopPipeline(q);
     await cancel;
     await this.resetBuffer(q, appendOffset(this.timeline, k));
