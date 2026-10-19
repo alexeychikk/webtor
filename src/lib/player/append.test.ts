@@ -162,6 +162,7 @@ function setup(quota: number, opts: { relieve?: () => Promise<boolean> } = {}) {
     currentTime: () => state.t,
     ahead: () => aheadOf(sb.buffered, state.t),
     streaming: () => state.streaming,
+    playing: () => state.playing,
     progress: () => new Promise((resolve) => waiters.push(resolve)),
     now: () => state.clock,
     check: () => {},
@@ -264,8 +265,9 @@ describe('appendChunk under a WebKit-like quota', () => {
     expect(q.chunk).toBeGreaterThanOrEqual(MIN_APPEND_BYTES);
   });
 
-  it('plays when the quota is smaller than one fragment', async () => {
-    // 40 kB quota, 50 kB fragments: the fragment just played is dropped to make room for the next.
+  it('plays fragments larger than the quota, in pieces, dropping the one just played', async () => {
+    // 40 kB quota, 50 kB fragments (this fake counts a fragment once it is parsed whole). Starved
+    // at the end of a fragment, the pipeline drops it up to the playhead to make room for the next.
     const { sb, state, produce, runUntil } = setup(40_000);
     const run = produce(writes(8));
     await runUntil(() => run.settled && state.t >= 8);

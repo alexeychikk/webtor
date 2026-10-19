@@ -76,6 +76,8 @@ export interface AppendHost {
   ahead(): number;
   /** False while a `ManagedMediaSource` asks to stop fetching (`endstreaming`). */
   streaming(): boolean;
+  /** True while the element is meant to play (`!video.paused`, also while it waits for data). */
+  playing(): boolean;
   /** Resolves when the playhead moves, a seek starts, streaming restarts, or after about 1 s. */
   progress(): Promise<void>;
   /** Milliseconds, monotonic (`performance.now()`). */
@@ -194,6 +196,7 @@ async function appendPiece(
   let starvedHits = 0;
   let starvedSince = 0;
   let starvedAt = NaN;
+  let starvedKeep = QUOTA_KEEP_BEHIND_S;
   for (let attempt = 0; ; attempt++) {
     while (sb.updating) await settled(sb);
     host.check();
@@ -208,7 +211,7 @@ async function appendPiece(
             sb.buffered,
             t,
             (cut) => host.safeCut(cut),
-            starvedHits > 0 ? -STARVED_AHEAD_S : QUOTA_KEEP_BEHIND_S,
+            starvedHits > 0 ? starvedKeep : QUOTA_KEEP_BEHIND_S,
           );
     for (const [from, to] of evict) {
       await whenIdle(sb, () => sb.remove(from, to));
@@ -242,11 +245,15 @@ async function appendPiece(
       q.chunk = Math.max(MIN_APPEND_BYTES, Math.floor(piece.byteLength / 2));
       return false;
     }
-    if (ahead < STARVED_AHEAD_S && (starvedHits === 0 || Math.abs(now - starvedAt) < 0.1)) {
+    // Starved: the playhead can't move on this buffer, at its end or (playing, decoders hold a few
+    // frames back) close to it, and it hasn't moved since the first such hit.
+    const starved = ahead < STARVED_AHEAD_S || (ahead < MIN_AHEAD_S && host.playing());
+    if (starved && (starvedHits === 0 || Math.abs(now - starvedAt) < 0.1)) {
       if (starvedHits++ === 0) {
         starvedSince = host.now();
         starvedAt = now;
       }
+      starvedKeep = ahead < STARVED_AHEAD_S ? -STARVED_AHEAD_S : 0;
       if (starvedHits >= MAX_STARVED_HITS && host.now() - starvedSince >= STARVED_TIMEOUT_MS) {
         throw new PlaybackError(
           'playback-failed',

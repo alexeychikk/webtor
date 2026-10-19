@@ -784,6 +784,7 @@ export class MsePlayer {
       currentTime: () => this.video.currentTime,
       ahead: () => this.appendedAhead(p),
       streaming: () => (this.mediaSource as { streaming?: boolean }).streaming !== false,
+      playing: () => !this.video.paused,
       progress: () => this.playbackProgress(),
       now: () => performance.now(),
       check: () => {

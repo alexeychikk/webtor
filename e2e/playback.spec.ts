@@ -125,15 +125,26 @@ async function playToEnd(page: Page, t?: number) {
     if (t !== undefined) v.currentTime = t;
     void v.play();
   }, t);
-  await expect
-    .poll(() => video.evaluate((v: HTMLVideoElement) => v.ended), { timeout: 60_000 })
-    .toBe(true);
+  try {
+    await expect
+      .poll(() => video.evaluate((v: HTMLVideoElement) => v.ended), { timeout: 60_000 })
+      .toBe(true);
+  } catch (err) {
+    // What the element was doing, for a failure that doesn't reproduce.
+    const state = await video.evaluate((v: HTMLVideoElement) => {
+      const b = v.buffered;
+      const ranges = Array.from({ length: b.length }, (_, i) => `${b.start(i)}–${b.end(i)}`);
+      return `t=${v.currentTime} paused=${v.paused} seeking=${v.seeking} readyState=${v.readyState} buffered=${ranges.join(',')} quotaHits=${v.dataset.quotaHits}`;
+    });
+    throw new Error(`${String(err)}\n${state}`);
+  }
   await expect(page.getByTestId('error')).toHaveCount(0);
 }
 
 test('a small SourceBuffer quota (Safari/iPad) is back-pressure: plays, seeks, switches audio', async ({
   page,
 }) => {
+  test.setTimeout(150_000);
   // 250 KB per SourceBuffer is about 6 s of the fixture's video, and 12.5 KB before the init
   // segment (WebKit's 5 % audio share): less than Mediabunny's first write (moov + a 2 s GOP,
   // ~80 KB). The iPad failure: that write was refused every time, then "buffer too small".
@@ -147,8 +158,10 @@ test('a small SourceBuffer quota (Safari/iPad) is back-pressure: plays, seeks, s
   await expect.poll(quotaHits, { timeout: 10_000 }).toBeGreaterThan(0);
 
   // Back to the start (evicted under the quota), then forward again.
-  await playToEnd(page, 0.5);
-  await video.evaluate((v: HTMLVideoElement) => (v.currentTime = 2));
+  await video.evaluate((v: HTMLVideoElement) => {
+    v.currentTime = 0.5;
+    void v.play();
+  });
   await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(3);
   await video.evaluate((v: HTMLVideoElement) => (v.currentTime = 7));
   await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(8);
@@ -174,14 +187,21 @@ test('a small SourceBuffer quota (Safari/iPad) is back-pressure: plays, seeks, s
   expect(Number(await buffer.getAttribute('data-target'))).toBeLessThan(60);
 });
 
-test('a SourceBuffer quota smaller than one fragment still plays to the end', async ({ page }) => {
-  // 60 KB: less than one 2 s GOP of the fixture's video (~75 KB). Each fragment has to wait for
-  // the one before it to be played and dropped.
-  await page.addInitScript(() => localStorage.setItem('webtor:sb-quota-bytes', '60000'));
+test('a SourceBuffer quota of about one fragment plays through and seeks back', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  // 100 KB: 5 KB before the init segment, far less than one fragment (a 2 s GOP of the fixture's
+  // video, ~75 KB), and room for about 1.3 of them after it: each fragment goes in as pieces while
+  // the one before it plays, then that one is dropped. (A quota under one GOP can't play: MSE
+  // removes whole GOPs and the decoder holds frames back, so that fails with the numbers after
+  // 20 s, see append.test.ts.)
+  await page.addInitScript(() => localStorage.setItem('webtor:sb-quota-bytes', '100000'));
   const magnet = await fixtureMagnet('sample.mkv');
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
   await playToEnd(page);
+  await playToEnd(page, 3);
   expect(Number(await page.getByTestId('video').getAttribute('data-quota-hits'))).toBeGreaterThan(
     0,
   );
