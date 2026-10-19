@@ -90,6 +90,9 @@ test('a torrent nobody seeds shows the no-peers message', async ({ page }) => {
   await page.getByLabel('Magnet link or info hash').fill(randomHash.join(''));
   await page.getByRole('button', { name: 'Play', exact: true }).click();
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'connecting');
+  // The picture shows a spinner with what it waits for.
+  await expect(page.getByTestId('centre')).toHaveAttribute('data-state', 'loading');
+  await expect(page.getByTestId('centre')).toContainText('Looking for peers…');
   await expect(page.locator('[data-testid="notice"][data-code="no-peers"]')).toContainText(
     'No browser-compatible peers found',
     { timeout: 25_000 },
@@ -109,4 +112,6 @@ test('a web seed that keeps failing shows the stalled message', async ({ page })
     timeout: 40_000,
   });
   await expect(page.getByTestId('error')).toHaveCount(0);
+  // Still waiting for data: a spinner, never the play button.
+  await expect(page.getByTestId('centre')).toHaveAttribute('data-state', /^(loading|buffering)$/);
 });

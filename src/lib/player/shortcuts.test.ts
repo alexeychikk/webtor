@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { repeats, seekTarget, shortcutFor } from './shortcuts';
+import { repeats, seekTarget, shortcutFor, volumeTarget } from './shortcuts';
 
 describe('shortcutFor', () => {
   it('maps the player keys', () => {
@@ -10,6 +10,8 @@ describe('shortcutFor', () => {
     expect(shortcutFor({ key: 'F' })).toEqual({ type: 'fullscreen' });
     expect(shortcutFor({ key: 'm' })).toEqual({ type: 'mute' });
     expect(shortcutFor({ key: 'c' })).toEqual({ type: 'cycle-subtitles' });
+    expect(shortcutFor({ key: 'ArrowUp' })).toEqual({ type: 'volume', by: 0.1 });
+    expect(shortcutFor({ key: 'ArrowDown' })).toEqual({ type: 'volume', by: -0.1 });
     expect(shortcutFor({ key: 'x' })).toBeNull();
   });
 
@@ -39,6 +41,11 @@ describe('shortcutFor', () => {
     });
     expect(shortcutFor({ key: ' ', targetTag: 'BUTTON', ...bar })).toEqual({ type: 'toggle-play' });
     expect(shortcutFor({ key: 'ArrowLeft', targetTag: 'INPUT', ...bar })).toBeNull();
+    expect(shortcutFor({ key: 'ArrowUp', targetTag: 'INPUT', ...bar })).toBeNull();
+    expect(shortcutFor({ key: 'ArrowUp', targetTag: 'BUTTON', ...bar })).toEqual({
+      type: 'volume',
+      by: 0.1,
+    });
     expect(shortcutFor({ key: 'f', ctrlKey: true, ...bar })).toBeNull();
   });
 });
@@ -46,6 +53,7 @@ describe('shortcutFor', () => {
 describe('repeats', () => {
   it('lets a held arrow keep seeking, but never re-toggles', () => {
     expect(repeats({ type: 'seek', by: 5 })).toBe(true);
+    expect(repeats({ type: 'volume', by: 0.1 })).toBe(true);
     expect(repeats({ type: 'toggle-play' })).toBe(false);
     expect(repeats({ type: 'fullscreen' })).toBe(false);
     expect(repeats({ type: 'mute' })).toBe(false);
@@ -60,5 +68,14 @@ describe('seekTarget', () => {
     expect(seekTarget(58, 5, 60)).toBe(60);
     expect(seekTarget(58, 5, NaN)).toBe(63);
     expect(seekTarget(58, 5, Infinity)).toBe(63);
+  });
+});
+
+describe('volumeTarget', () => {
+  it('steps and clamps to [0, 1] without float noise', () => {
+    expect(volumeTarget(0.2, 0.1)).toBe(0.3);
+    expect(volumeTarget(0.95, 0.1)).toBe(1);
+    expect(volumeTarget(0.05, -0.1)).toBe(0);
+    expect(volumeTarget(0.7, -0.1)).toBe(0.6);
   });
 });

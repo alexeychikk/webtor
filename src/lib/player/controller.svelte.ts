@@ -33,6 +33,7 @@ import { isTorrentId } from '../torrent/trackers';
 import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass } from './mse-player';
+import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import { nextStarvedFor, watchdogNotice } from './watchdog';
 
@@ -82,6 +83,8 @@ export class PlayerController {
   fileIndex = $state<number | null>(null);
   /** Magnet for the URL hash: the input, or for an opened .torrent file its magnet once known. */
   magnet = $state<string | null>(null);
+  /** Downloaded parts of the playing file (fractions of its bytes) for the seek bar; 1 s tick. */
+  downloaded = $state<FractionRanges>([]);
 
   /** Bumped by every load, file switch, stop and failure: async work of an older one bails out. */
   private run = 0;
@@ -299,6 +302,7 @@ export class PlayerController {
   }
 
   private resetFileState() {
+    this.downloaded = [];
     this.audioTracks = [];
     this.audioTrackId = null;
     this.audioCodec = null;
@@ -415,6 +419,15 @@ export class PlayerController {
     else this.phase = ready ? 'playing' : 'buffering';
   }
 
+  private updateDownloaded(t: Torrent) {
+    const file = this.fileIndex === null ? undefined : t.files?.[this.fileIndex];
+    const next =
+      file && t.bitfield
+        ? downloadedRanges(t.bitfield, t.pieceLength, file.offset, file.length)
+        : [];
+    if (!sameRanges(next, this.downloaded)) this.downloaded = next;
+  }
+
   private tick() {
     const t = this.torrent;
     if (!t) return;
@@ -428,6 +441,7 @@ export class PlayerController {
     };
     const webSeeds = t.wires.filter((w) => w.type === 'webSeed').length;
     this.stats = mergeRelayStats(stats, webSeeds, this.relayStats);
+    this.updateDownloaded(t);
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';
     this.starvedFor = nextStarvedFor(this.starvedFor, {
       waiting: waitingForData,

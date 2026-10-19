@@ -19,6 +19,7 @@
     "deploy:pages": "scripts/deploy-pages.sh"
   },
   "dependencies": {
+    "@lucide/svelte": "^1.59.0",
     "@mediabunny/aac-encoder": "1.61.6",
     "@mediabunny/ac3": "1.61.6",
     "@mediabunny/dts": "1.61.6",

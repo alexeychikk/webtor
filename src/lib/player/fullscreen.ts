@@ -54,13 +54,13 @@ export function fullscreenMethod(caps: DisplayCapabilities): FullscreenMethod {
 }
 
 /**
- * Which controls the player shows. Where the container can go fullscreen: our control bar, whose one
- * fullscreen button fullscreens the container (a native control would fullscreen the bare video and
- * hide the ASS overlay, and Firefox's can't be hidden). Elsewhere the browser's native controls,
- * whose fullscreen (iOS) is the video's own, or which show none where fullscreen isn't allowed.
+ * Which controls the player shows: always our own control layer (docs/decisions/0008), never the
+ * native `controls`. Its fullscreen icon fullscreens the container where it can (the ASS overlay
+ * stays over the picture), the bare video on iPhone (`enterVideoFullscreen`), and is absent where
+ * neither can (`fullscreenMethod` = `none`).
  */
-export function controlsFor(method: FullscreenMethod): 'own' | 'native' {
-  return method === 'container' ? 'own' : 'native';
+export function controlsFor(_method: FullscreenMethod): 'own' {
+  return 'own';
 }
 
 /** How an ASS/SSA track is drawn right now: libass on the overlay canvas, or plain text cues. */

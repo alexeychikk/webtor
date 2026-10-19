@@ -70,8 +70,9 @@ hover to bring them back. They stay while paused or while the pointer is on the 
 only way to exit shown on screen (no "Exit fullscreen" text; Esc, `f` and double-click also work).
 Shortcuts are handled in the window's capture phase and stop there, so a focused button or the
 native controls never act on the same Space press a second time.
-On iOS (video-only fullscreen) and where no fullscreen is allowed, the native controls stay and we
-add no fullscreen control of our own.
+Superseded by ADR 0008 for iOS and pages without fullscreen: there too the `<video>` has no native
+controls. Our fullscreen icon calls `webkitEnterFullscreen` on iPhone, and is absent where no
+fullscreen is allowed.
 
 Why: the native controls' fullscreen button fullscreens the bare video. Hiding it with
 `controlslist="nofullscreen"` left a greyed-out icon in Chrome next to our separate "Fullscreen"
