@@ -135,11 +135,34 @@ describe('AVI demuxer through Mediabunny (internals guard)', () => {
     input.dispose();
   });
 
-  it('rejects an AVI without an index with a PlaybackError', async () => {
-    const bytes = fixture('avi-h264-mp3.avi').slice();
-    // Clear AVIF_HASINDEX in avih.dwFlags (avih data at 32: usPerFrame, maxBytes, padding, flags).
-    const dv = new DataView(bytes.buffer);
-    dv.setUint32(32 + 12, dv.getUint32(32 + 12, true) & ~0x10, true);
+  it('plays avi-h264-noidx.avi (no idx1) from 0 by scanning movi: same packets as indexed', async () => {
+    const source = memorySource(fixture('avi-h264-noidx.avi'));
+    const format = createAviFormat(mb, source);
+    const input = new mb.Input({
+      formats: [format],
+      source: new mb.CustomSource({ getSize: () => source.size, read: source.read }),
+    });
+    const video = (await input.getPrimaryVideoTrack())!;
+    expect(format.demuxer?.indexMode).toBe('scan');
+    expect(await input.getDurationFromMetadata()).toBeCloseTo(12, 1);
+    expect(await video.getCodecParameterString()).toBe('avc1.64001e');
+    const packets = await allPackets(video);
+    const indexed = openInput(fixture('avi-h264-mp3.avi'));
+    const expected = await allPackets((await indexed.getPrimaryVideoTrack())!);
+    expect(packets.map((p) => [p.timestamp, p.type, p.byteLength])).toEqual(
+      expected.map((p) => [p.timestamp, p.type, p.byteLength]),
+    );
+    const audio = await allPackets((await input.getPrimaryAudioTrack())!);
+    const expectedAudio = await allPackets((await indexed.getPrimaryAudioTrack())!);
+    expect(audio.map((p) => p.timestamp)).toEqual(expectedAudio.map((p) => p.timestamp));
+    // Scanned to the end: seeking is no longer limited.
+    expect(format.demuxer?.seekLimit()).toBeNull();
+    input.dispose();
+    indexed.dispose();
+  });
+
+  it('rejects a RIFF AVI without movie data with a PlaybackError', async () => {
+    const bytes = fixture('avi-h264-mp3.avi').slice(0, 8192);
     const input = openInput(bytes);
     const err = await input.getPrimaryVideoTrack().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PlaybackError);

@@ -130,6 +130,8 @@ export class MsePlayer {
   private readonly bufferAhead = bufferAheadSeconds();
   private switchGen = 0;
   private slowNoticed = false;
+  /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
+  private seekLimit: (() => number | null) | null = null;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -168,9 +170,10 @@ export class MsePlayer {
     const mb = await import('mediabunny');
     const { AVI_FORMAT_NAME, createAviFormat } = await import('./avi/demuxer');
     const { aviVideoFormatName } = await import('./avi/fourcc');
+    const aviFormat = createAviFormat(mb, source);
     const input = new mb.Input({
       // Our AVI demuxer (ADR 0007) on Mediabunny's internals; Mediabunny is pinned for it.
-      formats: [createAviFormat(mb, source), ...mb.ALL_FORMATS],
+      formats: [aviFormat, ...mb.ALL_FORMATS],
       source: new mb.CustomSource({
         getSize: () => source.size,
         read: (start, end) => source.read(start, end),
@@ -188,6 +191,7 @@ export class MsePlayer {
         throw err;
       }
       if (!videoTrack) throw new PlaybackError('no-playable-file', 'no video track');
+      const avi = (await input.getFormat()).name === AVI_FORMAT_NAME ? aviFormat.demuxer : null;
       let remote: RemoteVideo | null = null;
       if (
         (await videoTrack.getCodec()) === null &&
@@ -263,6 +267,7 @@ export class MsePlayer {
         notices.push('audio-convert-failed');
       }
       if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
+      if (avi?.indexMode === 'scan') notices.push('avi-no-index');
 
       // The element timeline starts at 0 even when the file's first frame does not.
       const tl = timeline(await videoTrack.getFirstTimestamp());
@@ -298,6 +303,7 @@ export class MsePlayer {
         opts,
         remote,
       );
+      if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
       try {
         try {
           player.addPipeline('video', videoTrack.id, video_.mime);
@@ -489,6 +495,15 @@ export class MsePlayer {
   /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
   private onSeeking() {
     const t = this.video.currentTime;
+    // An AVI without an index: seeks stop at what has been scanned (this fires `seeking` again).
+    const limit = this.seekLimit?.();
+    if (limit != null) {
+      const max = Math.max(0, limit - this.timeline.startTime);
+      if (t > max + 0.05) {
+        this.video.currentTime = max;
+        return;
+      }
+    }
     if (this.pipelines.every((p) => isBuffered(p.sb.buffered, t))) return;
     clearTimeout(this.seekTimer);
     this.seekTimer = setTimeout(

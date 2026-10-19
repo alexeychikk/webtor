@@ -164,9 +164,13 @@ docs/decisions/                ADRs
   ESM; no Node polyfills). Never import `webtorrent` bare in browser code.
 - **Mediabunny is pinned exactly** (`mediabunny`, `@mediabunny/*` at the same version, no `^`): the AVI
   demuxer implements internals. Upgrade all together and keep `src/lib/player/avi/demuxer.test.ts` green.
-- AVI scope: idx1-indexed files up to 1 GB, H.264 video (non-H.264 → `video-needs-relay`, naming the
-  format). OpenDML and index-less AVIs fail with `unsupported-container`. PTS comes from POC type 0
-  ranks within a GOP (open GOPs and POC type 1 are approximated). MP3 is copied as `mp4a.6b`.
+- AVI scope: H.264 video (non-H.264 → `video-needs-relay`, naming the format). Indexes (`avi/index.ts`):
+  OpenDML `indx` → `ix##` (any number of `RIFF AVIX`) wins over `idx1`; each `ix##` loads lazily, in
+  order, when reads or seeks reach it. No usable index (no `AVIF_HASINDEX`/`idx1`, entries outside
+  `movi`, truncated file) → `movi` scan while playing, notice `avi-no-index`, `MsePlayer` clamps
+  seeks to `AviDemuxer.seekLimit()`, duration from the headers. Backings keep growing tables
+  (`sync`/`growUntil`); scan-mode lookups by time never scan ahead. PTS comes from POC type 0 ranks
+  within a GOP (open GOPs and POC type 1 are approximated). MP3 is copied as `mp4a.6b`.
 - Lazy-load heavy parts: `mediabunny` when the first torrent is added, `@mediabunny/ac3|dts|aac-encoder`
   and `jassub` only when a track needs them.
 - Decide capabilities by feature detection (`MediaSource.isTypeSupported`, `canEncodeAudio`,
@@ -245,7 +249,9 @@ activity`: a mouse move shows them for 1 s, a key for 1 s, leaving the player or
   controls, the fullscreen icon calls `webkitEnterFullscreen`; no fullscreen at all = no icon.
   Under 40rem of player width (container query `screen`) the bar is compact.
 - AVI fixtures (ADR 0007): `avi-h264-mp3.avi` (12 s 640×360 H.264 High with B-frames + VBR MP3; plays
-  in the browser), `avi-xvid-mp3.avi` and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay).
+  in the browser), `avi-h264-noidx.avi` (the same without `idx1`: the scan path), `avi-xvid-mp3.avi`
+  and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay). Synthetic RIFFs (OpenDML, AVIX, `rec `,
+  truncation) are built in `src/lib/player/avi/index.test.ts`.
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the

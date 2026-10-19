@@ -47,8 +47,18 @@ export interface AviStreamHeader {
   video?: BitmapInfo;
   audio?: WaveFormat;
   name: string | null;
-  /** The `strl` has an OpenDML super index (`indx`). */
-  hasSuperIndex: boolean;
+  /** OpenDML super index (`indx` in the `strl`): its `ix##` chunks, in file order; null if none. */
+  superIndex: SuperIndexEntry[] | null;
+}
+
+/** One `indx` entry: where an `ix##` standard index chunk is and how many stream ticks it covers. */
+export interface SuperIndexEntry {
+  /** File position of the `ix##` chunk header. */
+  offset: number;
+  /** Size of the chunk as the super index states it (0 when the writer left it out). */
+  size: number;
+  /** Stream ticks (`dwScale / dwRate` each; video: frames) its chunks cover. */
+  duration: number;
 }
 
 export interface AviHeader {
@@ -102,7 +112,7 @@ function parseStrl(b: Uint8Array, start: number, end: number, index: number): Av
   let s: AviStreamHeader | null = null;
   let strf = null as [number, number] | null;
   let name: string | null = null;
-  let hasSuperIndex = false;
+  let superIndex: SuperIndexEntry[] | null = null;
   walk(b, start, end, (id, _list, d, size) => {
     if (id === 'strh' && size >= 48) {
       s = {
@@ -116,7 +126,7 @@ function parseStrl(b: Uint8Array, start: number, end: number, index: number): Av
         length: dv.getUint32(d + 32, true),
         sampleSize: dv.getUint32(d + 44, true),
         name: null,
-        hasSuperIndex: false,
+        superIndex: null,
       };
     } else if (id === 'strf') {
       strf = [d, Math.min(size, end - d)];
@@ -125,13 +135,13 @@ function parseStrl(b: Uint8Array, start: number, end: number, index: number): Av
       const nul = bytes.indexOf(0);
       name = new TextDecoder('latin1').decode(nul >= 0 ? bytes.subarray(0, nul) : bytes).trim();
     } else if (id === 'indx') {
-      hasSuperIndex = true;
+      superIndex = parseSuperIndex(b.subarray(d, Math.min(d + size, end)));
     }
   });
   if (!s) throw new AviFormatError('stream without strh');
   const stream: AviStreamHeader = s;
   stream.name = name || null;
-  stream.hasSuperIndex = hasSuperIndex;
+  stream.superIndex = superIndex;
   if (strf) {
     const [d, size] = strf;
     if (stream.type === 'vids' && size >= 40) {
@@ -186,17 +196,50 @@ export function parseHdrl(
   return { main, streams };
 }
 
-/** One stream's chunks from `idx1`, in file (= decode) order. */
-export interface ChunkTable {
+/**
+ * One stream's chunks in file (= decode) order, from `idx1`, OpenDML `ix##` chunks or the `movi`
+ * scan. It grows while the lazy indexes load; `length` is the number of chunks known so far.
+ */
+export class ChunkTable {
   /** File position of each chunk's data (after its 8-byte header). */
   offsets: Float64Array;
   sizes: Uint32Array;
-  /** `AVIIF_KEYFRAME` per chunk. */
+  /** Key frame flag per chunk. */
   keys: Uint8Array;
+  length = 0;
+
+  constructor(capacity = 64) {
+    this.offsets = new Float64Array(capacity);
+    this.sizes = new Uint32Array(capacity);
+    this.keys = new Uint8Array(capacity);
+  }
+
+  push(offset: number, size: number, key: boolean) {
+    if (this.length === this.sizes.length) {
+      const cap = Math.max(64, this.length * 2);
+      const offsets = new Float64Array(cap);
+      const sizes = new Uint32Array(cap);
+      const keys = new Uint8Array(cap);
+      offsets.set(this.offsets);
+      sizes.set(this.sizes);
+      keys.set(this.keys);
+      Object.assign(this, { offsets, sizes, keys });
+    }
+    const i = this.length++;
+    this.offsets[i] = offset;
+    this.sizes[i] = size;
+    this.keys[i] = key ? 1 : 0;
+  }
+
+  /** End (file position) of the last chunk's data, 0 if empty. */
+  get end(): number {
+    const i = this.length - 1;
+    return i < 0 ? 0 : this.offsets[i]! + this.sizes[i]!;
+  }
 }
 
 /** Stream number of a chunk id like `00dc` / `01wb`, or -1 (`ix00`, `rec `, `JUNK`…). */
-function streamOf(b: Uint8Array, o: number): number {
+export function streamOf(b: Uint8Array, o: number): number {
   const d0 = (b[o] ?? 0) - 48;
   const d1 = (b[o + 1] ?? 0) - 48;
   if (d0 < 0 || d0 > 9 || d1 < 0 || d1 > 9) return -1;
@@ -221,24 +264,57 @@ export function parseIdx1(
     const s = streamOf(b, i * 16);
     if (s >= 0 && s < streamCount) counts[s]!++;
   }
-  const tables = counts.map((c) => ({
-    offsets: new Float64Array(c),
-    sizes: new Uint32Array(c),
-    keys: new Uint8Array(c),
-  }));
-  const fill = new Array<number>(streamCount).fill(0);
+  const tables = counts.map((c) => new ChunkTable(Math.max(1, c)));
   const base = absolute ? 0 : moviPos;
   for (let i = 0; i < n; i++) {
     const o = i * 16;
     const s = streamOf(b, o);
     if (s < 0 || s >= streamCount) continue;
-    const t = tables[s]!;
-    const j = fill[s]!++;
-    t.keys[j] = dv.getUint32(o + 4, true) & AVIIF_KEYFRAME ? 1 : 0;
-    t.offsets[j] = base + dv.getUint32(o + 8, true) + 8;
-    t.sizes[j] = dv.getUint32(o + 12, true);
+    tables[s]!.push(
+      base + dv.getUint32(o + 8, true) + 8,
+      dv.getUint32(o + 12, true),
+      (dv.getUint32(o + 4, true) & AVIIF_KEYFRAME) !== 0,
+    );
   }
   return tables;
+}
+
+const u64 = (dv: DataView, o: number) =>
+  dv.getUint32(o, true) + dv.getUint32(o + 4, true) * 2 ** 32;
+
+/** `AVI_INDEX_OF_INDEXES` (`indx` data): the `ix##` chunks it lists; null for other index types. */
+export function parseSuperIndex(b: Uint8Array): SuperIndexEntry[] | null {
+  if (b.length < 24) return null;
+  const dv = view(b);
+  const longs = dv.getUint16(0, true);
+  if (b[3] !== 0x00 || longs < 4) return null;
+  const n = dv.getUint32(4, true);
+  const out: SuperIndexEntry[] = [];
+  for (let i = 0, o = 24; i < n && o + 16 <= b.length; i++, o += longs * 4) {
+    const offset = u64(dv, o);
+    if (offset === 0) continue;
+    out.push({ offset, size: dv.getUint32(o + 8, true), duration: dv.getUint32(o + 12, true) });
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Appends an `AVI_INDEX_OF_CHUNKS` (`ix##` data, after its 8-byte header) to `table`. Entry offsets
+ * are relative to `qwBaseOffset` and point at chunk data; bit 31 of the size marks a non-key frame.
+ * Returns false when `b` is not a standard index.
+ */
+export function parseStdIndex(b: Uint8Array, table: ChunkTable): boolean {
+  if (b.length < 24) return false;
+  const dv = view(b);
+  const longs = dv.getUint16(0, true);
+  if (b[3] !== 0x01 || longs < 2) return false;
+  const n = dv.getUint32(4, true);
+  const base = u64(dv, 12);
+  for (let i = 0, o = 24; i < n && o + 8 <= b.length; i++, o += longs * 4) {
+    const size = dv.getUint32(o + 4, true);
+    table.push(base + dv.getUint32(o, true), size & 0x7fffffff, (size & 0x80000000) === 0);
+  }
+  return true;
 }
 
 /** First `idx1` entry: chunk id and raw offset, to decide relative vs absolute offsets. */

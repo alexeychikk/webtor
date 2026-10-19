@@ -223,9 +223,23 @@ path costs about one second plus the network. Realtime 1080p output on 4 A1 core
 Hence the 720p cap. Synthetic `testsrc2` sources gave similar speeds at 3–4× the bitrate, so
 they are not used for tuning. Scripts: the ticket's hand-off comment.
 
+## Implementation notes (OpenDML and index-less files)
+
+- An `ix##` loads when a read or a seek needs a chunk past the loaded ones. Tables grow as a
+  prefix, so a seek into RIFF _n_ also loads the `ix##` chunks before it: a few hundred KiB each,
+  one ranged read per RIFF, never the whole file. The super index's `dwDuration` gives the duration
+  before they load.
+- The scan reads 512 KiB of `movi` per step (`LIST rec ` entered, `ix##`/`JUNK` skipped, `AVIX`
+  followed). It stops at the first cut chunk (truncated file) or a non-FourCC id. Key frames come from
+  the data, as ffmpeg flags them: an H.264 IDR, or an I slice after an SEI recovery point (open
+  GOP); not other I slices (x264 scenecuts, whose leading B frames reference the GOP before); an
+  MPEG-4 Part 2 I-VOP. Lookups by time don't scan ahead.
+  `MsePlayer` moves a seek past the last scanned frame back to it.
+
 ## Consequences
 
-- AVI with H.264 plays with no relay, and seeking works wherever there is an index. DivX/Xvid AVI
+- AVI with H.264 plays with no relay, and seeking works wherever there is an index (`idx1` or
+  OpenDML). Without one it plays from the start and seeks only within what has been scanned. DivX/Xvid AVI
   plays only with a relay that has ffmpeg, at 720p by default.
 - We depend on Mediabunny internals and pin its version. Every Mediabunny upgrade runs the AVI unit
   tests first.
