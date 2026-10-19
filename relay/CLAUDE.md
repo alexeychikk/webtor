@@ -27,6 +27,16 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
 - Tests that need a swarm use `internal/seedtest` (TCP-only loopback seeder, file or directory)
   with the magnet's `x.pe=`. Never depend on the public internet in tests; the platform sandbox only
   allows outbound TCP 80/443 (`scripts/measure.sh` is for real networks).
+- Video conversion (`transcode.go`, ADR 0007 §2–3): one ffmpeg per job, reading the torrent file
+  from a per-job loopback listener (`127.0.0.1:0`, random path), so the token never reaches argv.
+  The job's lifetime is its request's: `CommandContext` on the request context (process group on
+  Unix, `proc_unix.go`), the handler holds `existing`/`release`, `Server.jobs` keys jobs by
+  torrent + file (same key replaces, others over `MaxJobs` get 429). A job ended by anything but a
+  clean ffmpeg exit aborts the response (`http.ErrAbortHandler`), so the app never mistakes it for
+  the end of the video. `watchJobIdle` kills a job without output for `IdleTimeout` and unblocks a
+  Write stuck on a client that stopped reading. ffmpeg tests need `WEBTOR_RELAY_FFMPEG` or ffmpeg on
+  `PATH` (skipped otherwise); a static build (e.g. johnvansickle.com) works in the sandbox.
+  `testExtraInputArgs` (`-readrate 1`) keeps a 12 s fixture's job alive through a test.
 - The library's logger goes through `QuietReadErrors`: it drops the Error-level read failures that
   normal streaming causes (cancelled web seed reads, the nudge). Extend it rather than raising the
   level when the library gets noisier.
