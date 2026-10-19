@@ -28,6 +28,12 @@ export interface ShortcutKey {
   /** `tagName` of the event target, e.g. `INPUT`. */
   targetTag?: string;
   targetEditable?: boolean;
+  /**
+   * The target is one of the player's own controls (its control bar). Those keep only the keys they
+   * use (Space on a button, arrows on a slider); the other shortcuts still work there, as they do
+   * on a browser's native video controls.
+   */
+  inPlayerControls?: boolean;
 }
 
 /** Targets that use these keys themselves: typing, picking an option, pressing a button. */
@@ -36,8 +42,18 @@ const OWN_KEYS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'SUMMARY', 'A
 /** The action for a key press, or `null` to leave the key alone. */
 export function shortcutFor(e: ShortcutKey): ShortcutAction | null {
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
+  if (e.inPlayerControls) {
+    const tag = e.targetTag?.toUpperCase();
+    if (tag === 'BUTTON' && (e.key === ' ' || e.key === 'Spacebar')) return null;
+    if (tag === 'INPUT' && e.key.startsWith('Arrow')) return null;
+    return keyAction(e.key);
+  }
   if (e.targetEditable || (e.targetTag && OWN_KEYS.has(e.targetTag.toUpperCase()))) return null;
-  switch (e.key) {
+  return keyAction(e.key);
+}
+
+function keyAction(key: string): ShortcutAction | null {
+  switch (key) {
     case ' ':
     case 'Spacebar':
       return { type: 'toggle-play' };

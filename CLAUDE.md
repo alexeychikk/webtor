@@ -109,11 +109,13 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  PlayerControls.svelte        our control bar (play, seek, time, volume, the one fullscreen icon)
   shortcuts.ts                 keyboard shortcuts (key → action, SHORTCUTS for the help); Player.svelte runs them
   StatsPanel.svelte ShareButton.svelte   peers/speed/progress panel; "Copy share link" (`shareUrl`)
 src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay);
                                open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
-  fullscreen.ts                capabilities (styled ASS, container/video fullscreen), button method,
+  fullscreen.ts                capabilities (styled ASS, container/video fullscreen), fullscreen method,
+                               own control bar vs native controls (`controlsFor`),
                                ASS styled-vs-text decision; prefixed Fullscreen API glue
 src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
   manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick;
@@ -162,8 +164,10 @@ docs/decisions/                ADRs
   only with 2+ video files), `torrent-file` (the .torrent input), `video`, `status` (with `data-phase`), `error` and `notice` (with
   `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
   `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off), `subtitle-upload` (file
-  input), `screen` (the container our fullscreen button and the `f` shortcut fullscreen),
-  `fullscreen` (that button, `aria-pressed`) and `ass-canvas` (the JASSUB overlay; exists only while
+  input), `screen` (the container our fullscreen button, the `f` shortcut and a double-click on the
+  video fullscreen), `controls` (our control bar; class `shown`) with `play-pause`, `seek`, `time`,
+  `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label` "Fullscreen" /
+  "Exit fullscreen"; none of these exist on iOS or without fullscreen: native controls there) and `ass-canvas` (the JASSUB overlay; exists only while
   an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas after a paused
   seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
   when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish hooks: `why-button`
@@ -193,7 +197,13 @@ docs/decisions/                ADRs
   `timeOffset = −delay` (`AssOverlay.setDelay`). Any renderer must draw cues shifted by it. Note: a disabled
   `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
 - Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
-  Ctrl/Meta/Alt; they act only while a file is open (not idle/error).
+  Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
+  (`[data-player-controls]`) they work, except Space on its buttons and arrows on its sliders.
+- **Player controls (ADR 0004).** Where the container can go fullscreen (`controlsFor` = `own`), the
+  `<video>` has no `controls`: `PlayerControls.svelte` sits below the picture, and over it in
+  fullscreen (fading out while playing with the pointer at rest; text cues are lifted above it via
+  `::-webkit-media-text-track-container`). Click on the video = play/pause, double-click =
+  fullscreen. iOS (video-only fullscreen) and pages without fullscreen keep the native controls.
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the

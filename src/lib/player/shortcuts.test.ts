@@ -27,6 +27,20 @@ describe('shortcutFor', () => {
     expect(shortcutFor({ key: 'ArrowLeft', metaKey: true })).toBeNull();
     expect(shortcutFor({ key: 'm', altKey: true })).toBeNull();
   });
+
+  it('works on the player control bar, except the keys its buttons and sliders use', () => {
+    const bar = { inPlayerControls: true };
+    expect(shortcutFor({ key: 'f', targetTag: 'BUTTON', ...bar })).toEqual({ type: 'fullscreen' });
+    expect(shortcutFor({ key: 'm', targetTag: 'INPUT', ...bar })).toEqual({ type: 'mute' });
+    expect(shortcutFor({ key: ' ', targetTag: 'INPUT', ...bar })).toEqual({ type: 'toggle-play' });
+    expect(shortcutFor({ key: 'ArrowRight', targetTag: 'BUTTON', ...bar })).toEqual({
+      type: 'seek',
+      by: 5,
+    });
+    expect(shortcutFor({ key: ' ', targetTag: 'BUTTON', ...bar })).toBeNull();
+    expect(shortcutFor({ key: 'ArrowLeft', targetTag: 'INPUT', ...bar })).toBeNull();
+    expect(shortcutFor({ key: 'f', ctrlKey: true, ...bar })).toBeNull();
+  });
 });
 
 describe('seekTarget', () => {

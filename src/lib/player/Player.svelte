@@ -3,6 +3,7 @@
   import { channelsLabel, codecLabel } from './codecs';
   import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
   import {
+    controlsFor,
     detectDisplayCapabilities,
     enterFullscreen,
     enterVideoFullscreen,
@@ -11,6 +12,7 @@
     fullscreenMethod,
   } from './fullscreen';
   import type { PlayerController, Phase } from './controller.svelte';
+  import PlayerControls from './PlayerControls.svelte';
   import ShareButton from './ShareButton.svelte';
   import { seekTarget, shortcutFor, SHORTCUTS, type ShortcutAction } from './shortcuts';
   import StatsPanel from './StatsPanel.svelte';
@@ -60,9 +62,11 @@
   const busy = $derived(['connecting', 'metadata', 'buffering'].includes(controller.phase));
   let dragging = $state(false);
 
-  // Our button fullscreens the container, so the ASS overlay canvas stays over the picture
-  // (docs/decisions/0004). The native one would fullscreen the bare video: hidden where ours works.
+  // Where the container can go fullscreen, our control bar replaces the native one: its fullscreen
+  // button fullscreens the container, so the ASS overlay canvas stays over the picture. A native
+  // control would fullscreen the bare video (docs/decisions/0004). iOS keeps the native controls.
   const fsMethod = fullscreenMethod(detectDisplayCapabilities());
+  const ownControls = controlsFor(fsMethod) === 'own';
   let screen = $state<HTMLDivElement>();
   let fullscreen = $state(false);
 
@@ -75,8 +79,9 @@
     };
   });
 
-  /** The fullscreen button and the `f` shortcut. */
+  /** The fullscreen button, the `f` shortcut and a double-click on the video. */
   function toggleFullscreen() {
+    if (fsMethod === 'none') return;
     if (fsMethod === 'video') {
       if (video) enterVideoFullscreen(video);
       return;
@@ -88,6 +93,46 @@
         ? enterFullscreen(screen)
         : undefined;
     done?.catch((err: unknown) => console.warn('fullscreen:', err));
+  }
+
+  // In fullscreen, our control bar fades out while the video plays and the pointer rests.
+  const IDLE_MS = 2500;
+  let pointerActive = $state(false);
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const controlsShown = $derived(pointerActive || controller.phase !== 'playing');
+  /** A touch on the video while the bar is hidden only reveals it (no play/pause). */
+  let tapReveals = false;
+
+  const onControls = (target: EventTarget | null) =>
+    target instanceof Element && !!target.closest('[data-player-controls]');
+
+  function wake(event: PointerEvent) {
+    pointerActive = true;
+    clearTimeout(idleTimer);
+    // Resting on the bar keeps it.
+    if (!onControls(event.target)) idleTimer = setTimeout(() => (pointerActive = false), IDLE_MS);
+  }
+
+  function onScreenPointerDown(event: PointerEvent) {
+    tapReveals = event.pointerType !== 'mouse' && !controlsShown;
+    wake(event);
+  }
+
+  function onScreenPointerLeave(event: PointerEvent) {
+    // Touch pointers "leave" after every tap.
+    if (event.pointerType !== 'mouse') return;
+    clearTimeout(idleTimer);
+    pointerActive = false;
+  }
+
+  $effect(() => () => clearTimeout(idleTimer));
+
+  function onVideoClick() {
+    if (tapReveals) return;
+    const v = video;
+    if (!v) return;
+    if (v.paused) v.play().catch(() => {});
+    else v.pause();
   }
 
   const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
@@ -115,6 +160,7 @@
       altKey: event.altKey,
       targetTag: target?.tagName,
       targetEditable: target?.isContentEditable,
+      inPlayerControls: onControls(target),
     });
     if (!action) return;
     event.preventDefault();
@@ -164,28 +210,39 @@
   ondrop={drop}
   aria-label="Player (drop a subtitle or .torrent file here)"
 >
-  <div class="screen" class:fullscreen bind:this={screen} data-testid="screen">
-    {#if fsMethod !== 'none'}
-      <button
-        type="button"
-        class="fullscreen-button"
-        data-testid="fullscreen"
-        aria-pressed={fullscreen}
-        title={fullscreen ? 'Exit fullscreen' : 'Fullscreen (keeps styled subtitles)'}
-        onclick={toggleFullscreen}>{fullscreen ? 'Exit fullscreen' : 'Fullscreen'}</button
-      >
-    {/if}
+  <div
+    class="screen"
+    class:fullscreen
+    class:idle={ownControls && fullscreen && !controlsShown}
+    class:lift={ownControls && fullscreen && controlsShown}
+    bind:this={screen}
+    data-testid="screen"
+    onpointermove={ownControls ? wake : undefined}
+    onpointerdown={ownControls ? onScreenPointerDown : undefined}
+    onpointerleave={ownControls ? onScreenPointerLeave : undefined}
+    role="presentation"
+  >
     <!-- The ASS overlay canvas is inserted right after the video (subtitles/ass-overlay.ts). -->
-    <!-- svelte-ignore a11y_media_has_caption (cues are added as text tracks at runtime) -->
+    <!-- Click = play/pause and double-click = fullscreen, as with native controls; keys: shortcuts.ts. -->
+    <!-- svelte-ignore a11y_media_has_caption, a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <video
       bind:this={video}
       data-testid="video"
       data-audio-codec={controller.audioCodec ?? ''}
       data-audio-track={controller.audioTrackId ?? ''}
-      controls
-      controlslist={fsMethod === 'container' ? 'nofullscreen' : undefined}
+      controls={!ownControls}
       playsinline
+      onclick={ownControls ? onVideoClick : undefined}
+      ondblclick={ownControls ? toggleFullscreen : undefined}
     ></video>
+    {#if ownControls}
+      <PlayerControls
+        {video}
+        {fullscreen}
+        shown={controlsShown}
+        ontogglefullscreen={toggleFullscreen}
+      />
+    {/if}
   </div>
 
   {#if controller.audioTracks.length > 0}
@@ -300,25 +357,12 @@
     position: absolute;
     pointer-events: none;
   }
-  .fullscreen-button {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
-    z-index: 1;
-    padding: 0.25rem 0.5rem;
-    border: 0;
-    border-radius: 0.25rem;
-    background: rgb(0 0 0 / 0.55);
-    color: #fff;
-    font: inherit;
-    font-size: 0.85rem;
-    cursor: pointer;
-    opacity: 0.6;
-    transition: opacity 0.2s;
+  .screen.idle {
+    cursor: none;
   }
-  .fullscreen-button:hover,
-  .fullscreen-button:focus-visible {
-    opacity: 1;
+  /* Text cues above the control bar while it overlays the picture (Chromium, WebKit). */
+  .screen.lift video::-webkit-media-text-track-container {
+    transform: translateY(-3.5rem);
   }
   .tracks {
     display: flex;

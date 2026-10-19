@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatPercent, formatSpeed } from './format';
+import { formatBytes, formatPercent, formatSpeed, formatTime } from './format';
 
 describe('format', () => {
   it('formats speeds', () => {
@@ -17,5 +17,14 @@ describe('format', () => {
   it('formats progress', () => {
     expect(formatPercent(0.999)).toBe('99%');
     expect(formatPercent(1)).toBe('100%');
+  });
+  it('formats media time', () => {
+    expect(formatTime(0)).toBe('0:00');
+    expect(formatTime(3.9)).toBe('0:03');
+    expect(formatTime(72)).toBe('1:12');
+    expect(formatTime(3600 + 5 * 60 + 7)).toBe('1:05:07');
+    expect(formatTime(NaN)).toBe('0:00');
+    expect(formatTime(Infinity)).toBe('0:00');
+    expect(formatTime(-1)).toBe('0:00');
   });
 });

@@ -46,9 +46,8 @@ SRT and ASS tracks don't appear in `getTracks()`). So we keep a small EBML reade
   raw Matroska block payloads through libass's `processChunk` (which drops duplicates by ReadOrder).
   Fonts come from MKV attachments plus JASSUB's bundled default (Liberation Sans, preloaded, so the
   first frame drawn while paused already has glyphs); no local or Google font queries. The canvas
-  overlays the video inside the player container, so our fullscreen button fullscreens the
-  container, and the native control's fullscreen button is hidden (`controlslist="nofullscreen"`).
-  Native `<video>` fullscreen would hide the overlay. Where only the video element can go
+  overlays the video inside the player container, so fullscreen must fullscreen the container:
+  native `<video>` fullscreen would hide the overlay. See "Player controls" below. Where only the video element can go
   fullscreen (iOS Safari), render ASS as text instead: strip `{\…}` tags and use VTTCue. The same
   text track is shown while the bare video is fullscreen anyway (a browser's own control), and if
   JASSUB fails to load.
@@ -56,6 +55,23 @@ SRT and ASS tracks don't appear in `getTracks()`). So we keep a small EBML reade
   Cyrillic → windows-1252. Own small SRT/VTT parsers (unit-tested); no dependency.
 - **Sidecar matching:** files whose basename starts with the video's basename come first, then the rest
   of the torrent's subtitle files. Fetch with `file.arrayBuffer()` when selected.
+
+## Player controls (updated 2026-10-19)
+
+Where the container can go fullscreen, the `<video>` has **no native controls**; our control bar
+(`PlayerControls.svelte`: play/pause, seek with buffered range, time, mute/volume, one fullscreen
+icon) replaces them. Its fullscreen icon, the `f` shortcut and a double-click on the video all
+fullscreen the container. The bar sits below the picture, so it never covers subtitles; in
+fullscreen it overlays the bottom and fades out while playing once the pointer rests. While it shows
+there, text cues are moved up with `::-webkit-media-text-track-container` (Chromium, WebKit).
+On iOS (video-only fullscreen) and where no fullscreen is allowed, the native controls stay and we
+add no fullscreen control of our own.
+
+Why: the native controls' fullscreen button fullscreens the bare video. Hiding it with
+`controlslist="nofullscreen"` left a greyed-out icon in Chrome next to our separate "Fullscreen"
+text button, which looked broken. Firefox's native controls can't hide or redirect their fullscreen
+button. Redirecting a native video fullscreen to the container would need a second
+`requestFullscreen` after the first one used up the user activation, and it would flash.
 
 ## Rejected
 
