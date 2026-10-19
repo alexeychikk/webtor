@@ -41,6 +41,35 @@ export function evictionRange(
   return cut > first + 1 ? [first, cut] : null;
 }
 
+/** Under quota, keep only this much behind the playhead (small backward seeks stay instant). */
+export const QUOTA_KEEP_BEHIND_S = 1;
+
+/**
+ * The range to `remove()` when the SourceBuffer is full: all but `QUOTA_KEEP_BEHIND_S` behind the
+ * playhead. `safeCut` moves the end back to a random-access point: MSE removes up to the next one
+ * after `end`, which must not be past the playhead (that would empty the GOP being played).
+ */
+export function quotaEvictionRange(
+  ranges: Ranges,
+  t: number,
+  safeCut: (cut: number) => number = (cut) => cut,
+): [number, number] | null {
+  if (ranges.length === 0) return null;
+  const first = ranges.start(0);
+  const cut = Math.min(safeCut(t - QUOTA_KEEP_BEHIND_S), t - QUOTA_KEEP_BEHIND_S);
+  return cut > first + 0.1 ? [first, cut] : null;
+}
+
+/** The last of the ascending `points` at or before `t`, or -Infinity. */
+export function lastAtOrBefore(points: readonly number[], t: number): number {
+  let best = -Infinity;
+  for (const p of points) {
+    if (p > t) break;
+    best = p;
+  }
+  return best;
+}
+
 /** Builds a `Ranges` from [start, end] pairs (tests, and snapshots of SourceBuffer.buffered). */
 export function toRanges(pairs: readonly (readonly [number, number])[]): Ranges {
   return {

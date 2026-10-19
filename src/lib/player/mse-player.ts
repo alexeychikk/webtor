@@ -4,7 +4,25 @@
  * pure modules (`codecs.ts`, `buffer.ts`); this file only wires them to the DOM.
  */
 import type { Conversion, Input, InputVideoTrack } from 'mediabunny';
-import { BUFFER_AHEAD_S, bufferedAhead, evictionRange, gapJumpTarget, isBuffered } from './buffer';
+import {
+  appendChunk,
+  MIN_AHEAD_S,
+  newQuotaState,
+  settled,
+  simulateQuota,
+  whenIdle,
+  type AppendHost,
+  type QuotaState,
+} from './append';
+import {
+  BUFFER_AHEAD_S,
+  bufferedAhead,
+  gapJumpTarget,
+  isBuffered,
+  lastAtOrBefore,
+  quotaEvictionRange,
+  type Ranges,
+} from './buffer';
 import { preferredAudioLanguage } from './audio-preference';
 import { loadCodecExtensions } from './codec-extensions';
 import {
@@ -18,6 +36,7 @@ import {
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import {
   MAX_REMOTE_RESUMES,
+  REMOTE_KEYFRAME_INTERVAL_S,
   REMOTE_VIDEO_MIME,
   REMOTE_WARMUP_MS,
   remoteResumePoint,
@@ -64,6 +83,20 @@ function bufferAheadSeconds(): number {
   }
 }
 
+/** e2e: a Safari-like SourceBuffer quota in bytes (`simulateQuota`), 0 = the browser's own. */
+function simulatedQuotaBytes(): number {
+  try {
+    return Number(localStorage.getItem('webtor:sb-quota-bytes')) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+declare global {
+  /** e2e: quota hits under `webtor:sb-quota-bytes`. */
+  var __webtorQuotaHits: number | undefined;
+}
+
 interface Pipeline {
   kind: 'video' | 'audio';
   trackId: number;
@@ -90,6 +123,13 @@ interface Pipeline {
    * follows `writtenTo` instead. -Infinity when nothing is being replaced.
    */
   replaceUntil: number;
+  /** `QuotaExceededError` back-pressure (append.ts). */
+  quota: QuotaState;
+  /**
+   * Local video: element times of the fragments appended (each starts on a keyframe), ascending.
+   * Under quota, eviction behind the playhead ends on one of them.
+   */
+  keyframes: number[];
 }
 
 interface RemoteState {
@@ -437,7 +477,15 @@ export class MsePlayer {
       done: false,
       writtenTo: -Infinity,
       replaceUntil: -Infinity,
+      quota: newQuotaState(),
+      keyframes: [],
     });
+    const quota = simulatedQuotaBytes();
+    if (quota > 0) {
+      simulateQuota(sb, quota, () => {
+        globalThis.__webtorQuotaHits = (globalThis.__webtorQuotaHits ?? 0) + 1;
+      });
+    }
   }
 
   private listen() {
@@ -447,6 +495,7 @@ export class MsePlayer {
       'waiting',
       () => {
         this.jumpGap();
+        this.recoverHole();
         this.checkTranscodeSpeed();
       },
       { signal },
@@ -474,6 +523,21 @@ export class MsePlayer {
     if (this.destroyed || this.video.seeking) return;
     const target = gapJumpTarget(this.video.buffered, this.video.currentTime);
     if (target !== null) this.video.currentTime = target;
+  }
+
+  /**
+   * A hole at the playhead that the pipelines already went past (the UA evicted media ahead, which
+   * `ManagedMediaSource` may do; see `bufferedchange`): nothing would ever fill it, so restart there.
+   * Only a hole between buffered ranges counts, and once per position.
+   */
+  private holeRestartAt = NaN;
+  private recoverHole() {
+    if (this.destroyed || this.video.seeking) return;
+    const t = this.video.currentTime;
+    if (!this.pipelines.some((p) => hasHoleAt(p.sb.buffered, t))) return;
+    if (Math.abs(t - this.holeRestartAt) < 1) return;
+    this.holeRestartAt = t;
+    void this.restartAt(t);
   }
 
   /** `relay-transcode-slow` once the element starves for video the relay is still converting. */
@@ -565,12 +629,20 @@ export class MsePlayer {
     const offset = appendOffset(this.timeline, k);
     p.writtenTo = -Infinity;
     p.replaceUntil = replaceUntil;
+    p.keyframes = p.keyframes.filter((x) => x < offset);
     const output = new mb.Output({
       format: new mb.Mp4OutputFormat({
         fastStart: 'fragmented',
         minimumFragmentDuration: 1,
         onMoof: (_data, _pos, timestamp) => {
-          if (gen === p.gen) p.writtenTo = offset + timestamp;
+          if (gen !== p.gen) return;
+          p.writtenTo = offset + timestamp;
+          // Every fragment starts on a keyframe (Mediabunny's fragmented MP4).
+          if (p.kind === 'video') {
+            p.keyframes.push(p.writtenTo);
+            const t = this.video.currentTime;
+            if (p.keyframes.length > 1000) p.keyframes = p.keyframes.filter((x) => x > t - 300);
+          }
         },
       }),
       target: new mb.AppendOnlyStreamTarget(
@@ -704,36 +776,87 @@ export class MsePlayer {
     await this.startRemote(p, toSourceTime(this.timeline, at), g);
   }
 
-  /** Appends one chunk, waiting while enough is buffered ahead and evicting what is far behind. */
+  /** Appends one chunk with back-pressure; `QuotaExceededError` waits for room (append.ts). */
   private async append(p: Pipeline, gen: number, data: Uint8Array) {
-    const stale = () => gen !== p.gen || this.destroyed;
-    if (stale()) throw new StalePipeline();
-    while (this.appendedAhead(p) > this.bufferAhead) {
-      await this.playbackProgress();
-      if (stale()) throw new StalePipeline();
-    }
-    for (let attempt = 0; ; attempt++) {
-      await settled(p.sb);
-      if (stale()) throw new StalePipeline();
-      const evict = evictionRange(p.sb.buffered, this.video.currentTime, attempt ? 5 : undefined);
-      if (evict) {
-        p.sb.remove(evict[0], evict[1]);
-        await settled(p.sb);
-        if (stale()) throw new StalePipeline();
-      }
+    const host: AppendHost = {
+      target: this.bufferAhead,
+      currentTime: () => this.video.currentTime,
+      ahead: () => this.appendedAhead(p),
+      streaming: () => (this.mediaSource as { streaming?: boolean }).streaming !== false,
+      progress: () => this.playbackProgress(),
+      check: () => {
+        if (gen !== p.gen || this.destroyed) throw new StalePipeline();
+      },
+      safeCut: (cut) => this.safeCut(p, cut),
+      staleAhead: () => {
+        // Audio switch: the old track ahead of the new pipeline gets overwritten anyway.
+        if (p.writtenTo >= p.replaceUntil) return null;
+        const from = Math.max(this.video.currentTime, p.writtenTo) + MIN_AHEAD_S;
+        if (from >= p.replaceUntil) return null;
+        p.replaceUntil = from;
+        return [from, Infinity];
+      },
+      relieve: () => this.relieve(p),
+    };
+    await appendChunk(p.sb, data as Uint8Array<ArrayBuffer>, host, p.quota);
+    this.jumpGap();
+  }
+
+  /** Where eviction behind `p`'s playhead may end so that it keeps the GOP being played. */
+  private safeCut(p: Pipeline, cut: number): number {
+    if (p.kind === 'audio') return cut;
+    if (p.remote) return cut - REMOTE_KEYFRAME_INTERVAL_S;
+    return lastAtOrBefore(p.keyframes, cut);
+  }
+
+  /**
+   * `self` hit the quota with almost nothing ahead: the quota is shared (or the UA is low on memory),
+   * so free room in the other SourceBuffers: first behind the playhead, else by cutting their media
+   * ahead to half (and capping them there), so one pipeline never starves the other.
+   */
+  private async relieve(self: Pipeline): Promise<boolean> {
+    const t = this.video.currentTime;
+    let freed = false;
+    for (const q of this.pipelines) {
+      if (q === self || this.destroyed) continue;
       try {
-        p.sb.appendBuffer(data as Uint8Array<ArrayBuffer>);
-        await settled(p.sb);
-        this.jumpGap();
-        return;
-      } catch (err) {
-        if (!(err instanceof DOMException && err.name === 'QuotaExceededError') || attempt > 5) {
-          throw err;
+        const ev = quotaEvictionRange(q.sb.buffered, t, (cut) => this.safeCut(q, cut));
+        if (ev) {
+          await whenIdle(q.sb, () => q.sb.remove(ev[0], ev[1]));
+          freed = true;
+          continue;
         }
-        // Buffer full: let playback move on, then evict more aggressively and retry.
-        await this.playbackProgress();
+        const ahead = bufferedAhead(q.sb.buffered, t);
+        if (ahead < 2 * MIN_AHEAD_S) continue;
+        const keep = Math.max(MIN_AHEAD_S, ahead / 2);
+        q.quota.cap = Math.min(q.quota.cap, keep);
+        if (await this.trimAhead(q, t + keep)) freed = true;
+      } catch (err) {
+        console.warn('freeing buffer room failed', err);
       }
     }
+    return freed;
+  }
+
+  /** Drops `q`'s media from element time `until` on and restarts it there. False if it can't. */
+  private async trimAhead(q: Pipeline, until: number): Promise<boolean> {
+    let k = toSourceTime(this.timeline, until);
+    if (q.kind === 'video' && !q.remote) {
+      const key = await new this.mb.EncodedPacketSink(this.videoTrack).getKeyPacket(k, {
+        verifyKeyPackets: true,
+      });
+      k = restartPoint(this.timeline, key?.timestamp);
+    }
+    // A long GOP would cut into what is playing now.
+    if (this.destroyed || appendOffset(this.timeline, k) < this.video.currentTime + 1) return false;
+    const { g, cancel } = this.stopPipeline(q);
+    await cancel;
+    await this.resetBuffer(q, appendOffset(this.timeline, k));
+    if (g !== q.gen || this.destroyed) return true;
+    this.startPipeline(q, k, g).catch((err: unknown) => {
+      if (g === q.gen) this.fail(err);
+    });
+    return true;
   }
 
   /** Seconds of `p`'s media ahead of the playhead, for back-pressure (see `replaceUntil`). */
@@ -749,11 +872,14 @@ export class MsePlayer {
         clearTimeout(timer);
         this.video.removeEventListener('timeupdate', done);
         this.video.removeEventListener('seeking', done);
+        this.mediaSource.removeEventListener('startstreaming', done);
         resolve();
       };
       const timer = setTimeout(done, 1000);
       this.video.addEventListener('timeupdate', done);
       this.video.addEventListener('seeking', done);
+      // ManagedMediaSource wants data again (after `endstreaming`).
+      this.mediaSource.addEventListener('startstreaming', done);
     });
   }
 
@@ -765,19 +891,13 @@ export class MsePlayer {
   }
 }
 
-/** Resolves once the SourceBuffer is idle; rejects if the pending operation failed. */
-function settled(sb: SourceBuffer): Promise<void> {
-  if (!sb.updating) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const onEnd = () => {
-      sb.removeEventListener('error', onError);
-      resolve();
-    };
-    const onError = () => {
-      sb.removeEventListener('updateend', onEnd);
-      reject(new PlaybackError('playback-failed', 'the browser rejected the media data'));
-    };
-    sb.addEventListener('updateend', onEnd, { once: true });
-    sb.addEventListener('error', onError, { once: true });
-  });
+/** `t` is unbuffered but there is media both before and after it (well past a small gap). */
+function hasHoleAt(ranges: Ranges, t: number): boolean {
+  if (isBuffered(ranges, t)) return false;
+  let before = false;
+  for (let i = 0; i < ranges.length; i++) {
+    if (ranges.start(i) <= t) before = true;
+    else if (before && gapJumpTarget(ranges, t) === null) return true;
+  }
+  return false;
 }

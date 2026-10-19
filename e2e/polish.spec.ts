@@ -341,3 +341,22 @@ test('the empty page fits a phone and `?` opens the shortcuts there too', async 
   await expect(page.getByTestId('shortcuts-help')).toBeInViewport();
   await expect(page.getByTestId('shortcuts-help')).toContainText('Next subtitle track');
 });
+
+test('the tab icon and the apple-touch-icon are linked and served from the build', async ({
+  page,
+}) => {
+  await page.goto('./');
+  const links = await page
+    .locator('link[rel="icon"], link[rel="apple-touch-icon"]')
+    .evaluateAll((els) =>
+      els.map((l) => ({ rel: l.getAttribute('rel'), href: (l as HTMLLinkElement).href })),
+    );
+  expect(links.map((l) => l.rel)).toEqual(['icon', 'icon', 'apple-touch-icon']);
+  for (const { href } of links) {
+    // Relative to the page, so they resolve under the GitHub Pages base path too.
+    expect(href.startsWith(new URL('./', page.url()).href)).toBe(true);
+    const res = await page.request.get(href);
+    expect(res.status(), href).toBe(200);
+    expect(res.headers()['content-type']).toMatch(/^image\/(svg\+xml|png)/);
+  }
+});

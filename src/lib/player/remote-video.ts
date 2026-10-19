@@ -21,6 +21,12 @@ export interface RemoteVideo {
 export const REMOTE_VIDEO_MIME = 'video/mp4; codecs="avc1.640028"';
 
 /**
+ * Longest keyframe interval of the relay's output (`-force_key_frames expr:gte(t,n_forced*2)` in
+ * relay/internal/relay/transcode.go): eviction behind the playhead stays this far before the cut.
+ */
+export const REMOTE_KEYFRAME_INTERVAL_S = 2;
+
+/**
  * After the relay answered a (re)started conversion, it gets this long for its first fragments before a
  * drained buffer counts as slow.
  */

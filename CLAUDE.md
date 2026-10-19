@@ -40,6 +40,7 @@ pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
 scripts/release-relay.sh <version> [all|binaries|image|build]   # relay release, see below
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
+node scripts/make-icons.mjs   # public/favicon-32.png + apple-touch-icon.png from public/favicon.svg (Playwright)
 scripts/deploy-relay-oci.sh [--destroy] [--dry-run | --print-cloud-init]   # relay on Oracle Cloud, see below
 cd relay && go test ./...  # relay checks: gofmt -l . && go vet ./... && go test ./...  (relay/CLAUDE.md)
 ```
@@ -118,6 +119,7 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   mse-player.ts                Input → per-SourceBuffer Conversion → MSE; back-pressure, seek restart
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
+  append.ts                    appendBuffer with back-pressure: QuotaExceededError waits, never fails (ADR 0003)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
   remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   PlayerControls.svelte        control layer over the picture: scrims, title strip, seek bar (track, downloaded,
@@ -194,6 +196,11 @@ docs/decisions/                ADRs
   this way automatically.
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
+  `localStorage['webtor:sb-quota-bytes']` gives every SourceBuffer a Safari-like byte quota
+  (`simulateQuota`; hits counted in `window.__webtorQuotaHits`). `QuotaExceededError` is
+  back-pressure, never a failure (ADR 0003): keep every append going through `appendChunk`.
+- Icons live in `public/` (`favicon.svg` = the header mark; PNGs rendered by `scripts/make-icons.mjs`),
+  linked from `index.html` with root paths that Vite rewrites to the relative base.
 - **Files.** `#magnet=<encoded>&file=<n>`: `n` is the index into `torrent.files` of the file playing
   (`readFileFromHash`; an unplayable or missing `n` falls back to the largest playable video). The
   hash follows the controller (`magnet`, `fileIndex`) with `replaceState`. `controller.selectFile(n)`

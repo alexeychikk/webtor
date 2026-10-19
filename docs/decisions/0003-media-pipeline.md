@@ -23,7 +23,24 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   set `video.disableRemotePlayback = true`). Neither present → `no-mse` error.
 - **Back-pressure:** the `WritableStream` behind `StreamTarget` awaits `appendBuffer` and then waits
   while buffered-ahead > 60 s. Mediabunny propagates this to reads, so the download follows the
-  playhead. Evict more than 30 s behind the playhead. On `QuotaExceededError`, evict and retry.
+  playhead (the relay's stream likewise: `pumpRemote` stops reading). Evict more than 30 s behind
+  the playhead. With `ManagedMediaSource`, `endstreaming` holds appends (and so the download) until
+  `startstreaming`, except below 3 s ahead (`MIN_AHEAD_S`), so a missed event never stalls playback.
+- **`QuotaExceededError` is back-pressure, never fatal** (`src/lib/player/append.ts`, 2026-10-19).
+  Safari/iPadOS give a SourceBuffer far fewer bytes than 60 s of a high-bitrate file, and nothing
+  behind the playhead may be left to evict: failing after a few retries killed playback on iPad. On a
+  quota hit the pipeline (1) evicts all but 1 s behind the playhead, ending on a keyframe it appended
+  (MSE removes up to the next random-access point, which must not be past the playhead; relay video
+  has one every 2 s); (2) caps its own ahead target at 80 % of what was buffered ahead when it hit
+  (never below 3 s) and from then on evicts tightly before every append; (3) waits for playback
+  (`timeupdate`, `seeking`, `startstreaming`, or 1 s) and retries, holding the chunk. Paused, it
+  simply holds. Audio switch: the old track ahead of the new pipeline is dropped first (it gets
+  overwritten anyway). A pipeline starved by the quota (< 3 s ahead) asks the other SourceBuffer for
+  room: evict behind, else halve its media ahead (restart it there, cap it) so audio and video never
+  starve each other under a shared quota. Only a buffer with nothing at the playhead and nothing to
+  free anywhere, 5 hits in a row, fails (`playback-failed`). A hole at the playhead between buffered
+  ranges (UA eviction ahead, `bufferedchange`) restarts the pipelines there on `waiting`. e2e forces
+  a quota with `localStorage['webtor:sb-quota-bytes']`; real Safari/iPad behaviour is checked by hand.
 - **Timestamps:** `Conversion` with `trim.start = K` rebases output to 0, so set
   `sourceBuffer.timestampOffset = K` before the first append (verified in a spike).
 - **Seeking:** if the target is buffered in both SourceBuffers, do nothing. Otherwise debounce (150 ms),
