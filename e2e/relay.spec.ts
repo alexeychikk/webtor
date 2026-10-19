@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { relayStack } from './support/fixtures';
+import { closeMenu, openMenu } from './support/player';
 
 // webtor-relay route (docs/decisions/0006): the magnet's only peer is a TCP seeder on loopback, which
 // a page can never reach by itself. Started by e2e/support/relay-stack.mjs.
@@ -30,7 +31,9 @@ test('plays a magnet only regular peers have, through webtor-relay set by #relay
   await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'playing');
   // The relay's swarm stats are merged in (the count drops to 0 once the relay holds the whole file
   // and lets the seeder go).
+  await openMenu(page, 'stats-button');
   await expect(page.getByTestId('relay-peers')).toHaveText(/^· \d+ via relay$/);
+  await closeMenu(page);
   await expect(page.getByTestId('error')).toHaveCount(0);
 
   await page.getByTestId('video').evaluate((v: HTMLVideoElement) => (v.currentTime = 8));

@@ -31,4 +31,17 @@ test('magnet → play', async ({ page }) => {
   await page.getByTestId('screen').hover(); // The bar hides while playing with the pointer away.
   await expect(page.getByRole('button', { name: /fullscreen/i })).toHaveCount(1);
   await expect(page.getByTestId('fullscreen')).toHaveAttribute('aria-label', 'Fullscreen');
+
+  // The in-player subtitles menu, by keyboard (paused: the bar stays up).
+  await video.evaluate((v: HTMLVideoElement) => v.pause());
+  const trigger = page.getByTestId('subtitles');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  const options = page.getByTestId('subtitles-menu').getByTestId('subtitle-option');
+  await expect(options.first()).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toHaveAttribute('data-value', 'embedded:4');
+  await expect(page.locator('[data-player-menu]')).toHaveCount(0);
+  await expect(trigger).toBeFocused();
 });

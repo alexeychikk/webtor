@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { fixtureMagnet } from './support/fixtures';
+import { closeMenu, openMenu, selectSubtitle } from './support/player';
 
 const video = (page: Page) => page.getByTestId('video');
 const canvas = (page: Page) => page.getByTestId('ass-canvas');
@@ -52,7 +53,7 @@ test('the Russian ASS track is drawn by JASSUB on the overlay canvas at 2–4 s,
 }) => {
   await playSample(page);
   await expect(canvas(page)).toHaveCount(0); // Nothing loaded before an ASS track is picked.
-  await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
+  await selectSubtitle(page, { label: 'Russian · ASS' });
   await expect(canvas(page)).toBeVisible({ timeout: 20_000 });
   await seekTo(page, 3);
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
@@ -63,7 +64,7 @@ test('the Russian ASS track is drawn by JASSUB on the overlay canvas at 2–4 s,
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBe(0);
 
   // Another track removes the overlay.
-  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await selectSubtitle(page, { label: 'English · SRT' });
   await expect(canvas(page)).toHaveCount(0);
   await expect(page.getByTestId('error')).toHaveCount(0);
   await expect(page.locator('[data-testid="notice"][data-code="subtitle-failed"]')).toHaveCount(0);
@@ -71,12 +72,13 @@ test('the Russian ASS track is drawn by JASSUB on the overlay canvas at 2–4 s,
 
 test('the subtitle delay moves the styled ASS overlay too', async ({ page }) => {
   await playSample(page);
-  await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
+  await selectSubtitle(page, { label: 'Russian · ASS' });
   await expect(canvas(page)).toBeVisible({ timeout: 20_000 });
   await seekTo(page, 3);
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
 
   // +2 s: the 2–4 s event is drawn at 4–6 s (redrawn at once while paused).
+  await openMenu(page, 'subtitles');
   for (let i = 0; i < 4; i++) await page.getByTestId('subtitle-delay-plus').click();
   await expect(page.getByTestId('subtitle-delay')).toHaveAttribute('data-delay', '2');
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBe(0);
@@ -94,7 +96,7 @@ test('the fullscreen icon fullscreens the player container, and the overlay stay
   page,
 }) => {
   await playSample(page);
-  await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
+  await selectSubtitle(page, { label: 'Russian · ASS' });
   await expect(canvas(page)).toBeVisible({ timeout: 20_000 });
   await seekTo(page, 3);
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
@@ -121,6 +123,14 @@ test('the fullscreen icon fullscreens the player container, and the overlay stay
   await seekTo(page, 3.2);
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
   expect(await shownCues(page)).toEqual([]);
+
+  // Menus open as panels inside the fullscreen container, and the overlay stays drawn under them.
+  const menu = await openMenu(page, 'subtitles');
+  await expect(menu).toHaveAttribute('data-presentation', 'panel');
+  expect(await menu.evaluate((m) => document.fullscreenElement?.contains(m) ?? false)).toBe(true);
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
+  await closeMenu(page);
+  await expect(page.getByTestId('subtitles')).toBeFocused();
 
   await page.getByTestId('fullscreen').click();
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
@@ -163,7 +173,7 @@ test('an uploaded .ass file is drawn styled too', async ({ page }) => {
     mimeType: 'text/x-ssa',
     buffer: Buffer.from(UPLOADED_ASS),
   });
-  await expect(page.getByTestId('subtitles')).toHaveValue('upload:1');
+  await expect(page.getByTestId('subtitles')).toHaveAttribute('data-value', 'upload:1');
   await expect(canvas(page)).toBeVisible({ timeout: 20_000 });
   await seekTo(page, 2);
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
@@ -197,7 +207,7 @@ test('without container fullscreen (iOS), ASS is shown as plain text under our c
   await page.locator('h1').click();
   await page.keyboard.press('f');
   await expect(video(page)).toHaveAttribute('data-entered', '1');
-  await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
+  await selectSubtitle(page, { label: 'Russian · ASS' });
   await seekTo(page, 3);
   await expect.poll(() => shownCues(page)).toEqual(['Привет из ASS']);
   await expect(canvas(page)).toHaveCount(0);

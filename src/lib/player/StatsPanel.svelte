@@ -1,4 +1,8 @@
 <script lang="ts">
+  /** Content of the stats panel (docs/decisions/0008 §4): peers, speeds, progress; live values. */
+  import ArrowDown from '@lucide/svelte/icons/arrow-down';
+  import ArrowUp from '@lucide/svelte/icons/arrow-up';
+  import Users from '@lucide/svelte/icons/users';
   import { formatBytes, formatPercent, formatSpeed } from './format';
   import type { TorrentStats } from './types';
 
@@ -7,7 +11,7 @@
 
 <dl class="stats" data-testid="stats" aria-label="Download stats">
   <div>
-    <dt>Peers</dt>
+    <dt><Users size={16} aria-hidden="true" /> Peers</dt>
     <dd data-testid="stats-peers">
       {stats.numPeers}
       {#if stats.relayPeers !== undefined}
@@ -16,23 +20,25 @@
     </dd>
   </div>
   <div>
-    <dt>Download</dt>
-    <dd data-testid="stats-download">↓ {formatSpeed(stats.downloadSpeed)}</dd>
+    <dt><ArrowDown size={16} aria-hidden="true" /> Down</dt>
+    <dd data-testid="stats-download">{formatSpeed(stats.downloadSpeed)}</dd>
   </div>
   <div>
-    <dt>Upload</dt>
-    <dd data-testid="stats-upload">↑ {formatSpeed(stats.uploadSpeed)}</dd>
+    <dt><ArrowUp size={16} aria-hidden="true" /> Up</dt>
+    <dd data-testid="stats-upload">{formatSpeed(stats.uploadSpeed)}</dd>
   </div>
   <div class="progress">
-    <dt>Progress</dt>
+    <div class="bar" aria-hidden="true">
+      <div style:width="{Math.min(1, stats.progress) * 100}%"></div>
+    </div>
+    <dt class="sr-only">Progress</dt>
     <dd>
-      <progress max="1" value={stats.progress} aria-label="Downloaded"></progress>
       <span data-testid="stats-progress">{formatPercent(stats.progress)}</span>
       {#if stats.length}
         <span class="bytes">
-          ({formatBytes(Math.min(stats.downloaded ?? 0, stats.length))} of {formatBytes(
+          {formatBytes(Math.min(stats.downloaded ?? 0, stats.length))} of {formatBytes(
             stats.length,
-          )})
+          )}
         </span>
       {/if}
     </dd>
@@ -41,43 +47,49 @@
 
 <style>
   .stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem 1.5rem;
-    margin: 0.5rem 0;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.25rem;
-    background: color-mix(in srgb, currentColor 6%, transparent);
+    display: grid;
+    gap: var(--space-2);
+    margin: 0;
+    padding: var(--space-2) var(--space-4);
     font-variant-numeric: tabular-nums;
   }
+  .stats > div {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
   dt {
-    font-size: 0.8em;
-    opacity: 0.7;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 5.5rem;
+    color: var(--text-muted);
   }
   dd {
     margin: 0;
   }
+  .progress {
+    flex-wrap: wrap;
+    padding-top: var(--space-1);
+  }
   .progress dd {
     display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    flex-wrap: wrap;
+    flex: 1;
+    justify-content: space-between;
+    gap: var(--space-2);
   }
-  progress {
-    width: 8rem;
+  .bar {
+    flex-basis: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--seek-track);
+    overflow: hidden;
+  }
+  .bar div {
+    height: 100%;
+    background: var(--seek-played);
   }
   .bytes {
-    opacity: 0.75;
-  }
-  @media (max-width: 30rem) {
-    .stats > div {
-      flex: 1 1 40%;
-    }
-    .stats > .progress {
-      flex-basis: 100%;
-    }
-    progress {
-      flex: 1;
-    }
+    color: var(--text-muted);
   }
 </style>
