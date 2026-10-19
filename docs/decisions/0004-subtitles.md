@@ -62,8 +62,14 @@ Where the container can go fullscreen, the `<video>` has **no native controls**;
 (`PlayerControls.svelte`: play/pause, seek with buffered range, time, mute/volume, one fullscreen
 icon) replaces them. Its fullscreen icon, the `f` shortcut and a double-click on the video all
 fullscreen the container. The bar sits below the picture, so it never covers subtitles; in
-fullscreen it overlays the bottom and fades out while playing once the pointer rests. While it shows
-there, text cues are moved up with `::-webkit-media-text-track-container` (Chromium, WebKit).
+fullscreen it overlays the bottom. While it shows there, text cues are moved up with
+`::-webkit-media-text-track-container` (Chromium, WebKit). While playing, the bar and the cursor hide
+1 s after the pointer rests, and at once when it leaves the player or the window, windowed and in
+fullscreen; any pointer move, touch or key brings them back. A touch keeps them 3 s, since there is no
+hover to bring them back. They stay while paused or while the pointer is on the bar. The icon is the
+only way to exit shown on screen (no "Exit fullscreen" text; Esc, `f` and double-click also work).
+Shortcuts are handled in the window's capture phase and stop there, so a focused button or the
+native controls never act on the same Space press a second time.
 On iOS (video-only fullscreen) and where no fullscreen is allowed, the native controls stay and we
 add no fullscreen control of our own.
 

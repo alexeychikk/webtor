@@ -16,7 +16,7 @@
     video: HTMLVideoElement | undefined;
     /** The player container is fullscreen. */
     fullscreen: boolean;
-    /** Visible (always outside fullscreen; there it fades out while playing). */
+    /** Visible; hidden (faded out) while playing once the pointer rests. */
     shown: boolean;
     ontogglefullscreen: () => void;
   } = $props();
@@ -193,7 +193,10 @@
 </div>
 
 <style>
-  /* Below the picture (never over subtitles); over it in fullscreen, fading out while playing. */
+  /*
+   * Below the picture (never over subtitles), over it in fullscreen. Hidden (faded out, then
+   * `visibility: hidden`, so nothing stays drawn) while playing once the pointer rests.
+   */
   .controls {
     position: relative;
     z-index: 2;
@@ -201,6 +204,14 @@
     background: #000;
     color: #fff;
     opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity 0.25s,
+      visibility 0s 0.25s;
+  }
+  .controls.shown {
+    visibility: visible;
+    opacity: 1;
     transition: opacity 0.25s;
   }
   .controls.overlay {
@@ -208,10 +219,6 @@
     inset: auto 0 0 0;
     padding-top: 1.5rem;
     background: linear-gradient(transparent, rgb(0 0 0 / 0.7));
-  }
-  .controls.shown,
-  .controls:has(:focus-visible) {
-    opacity: 1;
   }
   .row {
     display: flex;

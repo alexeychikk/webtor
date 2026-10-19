@@ -28,6 +28,7 @@ test('magnet → play', async ({ page }) => {
   await expect(page.getByTestId('error')).toHaveCount(0);
   // Every engine gets our control bar, with its one fullscreen icon (no native controls).
   await expect(video).not.toHaveAttribute('controls');
+  await page.getByTestId('screen').hover(); // The bar hides while playing with the pointer away.
   await expect(page.getByRole('button', { name: /fullscreen/i })).toHaveCount(1);
   await expect(page.getByTestId('fullscreen')).toHaveAttribute('aria-label', 'Fullscreen');
 });

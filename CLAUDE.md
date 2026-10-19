@@ -198,11 +198,16 @@ docs/decisions/                ADRs
   `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
 - Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
   Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
-  (`[data-player-controls]`) they work, except Space on its buttons and arrows on its sliders.
+  (`[data-player-controls]`) they work, except arrows on its sliders. Player.svelte handles them in
+  the window's capture phase (preventDefault + stopPropagation, keyup of a handled Space too, no
+  auto-repeat except seeks), so a focused button or native control never toggles a second time.
 - **Player controls (ADR 0004).** Where the container can go fullscreen (`controlsFor` = `own`), the
   `<video>` has no `controls`: `PlayerControls.svelte` sits below the picture, and over it in
-  fullscreen (fading out while playing with the pointer at rest; text cues are lifted above it via
-  `::-webkit-media-text-track-container`). Click on the video = play/pause, double-click =
+  fullscreen (text cues are lifted above it via `::-webkit-media-text-track-container`). While
+  playing, the bar and cursor hide 1 s after the pointer rests (3 s after a touch), at once when it
+  leaves the player or window; any move, touch or key shows them; kept while paused or with the
+  pointer on the bar. Hidden = `visibility: hidden` (Playwright `toBeHidden`). No "Exit fullscreen"
+  text anywhere (aria-label/title only). Click on the video = play/pause, double-click =
   fullscreen. iOS (video-only fullscreen) and pages without fullscreen keep the native controls.
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.

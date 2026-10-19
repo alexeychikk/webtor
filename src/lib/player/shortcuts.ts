@@ -29,9 +29,9 @@ export interface ShortcutKey {
   targetTag?: string;
   targetEditable?: boolean;
   /**
-   * The target is one of the player's own controls (its control bar). Those keep only the keys they
-   * use (Space on a button, arrows on a slider); the other shortcuts still work there, as they do
-   * on a browser's native video controls.
+   * The target is one of the player's own controls (its control bar). The shortcuts work there, as
+   * on a browser's native video controls; only a slider keeps its arrows. Space plays/pauses even
+   * on a button (the caller then cancels the button's own Space activation).
    */
   inPlayerControls?: boolean;
 }
@@ -44,7 +44,6 @@ export function shortcutFor(e: ShortcutKey): ShortcutAction | null {
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
   if (e.inPlayerControls) {
     const tag = e.targetTag?.toUpperCase();
-    if (tag === 'BUTTON' && (e.key === ' ' || e.key === 'Spacebar')) return null;
     if (tag === 'INPUT' && e.key.startsWith('Arrow')) return null;
     return keyAction(e.key);
   }
@@ -73,6 +72,11 @@ function keyAction(key: string): ShortcutAction | null {
     default:
       return null;
   }
+}
+
+/** Whether a held key's auto-repeat runs the action again: seeking, yes; toggles, never. */
+export function repeats(action: ShortcutAction): boolean {
+  return action.type === 'seek';
 }
 
 /** Seek target clamped to the media: never before 0 or past the end (an unknown end is no limit). */

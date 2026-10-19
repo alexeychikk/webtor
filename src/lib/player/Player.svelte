@@ -14,7 +14,7 @@
   import type { PlayerController, Phase } from './controller.svelte';
   import PlayerControls from './PlayerControls.svelte';
   import ShareButton from './ShareButton.svelte';
-  import { seekTarget, shortcutFor, SHORTCUTS, type ShortcutAction } from './shortcuts';
+  import { repeats, seekTarget, shortcutFor, SHORTCUTS, type ShortcutAction } from './shortcuts';
   import StatsPanel from './StatsPanel.svelte';
   import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
@@ -95,35 +95,53 @@
     done?.catch((err: unknown) => console.warn('fullscreen:', err));
   }
 
-  // In fullscreen, our control bar fades out while the video plays and the pointer rests.
-  const IDLE_MS = 2500;
-  let pointerActive = $state(false);
+  // While the video plays, our control bar and the cursor hide 1 s after the pointer stops (3 s
+  // after a touch), or at once when the pointer leaves the player or the window. A pointer move,
+  // touch or key press shows them again; they stay while paused or while the pointer is on the bar.
+  const IDLE_MS = 1000;
+  const IDLE_TOUCH_MS = 3000;
+  let awake = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  const controlsShown = $derived(!fullscreen || pointerActive || controller.phase !== 'playing');
+  /** The mouse is on the control bar. */
+  let overControls = false;
+  const controlsShown = $derived(awake || controller.phase !== 'playing');
   /** A touch on the video while the bar is hidden only reveals it (no play/pause). */
   let tapReveals = false;
 
   const onControls = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest('[data-player-controls]');
 
-  function wake(event: PointerEvent) {
-    pointerActive = true;
+  function wake(ms = IDLE_MS) {
+    awake = true;
     clearTimeout(idleTimer);
-    // Resting on the bar keeps it.
-    if (!onControls(event.target)) idleTimer = setTimeout(() => (pointerActive = false), IDLE_MS);
+    if (!overControls) idleTimer = setTimeout(() => (awake = false), ms);
   }
 
-  function onScreenPointerDown(event: PointerEvent) {
-    tapReveals = event.pointerType !== 'mouse' && !controlsShown;
-    wake(event);
+  function hideControls() {
+    overControls = false;
+    clearTimeout(idleTimer);
+    awake = false;
+  }
+
+  function onScreenPointer(event: PointerEvent) {
+    const mouse = event.pointerType === 'mouse';
+    overControls = mouse && onControls(event.target);
+    if (event.type === 'pointerdown') tapReveals = !mouse && !controlsShown;
+    wake(mouse ? IDLE_MS : IDLE_TOUCH_MS);
   }
 
   function onScreenPointerLeave(event: PointerEvent) {
     // Touch pointers "leave" after every tap.
-    if (event.pointerType !== 'mouse') return;
-    clearTimeout(idleTimer);
-    pointerActive = false;
+    if (event.pointerType === 'mouse') hideControls();
   }
+
+  $effect(() => {
+    if (!ownControls) return;
+    // The pointer left the window.
+    const root = document.documentElement;
+    root.addEventListener('mouseleave', hideControls);
+    return () => root.removeEventListener('mouseleave', hideControls);
+  });
 
   $effect(() => () => clearTimeout(idleTimer));
 
@@ -146,10 +164,14 @@
   /** Notices the "Why won't my torrent play?" help explains. */
   const PEER_NOTICES: readonly PlaybackErrorCode[] = ['no-peers', 'stalled'];
 
+  /** A Space keydown we handled: its keyup must not also activate a focused (native) control. */
+  let spaceHandled = false;
+
   function onKeyDown(event: KeyboardEvent) {
     const v = video;
     if (!v || event.defaultPrevented || controller.phase === 'idle' || controller.phase === 'error')
       return;
+    if (ownControls) wake();
     // A key typed in a dialog (relay settings, help) is not meant for the player.
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (target?.closest('dialog')) return;
@@ -163,8 +185,21 @@
       inPlayerControls: onControls(target),
     });
     if (!action) return;
+    // Handled here only: the window's capture phase runs before the focused element's own
+    // listeners (a native controls' play button, our bar's buttons), which would toggle again.
     event.preventDefault();
+    event.stopPropagation();
+    if (action.type === 'toggle-play') spaceHandled = true;
+    if (event.repeat && !repeats(action)) return;
     run(action, v);
+  }
+
+  function onKeyUp(event: KeyboardEvent) {
+    if (!spaceHandled || (event.key !== ' ' && event.key !== 'Spacebar')) return;
+    spaceHandled = false;
+    // A focused button (ours, or the native controls' play button) acts on Space's keyup.
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   function run(action: ShortcutAction, v: HTMLVideoElement) {
@@ -198,7 +233,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeyDown} />
+<svelte:window onkeydowncapture={onKeyDown} onkeyupcapture={onKeyUp} />
 
 <section
   class="player"
@@ -217,8 +252,8 @@
     class:lift={ownControls && fullscreen && controlsShown}
     bind:this={screen}
     data-testid="screen"
-    onpointermove={ownControls ? wake : undefined}
-    onpointerdown={ownControls ? onScreenPointerDown : undefined}
+    onpointermove={ownControls ? onScreenPointer : undefined}
+    onpointerdown={ownControls ? onScreenPointer : undefined}
     onpointerleave={ownControls ? onScreenPointerLeave : undefined}
     role="presentation"
   >
