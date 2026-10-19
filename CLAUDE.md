@@ -203,7 +203,9 @@ docs/decisions/                ADRs
   `stats-buffer` with `data-ahead`/`data-target`/`data-quota-hits` for real quotas too).
   `QuotaExceededError` is back-pressure, never a failure (ADR 0003): keep every append going
   through `appendChunk`, which sends an init segment alone and the rest in pieces (WebKit's
-  pre-init 5 % was the iPad failure).
+  pre-init 5 % was the iPad failure). Any pipeline's `relieve()` may `remove()` on another's
+  SourceBuffer at any await, so every `remove`/`abort`/`changeType`/`timestampOffset` goes through
+  `whenIdle` (`resetFrom`, `startAt` in `append.ts`): check idle and stale, then write in one task.
 - Icons live in `public/` (`favicon.svg` = the header mark; PNGs rendered by `scripts/make-icons.mjs`),
   linked from `index.html` with root paths that Vite rewrites to the relative base.
 - **Files.** `#magnet=<encoded>&file=<n>`: `n` is the index into `torrent.files` of the file playing

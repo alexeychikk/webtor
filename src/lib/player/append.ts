@@ -130,6 +130,57 @@ export async function whenIdle(sb: AppendBuffer, op: () => void): Promise<void> 
   await settled(sb);
 }
 
+/** The rest of `SourceBuffer` a (re)start uses. MSE refuses all three while it is `updating`. */
+export interface RestartBuffer extends AppendBuffer {
+  timestampOffset: number;
+  changeType(type: string): void;
+  abort(): void;
+}
+
+/**
+ * Drops what `sb` holds from `from` on, then resets its parser (`abort`, only when `open()`: the
+ * MediaSource is `open`). Another pipeline's `relieve()` may start a `remove()` on `sb` at any await,
+ * and `remove`/`abort` throw InvalidStateError while it runs: each call waits for idle in its task.
+ */
+export async function resetFrom(
+  sb: RestartBuffer,
+  from: number,
+  stale: () => boolean,
+  open: () => boolean,
+): Promise<void> {
+  await whenIdle(sb, () => {
+    if (stale()) return;
+    // remove() also re-opens an `ended` MediaSource, after which abort() is allowed.
+    const { buffered } = sb;
+    if (buffered.length > 0 && buffered.end(buffered.length - 1) > from) sb.remove(from, Infinity);
+  });
+  await whenIdle(sb, () => {
+    if (!stale() && open()) sb.abort();
+  });
+}
+
+/**
+ * Points `sb` at a new run: `changeType(mime)` when `mime` is given, then `timestampOffset`. Both
+ * throw InvalidStateError while `sb` is updating, which another pipeline's `relieve()` (a `remove()`)
+ * can make it at any await of the restart. So they wait for idle and run in that same task.
+ * Returns false, writing nothing, when `stale()` by then.
+ */
+export async function startAt(
+  sb: RestartBuffer,
+  offset: number,
+  stale: () => boolean,
+  mime?: string,
+): Promise<boolean> {
+  let ok = false;
+  await whenIdle(sb, () => {
+    if (stale()) return;
+    if (mime !== undefined) sb.changeType(mime);
+    sb.timestampOffset = offset;
+    ok = true;
+  });
+  return ok;
+}
+
 /** True when the pipeline may append now (back-pressure, quota cap, MMS streaming). */
 export function mayAppend(ahead: number, target: number, cap: number, streaming: boolean): boolean {
   if (ahead < Math.min(MIN_AHEAD_S, target)) return true;
