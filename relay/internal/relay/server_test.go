@@ -319,6 +319,7 @@ func TestCORSPreflight(t *testing.T) {
 	allowed := strings.ToLower(hd.Get("Access-Control-Allow-Headers"))
 	if res.StatusCode != http.StatusNoContent || hd.Get("Access-Control-Allow-Origin") != "*" ||
 		!strings.Contains(hd.Get("Access-Control-Allow-Methods"), "GET") ||
+		!strings.Contains(hd.Get("Access-Control-Allow-Methods"), "POST") ||
 		hd.Get("Access-Control-Allow-Private-Network") != "true" {
 		t.Fatalf("preflight: %d %v", res.StatusCode, hd)
 	}
@@ -462,4 +463,59 @@ func TestStallNudge(t *testing.T) {
 
 func nudges(h *harness) int {
 	return strings.Count(h.logs.String(), "re-requesting pieces")
+}
+
+// TestPostMetainfo: a .torrent POSTed to the relay adds the torrent with its info at once (no swarm
+// metadata needed); a later GET with x.pe= merges in the peer, and the data then streams.
+func TestPostMetainfo(t *testing.T) {
+	seed, content := seedFile(t, "movie.avi", 1<<20+777)
+	h := newHarness(t, Options{MetadataTimeout: 20 * time.Second})
+	base := h.torrentURL(seed.InfoHash)
+	var file bytes.Buffer
+	if err := seed.MetaInfo.Write(&file); err != nil {
+		t.Fatal(err)
+	}
+	post := func(url string, body []byte) *http.Response {
+		t.Helper()
+		res, err := http.Post(url, "", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { res.Body.Close() })
+		return res
+	}
+
+	if res := post(base+"/metainfo", []byte("not bencoded")); res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("garbage: %d, want 400", res.StatusCode)
+	}
+	if res := post(h.torrentURL(metainfo.Hash{1})+"/metainfo", file.Bytes()); res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("other info hash: %d, want 400", res.StatusCode)
+	}
+	if h.srv.Torrents() != 0 {
+		t.Fatalf("rejected POSTs added %d torrents", h.srv.Torrents())
+	}
+
+	res := post(base+"/metainfo", file.Bytes())
+	mi, err := metainfo.Load(res.Body)
+	if res.StatusCode != 200 || err != nil || mi.HashInfoBytes() != seed.InfoHash {
+		t.Fatalf("POST metainfo: %d %v", res.StatusCode, err)
+	}
+	if res.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("POST without CORS headers: %v", res.Header)
+	}
+
+	res = get(t, base+"/metainfo?x.pe="+seed.Addr, "")
+	res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("GET metainfo after POST: %d", res.StatusCode)
+	}
+	res = get(t, base+"/webseed/", "bytes=1000-1999")
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusPartialContent || !bytes.Equal(body, content[1000:2000]) {
+		t.Fatalf("range: status %d, %d bytes", res.StatusCode, len(body))
+	}
+	if h.srv.Torrents() != 1 {
+		t.Fatalf("torrents: %d, want 1", h.srv.Torrents())
+	}
 }

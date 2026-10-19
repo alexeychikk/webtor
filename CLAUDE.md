@@ -84,16 +84,22 @@ responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity"), `--print-cloud-i
 
 `webtor-relay` (`relay/`) is versioned on its own: tags `relay-v<semver>`. From a clean, pushed
 `main`, run `scripts/release-relay.sh <version>`. It builds the web app and embeds it
-(`relay/internal/webapp/dist`, placeholder restored on exit), cross-compiles `CGO_ENABLED=0` binaries
-for linux/darwin amd64+arm64 and windows/amd64 into `relay/dist/` with the version in
-`-ldflags` (checked with `-version`), writes `SHA256SUMS`, and runs `gh release create relay-v<version>
---latest`. Asset names carry no version, so `releases/latest/download/<name>` links (relay README,
-the app's relay dialog → `releases/latest`) stay valid. Relay releases must stay the repository's
-only "latest" releases. It then pushes `ghcr.io/alexeychikk/webtor-relay:<version>` and `:latest`
-(linux amd64+arm64) with `ko` (`relay/.ko.yaml`; no Docker daemon). `relay/Dockerfile` builds the
-same image with Docker (context: repository root). Container builds set `main.defaultListen`
-(`0.0.0.0:7881`) and `main.defaultDataDir` (`/home/nonroot/webtor-relay`) via `-ldflags`; keep the
-two in step. The image push needs a token that can write packages (`ko login ghcr.io`); if it fails
+(`relay/internal/webapp/dist`, placeholder restored on exit), cross-compiles `CGO_ENABLED=0`
+binaries for linux/darwin amd64+arm64 and windows/amd64 into `relay/dist/` with the version in
+`-ldflags` (checked with `-version`), writes `SHA256SUMS`, and runs `gh release create
+relay-v<version> --latest`. Asset names carry no version, so `releases/latest/download/<name>` links
+(relay README, the app's relay dialog → `releases/latest`) stay valid. Relay releases must stay the
+repository's only "latest" releases. It then pushes the base
+`ghcr.io/alexeychikk/webtor-relay-base:<ffmpeg version>` (distroless + the static ffmpeg pinned in
+`scripts/relay-ffmpeg.sh`, one layer per arch, joined with `crane`) and, on it,
+`ghcr.io/alexeychikk/webtor-relay:<version>` and `:latest` (linux amd64+arm64) with `ko`
+(`relay/.ko.yaml`; no Docker daemon), then smoke-tests the exported image (`transcode.available`).
+`scripts/release-relay.sh <version> image --dry-run` does all that against a throwaway loopback
+registry (no login). `relay/Dockerfile` builds the same image with Docker (context: repository
+root). ffmpeg is GPL: it ships as a separate executable with `/licenses/ffmpeg/`, never in the
+release binaries. Container builds set `main.defaultListen` (`0.0.0.0:7881`) and
+`main.defaultDataDir` (`/home/nonroot/webtor-relay`) via `-ldflags`; keep the two in step. The image
+push needs a token that can write packages (`ko login ghcr.io`, which crane reads too); if it fails
 after the binaries are out, run the `image` step alone. Re-releasing a version: `gh release delete
 relay-v<version> --cleanup-tag` first.
 
@@ -112,6 +118,7 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   PlayerControls.svelte        control layer over the picture: scrims, title strip, seek bar (track, downloaded,
                                buffered, played; hover time), play, volume, time, the one fullscreen icon
   PlayerCentre.svelte centre.ts   centre of the picture: play/pause/replay circle, toggle flash, loading/buffering
@@ -261,9 +268,20 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,
 urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer count. No relay set =
   the original path, untouched. Never log or show the relay URL: the token is a password.
-- Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns a magnet that only a TCP seeder on
-  loopback has (no `xs=`/`ws=`) and the URL of a webtor-relay that reaches it
-  (`e2e/support/relay-stack.mjs`, builds both Go commands). Relay test hooks: `relay-button`,
-  `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`.
+- Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns magnets that only a TCP seeder on
+  loopback has (no `xs=`/`ws=`): `magnet` (sample.mkv), `aviMagnet` (avi-xvid-ac3.avi), plus
+  `relayUrl` (a webtor-relay that reaches it) and `noTranscodeRelayUrl` (same, `-no-transcode`)
+  (`e2e/support/relay-stack.mjs`, builds both Go commands). The relays find ffmpeg through
+  `WEBTOR_RELAY_FFMPEG` or `PATH`; without it the conversion spec skips. Relay test hooks:
+  `relay-button`, `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`,
+  `relay-transcode` (`data-available`).
+- **Relay video conversion (ADR 0007 §2).** An AVI whose video codec is null (DivX/Xvid) plays
+  only with a relay whose `/v1/info` has `transcode.available`: `MsePlayer`'s video pipeline then
+  streams the relay's `transcode` fMP4 into the video SourceBuffer (`remote-video.ts`), and audio
+  and subtitles stay local. A seek aborts the fetch and requests `?start=t` (element time,
+  `timestampOffset` from `appendOffset`, no keyframe lookup). An opened .torrent is POSTed to the
+  relay's `metainfo` first. A transcode 404 "torrent not added" (relay restart, idle drop) registers
+  the torrent again (magnet GET / .torrent POST) and retries once. `relay-transcode-slow` counts its
+  5 s warm-up from the relay's answer, not the request (headers wait for ffmpeg's first bytes).
 - Web seeds need CORS that allows the `Range` and `Cache-Control` request headers (WebTorrent sends
   both).

@@ -2,7 +2,8 @@
 # webtor-relay-setup: runs as root on every boot of the Oracle Cloud VM (webtor-relay-setup.service),
 # before webtor-relay and Caddy. scripts/deploy-relay-oci.sh embeds it in the instance's cloud-init.
 # Idempotent: opens the firewall ports, works out the host name, writes the Caddyfile and the relay's
-# public URL, and installs the latest webtor-relay release (checked against SHA256SUMS).
+# public URL, sets video conversion for this VM's size, and installs the latest webtor-relay release
+# (checked against SHA256SUMS).
 # Reads /etc/webtor-relay/deploy.conf: RELAY_REPO (owner/name), RELAY_HOST (empty = <ip>.sslip.io).
 set -euo pipefail
 
@@ -81,6 +82,28 @@ CADDY
   fi
 }
 
+# Video conversion (ffmpeg, ADR 0007 §3) for what this VM can do in realtime. Off below 2 GB of
+# memory: the E2.1.Micro fallback (1 GB, 1/8 OCPU baseline; it shows 2 vCPUs, so the CPU count can't
+# tell it apart from the 1-OCPU A1, which shows 1). Below 4 CPUs libx264 runs a faster preset.
+# Written on every boot, so a resized VM gets the setting that fits it.
+write_transcode_config() {
+  local cpus mem_mb setting
+  cpus=$(nproc)
+  mem_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  if ((mem_mb < 2048)); then
+    setting=WEBTOR_RELAY_NO_TRANSCODE=1
+    log "video conversion off: ${mem_mb} MB of memory is too little"
+  elif ((cpus < 4)); then
+    setting=WEBTOR_RELAY_TRANSCODE_PRESET=superfast
+    log "video conversion with libx264 preset superfast ($cpus CPUs)"
+  else
+    setting=
+    log "video conversion with the default preset ($cpus CPUs)"
+  fi
+  printf '%s\n' "$setting" >"$CONF_DIR/transcode.env.new"
+  mv "$CONF_DIR/transcode.env.new" "$CONF_DIR/transcode.env"
+}
+
 install_latest() {
   local arch asset base tmp want have
   arch=$(dpkg --print-architecture) # arm64 (VM.Standard.A1.Flex) or amd64 (VM.Standard.E2.1.Micro)
@@ -126,5 +149,6 @@ if [[ -z $host ]]; then
   host=${ip//./-}.sslip.io
 fi
 write_proxy_config "$host"
+write_transcode_config
 install_latest
 log "relay host: $host"

@@ -1,5 +1,7 @@
-# webtor-relay image: the web app embedded, distroless static, non-root. The published image
-# (ghcr.io/alexeychikk/webtor-relay) is built by ko from relay/.ko.yaml with the same settings.
+# webtor-relay image: the web app embedded, distroless static, non-root, with a static ffmpeg for
+# video conversion (licence and source in /licenses/ffmpeg/). The published image
+# (ghcr.io/alexeychikk/webtor-relay) is built by ko from relay/.ko.yaml with the same settings, on a
+# base image holding the same ffmpeg (scripts/release-relay.sh).
 # Build from the repository root (the web app is part of the image):
 #   docker build -f relay/Dockerfile --build-arg VERSION=0.1.0 -t webtor-relay .
 #   docker run -d -p 7881:7881 -p 42069:42069 -p 42069:42069/udp -v webtor-relay:/home/nonroot webtor-relay
@@ -28,7 +30,18 @@ RUN CGO_ENABLED=0 go build -trimpath -o /webtor-relay -ldflags "-s -w \
       -X main.defaultDataDir=/home/nonroot/webtor-relay" \
     ./cmd/webtor-relay
 
+# Static ffmpeg with libx264, pinned by version and checksum in scripts/relay-ffmpeg.sh. A separate
+# executable the relay runs (GPL, not linked). TARGETARCH is set by BuildKit (docker buildx).
+FROM debian:12-slim AS ffmpeg
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/relay-ffmpeg.sh /usr/local/bin/relay-ffmpeg
+RUN relay-ffmpeg "${TARGETARCH:-$(dpkg --print-architecture)}" /out
+
 FROM gcr.io/distroless/static-debian12:nonroot
+# /usr/local/bin/ffmpeg (on PATH) and /licenses/ffmpeg/.
+COPY --from=ffmpeg /out/ /
 COPY --from=relay /webtor-relay /webtor-relay
 # 7881: HTTP (put HTTPS in front, see README). 42069: BitTorrent peers, TCP and uTP (UDP).
 EXPOSE 7881 42069/tcp 42069/udp
