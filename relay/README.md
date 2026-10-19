@@ -36,6 +36,20 @@ install; `SHA256SUMS` has the checksums):
 Keep the window open while you watch; Ctrl-C stops it. From source: `go run ./cmd/webtor-relay`
 in `relay/`. `-version` prints the version.
 
+**Video conversion** (DivX/Xvid AVIs, which browsers can't decode) needs
+[ffmpeg](https://ffmpeg.org/) with libx264, which the binary doesn't include. Everything else works
+without it. Install it, then restart the relay; it prints `Video conversion: on (ffmpeg …)`:
+
+- **Windows:** `winget install ffmpeg` (or a "full"/"essentials" build from
+  [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)). Opening a new window picks up the new `PATH`;
+  `ffmpeg.exe` next to the relay's `.exe` works too.
+- **macOS:** `brew install ffmpeg`.
+- **Linux:** `sudo apt install ffmpeg` (Debian, Ubuntu), `sudo pacman -S ffmpeg` (Arch). On Fedora,
+  take ffmpeg from RPM Fusion: Fedora's own `ffmpeg-free` has no libx264. A static build
+  ([johnvansickle.com](https://johnvansickle.com/ffmpeg/)) works anywhere.
+
+The relay looks for it with `-ffmpeg <path>`, then on `PATH`, then next to its own binary.
+
 It prints three links:
 
 - **Open** `http://127.0.0.1:7881/#relay=…`: the app served by the relay itself, already
@@ -101,6 +115,11 @@ systemd service on `127.0.0.1:7881`, and Caddy gets a Let's Encrypt certificate 
 
 - **Update:** run `deploy` again. It reuses everything and reboots the VM, which installs the latest
   release. A new `RELAY_TOKEN` or SSH key applies only to a new VM: run `destroy`, then `deploy`.
+- **Video conversion:** the VM installs Ubuntu's `ffmpeg` (with libx264). On the A1 VM it is on,
+  with libx264's faster `superfast` preset below 4 CPUs (the default A1 VM has 1). On the 1 GB
+  `E2.1.Micro` fallback it is off: too little memory and CPU to convert in realtime. A VM created
+  before video conversion existed has no ffmpeg: run `destroy`, then `deploy`, to get it (`deploy`
+  alone only updates the relay, and says so).
 - **Your own domain:** add a repository _variable_ `RELAY_HOST` (e.g. `relay.example.com`) before
   the VM is created (or `destroy` first). The run prints the VM's IP: point the name's DNS A record
   at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it.
@@ -121,7 +140,8 @@ example Oracle Cloud's Always Free tier (an ARM64 VM; the image is built for `li
 that forbid BitTorrent (see ADR 0006).
 
 The image `ghcr.io/alexeychikk/webtor-relay` (tags `latest` and the version) is distroless and runs
-as a non-root user. It listens on `0.0.0.0:7881` and keeps its token in
+as a non-root user. It includes a static ffmpeg with libx264, so video conversion is on (see
+[ffmpeg's licence](#ffmpeg-licence)); `-no-transcode` turns it off, e.g. on a single small CPU. It listens on `0.0.0.0:7881` and keeps its token in
 `/home/nonroot/webtor-relay`, so mount a volume at `/home/nonroot` to keep the relay URL across
 restarts. Open the peer port in the VM's firewall (on Oracle Cloud also in the subnet's security
 list): `42069/tcp` and `42069/udp`, plus `80` and `443` for Caddy.
@@ -149,6 +169,16 @@ repository root.
 
 The server's IP address is what swarm peers and trackers see, and its provider's terms apply to
 what you download through it.
+
+### ffmpeg licence
+
+The container image ships ffmpeg 7.0.2 as a static build by John Van Sickle
+([johnvansickle.com/ffmpeg](https://johnvansickle.com/ffmpeg/)), which includes libx264 and is
+licensed under the **GNU GPL version 3**. It is a separate program that the relay starts as a child
+process; webtor-relay doesn't link to it. The image holds its licence, its library versions and
+where its exact source is in `/licenses/ffmpeg/` (`GPLv3.txt`, `readme.txt`, `SOURCE.txt`; read them
+with `docker cp webtor-relay:/licenses/ffmpeg .`). The pinned version and checksums are in
+[`scripts/relay-ffmpeg.sh`](../scripts/relay-ffmpeg.sh). The release binaries contain no ffmpeg.
 
 ## Behaviour
 
@@ -178,8 +208,8 @@ what you download through it.
 index>?start=<seconds>` streams fragmented MP4 (H.264 High, CRF 23, keyframe every 2 s, no audio:
   the browser handles audio and subtitles itself) starting at `start`. The relay looks for ffmpeg at
   `-ffmpeg`, then on `PATH`, then next to its own binary, and prints `Video conversion: on (…)` or
-  `off` at startup. Install it with `winget install ffmpeg`, `brew install ffmpeg` or
-  `apt install ffmpeg`, then restart the relay. Video taller than `-transcode-max-height` is scaled
+  `off` at startup (installing it: [Run on your computer](#run-on-your-computer); the container image
+  and the Oracle Cloud VM come with it). Video taller than `-transcode-max-height` is scaled
   down (never up). At most `-max-transcodes` conversions run at once: a request for the same file
   (a seek) replaces its conversion, one for another file gets 429 `{"error": "transcode-busy",
 "maxTranscodes": N}`. Without ffmpeg it answers 503 `transcode-unavailable`, and 422

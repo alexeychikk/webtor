@@ -138,11 +138,13 @@ render_cloud_init() {
   cat <<EOF
 #cloud-config
 # webtor-relay on Oracle Cloud, rendered by scripts/deploy-relay-oci.sh. webtor-relay-setup runs on
-# every boot: firewall ports, host name, Caddyfile, latest release. A reboot updates the relay.
+# every boot: firewall ports, host name, Caddyfile, video conversion settings, latest release. A
+# reboot updates the relay. ffmpeg (Ubuntu's, with libx264) is for the relay's video conversion.
 package_update: true
 packages:
   - caddy
   - curl
+  - ffmpeg
 write_files:
   - path: /etc/webtor-relay/deploy.conf
     permissions: "0644"
@@ -631,8 +633,9 @@ deploy() {
     local tag
     tag=$(oci_ compute instance get --instance-id "$INSTANCE_ID" | jq -r '.data["freeform-tags"].config // empty')
     if [[ $tag != "$config_tag" ]]; then
-      log "Note: RELAY_TOKEN, RELAY_HOST, OCI_SSH_PUBLIC_KEY or the VM setup changed since this instance"
-      log "was created. Those apply only to a new instance: run destroy, then deploy, to apply them."
+      log "Note: RELAY_TOKEN, RELAY_HOST, OCI_SSH_PUBLIC_KEY or the VM setup (e.g. ffmpeg for video"
+      log "conversion) changed since this instance was created. Those apply only to a new instance:"
+      log "run destroy, then deploy, to apply them."
     fi
     restart_instance "$INSTANCE_ID"
   else

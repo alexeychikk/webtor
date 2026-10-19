@@ -1,7 +1,10 @@
 # Container image built with ko (no Docker daemon needed): scripts/release-relay.sh <version> image.
 # Same image as relay/Dockerfile: distroless static, non-root (65532), listens on 0.0.0.0:7881 and
 # keeps its data (token, open torrents) in /home/nonroot/webtor-relay; mount a volume at /home/nonroot.
-defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+# The base is gcr.io/distroless/static-debian12:nonroot plus the static ffmpeg of
+# scripts/relay-ffmpeg.sh (tag = its ffmpeg version), built by scripts/release-relay.sh with crane;
+# a release builds on the base it has just pushed (KO_DEFAULTBASEIMAGE). Keep the tag in step.
+defaultBaseImage: ghcr.io/alexeychikk/webtor-relay-base:7.0.2
 defaultPlatforms:
   - linux/amd64
   - linux/arm64
