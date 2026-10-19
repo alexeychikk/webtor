@@ -13,7 +13,8 @@ describe('classifyFile', () => {
   it('knows playable, unsupported and non-video files', () => {
     expect(classifyFile('Movie.MKV')).toBe('playable');
     expect(classifyFile('clip.mp4')).toBe('playable');
-    expect(classifyFile('old.avi')).toBe('unsupported');
+    expect(classifyFile('old.avi')).toBe('playable');
+    expect(classifyFile('old.wmv')).toBe('unsupported');
     expect(classifyFile('subs.srt')).toBe('other');
     expect(classifyFile('README')).toBe('other');
   });
@@ -21,21 +22,21 @@ describe('classifyFile', () => {
 
 describe('pickVideoFile', () => {
   it('picks the largest playable video', () => {
-    const pick = pickVideoFile([f('sample.mkv', 10), f('movie.mkv', 900), f('huge.avi', 5000)]);
+    const pick = pickVideoFile([f('sample.mkv', 10), f('movie.mkv', 900), f('huge.wmv', 5000)]);
     expect(pick).toEqual({
       ok: true,
       file: { index: 1, name: 'movie.mkv', path: 't/movie.mkv', length: 900 },
     });
   });
   it('honours a preferred playable file and ignores an unplayable or missing one', () => {
-    const files = [f('e1.mkv', 900), f('e2.mp4', 10), f('x.avi', 5000), f('n.txt', 1)];
+    const files = [f('e1.mkv', 900), f('e2.mp4', 10), f('x.wmv', 5000), f('n.txt', 1)];
     expect(pickVideoFile(files, 1)).toMatchObject({ ok: true, file: { index: 1 } });
     expect(pickVideoFile(files, 2)).toMatchObject({ ok: true, file: { index: 0 } });
     expect(pickVideoFile(files, 3)).toMatchObject({ ok: true, file: { index: 0 } });
     expect(pickVideoFile(files, 9)).toMatchObject({ ok: true, file: { index: 0 } });
   });
   it('reports an unsupported container when only those exist', () => {
-    expect(pickVideoFile([f('a.avi', 1), f('a.nfo', 1)])).toEqual({
+    expect(pickVideoFile([f('a.wmv', 1), f('a.nfo', 1)])).toEqual({
       ok: false,
       code: 'unsupported-container',
     });
@@ -47,11 +48,11 @@ describe('pickVideoFile', () => {
 
 describe('listVideoFiles', () => {
   it('lists playable and unsupported videos in natural path order, keeping torrent indexes', () => {
-    const files = [f('E10.mkv', 3), f('notes.txt', 1), f('E2.mp4', 2), f('extra.avi', 9)];
+    const files = [f('E10.mkv', 3), f('notes.txt', 1), f('E2.mp4', 2), f('extra.wmv', 9)];
     expect(listVideoFiles(files).map((e) => [e.index, e.name, e.kind])).toEqual([
       [2, 'E2.mp4', 'playable'],
       [0, 'E10.mkv', 'playable'],
-      [3, 'extra.avi', 'unsupported'],
+      [3, 'extra.wmv', 'unsupported'],
     ]);
   });
 });

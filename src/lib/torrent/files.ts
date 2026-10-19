@@ -1,8 +1,9 @@
 import type { SubtitleFileEntry, VideoFileEntry } from '../player/types';
 
-/** Containers Mediabunny demuxes (docs/decisions/0003). */
+/** Containers Mediabunny demuxes (docs/decisions/0003), plus AVI with our demuxer (0007). */
 const PLAYABLE_VIDEO_EXTENSIONS = new Set([
   'mkv',
+  'avi',
   'webm',
   'mp4',
   'm4v',
@@ -12,7 +13,7 @@ const PLAYABLE_VIDEO_EXTENSIONS = new Set([
   'mts',
 ]);
 /** Video containers we recognise but cannot open in the browser. */
-const UNSUPPORTED_VIDEO_EXTENSIONS = new Set(['avi', 'wmv', 'flv', 'mpg', 'mpeg', 'vob', 'rmvb']);
+const UNSUPPORTED_VIDEO_EXTENSIONS = new Set(['wmv', 'flv', 'mpg', 'mpeg', 'vob', 'rmvb']);
 
 export function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -40,7 +41,7 @@ export type VideoFilePick =
 
 /**
  * The file to play: `preferred` (an index into `files`, e.g. from `#file=`) when it is a playable
- * video, else the largest playable one. Tells "only AVI/WMV/…" apart from "no video at all".
+ * video, else the largest playable one. Tells "only WMV/FLV/…" apart from "no video at all".
  */
 export function pickVideoFile(
   files: readonly FileLike[],
@@ -70,7 +71,7 @@ export function pickVideoFile(
 }
 
 export interface VideoFileListEntry extends VideoFileEntry {
-  /** `unsupported` entries are listed greyed out (AVI, WMV, …). */
+  /** `unsupported` entries are listed greyed out (WMV, FLV, …). */
   kind: 'playable' | 'unsupported';
 }
 

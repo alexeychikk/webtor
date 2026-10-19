@@ -246,6 +246,8 @@
       {controller.error.message}
       {#if isRelayError(controller.error.code)}
         <button type="button" onclick={() => relaySettings.openDialog()}>Relay settings</button>
+      {:else if controller.error.code === 'video-needs-relay'}
+        <button type="button" onclick={() => relaySettings.openDialog()}>Set up a relay</button>
       {/if}
     </p>
   {/if}

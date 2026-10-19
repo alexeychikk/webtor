@@ -1,6 +1,6 @@
 # 0007 — AVI: our own demuxer inside Mediabunny, relay-side video conversion for DivX/Xvid
 
-Date: 2026-10-19 · Status: accepted (spike, implementation pending) · Extends 0003 and 0006
+Date: 2026-10-19 · Status: accepted (§1 in-browser AVI implemented; relay conversion pending) · Extends 0003 and 0006
 
 ## Context
 

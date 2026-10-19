@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { FIXTURE_BASE, fixtureMagnet } from './support/fixtures';
 
 // e2e/fixtures/multi-file: episode-1.ts (offset.ts, 10 s, smaller), episode-2.mkv (sample.mkv,
-// 12 s, largest), extras.avi (unsupported container) and readme.txt (not a video).
+// 12 s, largest), extras.wmv (unsupported container) and readme.txt (not a video).
 
 const video = (page: Page) => page.getByTestId('video');
 const currentTime = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.currentTime);
@@ -27,9 +27,9 @@ test('a multi-file torrent auto-picks the largest video and switches to another 
   await expect(files).toHaveText([
     /episode-1\.ts\s*325 kB/,
     /episode-2\.mkv\s*708 kB/,
-    /extras\.avi/,
+    /extras\.wmv/,
   ]);
-  await expect(fileButton(page, 'extras.avi')).toBeDisabled();
+  await expect(fileButton(page, 'extras.wmv')).toBeDisabled();
   await expect(fileButton(page, 'episode-2.mkv')).toHaveAttribute('aria-current', 'true');
   await expect(page.getByTestId('status')).toContainText('episode-2.mkv');
   const second = await fileIndex(page, 'episode-2.mkv');
@@ -57,7 +57,7 @@ test('a multi-file torrent auto-picks the largest video and switches to another 
 
 test('#file= in the hash selects that file on load', async ({ page }) => {
   const magnet = await fixtureMagnet('multi-file');
-  // Torrent file order: episode-1.ts, episode-2.mkv, extras.avi, readme.txt (sorted by path).
+  // Torrent file order: episode-1.ts, episode-2.mkv, extras.wmv, readme.txt (sorted by path).
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}&file=0`);
   await expect(page.getByTestId('status')).toContainText('episode-1.ts');
   await expect(fileButton(page, 'episode-1.ts')).toHaveAttribute('aria-current', 'true');
