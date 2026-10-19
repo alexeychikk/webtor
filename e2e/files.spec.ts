@@ -108,15 +108,25 @@ test('an opened .torrent file plays and its magnet goes into the hash', async ({
 test('a .torrent file dropped on the page plays', async ({ page }) => {
   await page.goto('./');
   const bytes = [...(await torrentBytes('multi-file'))];
-  await page.locator('main').evaluate((main, bytes) => {
-    const data = new DataTransfer();
-    data.items.add(new File([new Uint8Array(bytes)], 'multi-file.torrent'));
-    for (const type of ['dragenter', 'dragover', 'drop']) {
-      main.dispatchEvent(
-        new DragEvent(type, { dataTransfer: data, bubbles: true, cancelable: true }),
-      );
-    }
-  }, bytes);
+  const drag = (types: string[]) =>
+    page.getByRole('heading', { name: 'webtor' }).evaluate(
+      (el, { bytes, types }) => {
+        const data = new DataTransfer();
+        data.items.add(new File([new Uint8Array(bytes)], 'multi-file.torrent'));
+        for (const type of types) {
+          el.dispatchEvent(
+            new DragEvent(type, { dataTransfer: data, bubbles: true, cancelable: true }),
+          );
+        }
+      },
+      { bytes, types },
+    );
+  // Anywhere on the page (here the empty page's wordmark): the page drop overlay.
+  await drag(['dragenter', 'dragover']);
+  await expect(page.getByTestId('page-drop')).toBeVisible();
+  await expect(page.getByTestId('page-drop')).toContainText('Drop a .torrent to play');
+  await drag(['drop']);
+  await expect(page.getByTestId('page-drop')).toHaveCount(0);
   await expect(page.getByTestId('status')).toContainText('episode-2.mkv');
   await openFiles(page);
   await expect(page.getByTestId('file')).toHaveCount(3);
@@ -131,7 +141,11 @@ test('a file that is not a torrent shows a clear error', async ({ page }) => {
     mimeType: 'application/x-bittorrent',
     buffer: Buffer.from('this is not bencoded'),
   });
-  await expect(page.getByTestId('error')).toHaveAttribute('data-code', 'invalid-input');
+  const error = page.getByTestId('error');
+  await expect(error).toHaveAttribute('data-code', 'invalid-input');
+  await expect(error).toContainText('Not a torrent');
+  // Retrying the same bytes can't help.
+  await expect(error.getByTestId('retry')).toHaveCount(0);
 });
 
 test('switching files drops the embedded subtitles of the previous file', async ({ page }) => {

@@ -120,7 +120,9 @@ test('tracks the browser cannot play or convert are disabled, and the video play
   await expect(options.nth(0)).toContainText('Unavailable:');
   await closeMenu(page);
   await expect(video(page)).toHaveAttribute('data-audio-codec', '');
-  await expect(page.locator('[data-testid="notice"][data-code="no-playable-audio"]')).toBeVisible();
+  await expect(
+    page.locator('[data-testid="notice"][data-code="no-playable-audio"]'),
+  ).toBeAttached();
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
 
@@ -147,6 +149,6 @@ test('a converter that fails to load falls back to another track instead of fail
   await expect(video(page)).toHaveAttribute('data-audio-codec', 'aac');
   await expect(
     page.locator('[data-testid="notice"][data-code="audio-convert-failed"]'),
-  ).toBeVisible();
+  ).toBeAttached();
   await expect(page.getByTestId('error')).toHaveCount(0);
 });

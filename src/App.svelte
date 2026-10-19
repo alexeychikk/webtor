@@ -344,7 +344,7 @@
     height: 28px;
     border-radius: var(--radius-sm);
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
   }
   .brand {
     flex: none;

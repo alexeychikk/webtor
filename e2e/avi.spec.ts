@@ -45,9 +45,20 @@ test('a DivX/Xvid AVI says it needs a relay and offers the relay settings', asyn
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   const error = page.getByTestId('error');
   await expect(error).toHaveAttribute('data-code', 'video-needs-relay', { timeout: 30_000 });
+  await expect(error).toContainText('Video needs a relay');
   await expect(error).toContainText('DivX/Xvid');
   await error.getByRole('button', { name: 'Set up a relay' }).click();
   await expect(page.getByTestId('relay-dialog')).toBeVisible();
+  await page.getByTestId('relay-dialog').getByRole('button', { name: 'Cancel' }).click();
+
+  // Retry loads the same file again: a new error card, for the same file.
+  await expect(page).toHaveURL(/&file=0$/);
+  await error.evaluate((el) => (el.dataset.stale = 'yes'));
+  await error.getByTestId('retry').click();
+  const fresh = page.locator('[data-testid="error"]:not([data-stale])');
+  await expect(fresh).toHaveAttribute('data-code', 'video-needs-relay', { timeout: 30_000 });
+  await expect(page.getByTestId('status')).toContainText('avi-xvid-ac3.avi');
+  await expect(page).toHaveURL(/&file=0$/);
 });
 
 test('an AVI without an index plays from 0, says seeking is limited, keeps seeks in range', async ({
@@ -57,7 +68,7 @@ test('an AVI without an index plays from 0, says seeking is limited, keeps seeks
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect(page.getByTestId('status')).toContainText('avi-h264-noidx.avi');
   const notice = page.locator('[data-testid="notice"][data-code="avi-no-index"]');
-  await expect(notice).toBeVisible({ timeout: 30_000 });
+  await expect(notice).toBeAttached({ timeout: 30_000 });
   await expect(notice).toContainText('seeking is limited');
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
   await expect(page.getByTestId('error')).toHaveCount(0);

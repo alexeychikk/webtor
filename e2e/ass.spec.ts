@@ -204,7 +204,7 @@ test('without container fullscreen (iOS), ASS is shown as plain text under our c
       value: () => v.setAttribute('data-entered', '1'),
     });
   });
-  await page.locator('h1').click();
+  await page.mouse.click(2, 2); // the page, outside the player
   await page.keyboard.press('f');
   await expect(video(page)).toHaveAttribute('data-entered', '1');
   await selectSubtitle(page, { label: 'Russian · ASS' });

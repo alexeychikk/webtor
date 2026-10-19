@@ -108,6 +108,16 @@ test('a subtitle file dropped on the player is decoded (windows-1251) and shown'
       },
       { name, bytes },
     );
+  // Dragging files over the player shows its own overlay, not the page's.
+  await page.getByTestId('video').evaluate((v) => {
+    const data = new DataTransfer();
+    data.items.add(new File(['x'], 'x.srt'));
+    for (const type of ['dragenter', 'dragover']) {
+      v.dispatchEvent(new DragEvent(type, { dataTransfer: data, bubbles: true, cancelable: true }));
+    }
+  });
+  await expect(page.getByTestId('drop-overlay')).toContainText('Drop subtitles or a .torrent');
+  await expect(page.getByTestId('page-drop')).toHaveCount(0);
   // "Привет мир" in windows-1251.
   const privetMir = [0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2, 0x20, 0xec, 0xe8, 0xf0];
   const srt = [...Buffer.from('1\n00:00:01,000 --> 00:00:04,000\n'), ...privetMir, 0x0a];
@@ -117,7 +127,14 @@ test('a subtitle file dropped on the player is decoded (windows-1251) and shown'
   await expect.poll(() => shownCues(page)).toEqual(['Привет мир']);
 
   await drop('notes.txt', [...Buffer.from('not subtitles')]);
-  await expect(page.locator('[data-testid="notice"][data-code="subtitle-failed"]')).toBeVisible();
+  // A toast (paused, so the controls and toasts show) naming the file; dismissed until the file
+  // changes.
+  const toast = page.locator('[data-testid="notice"][data-code="subtitle-failed"]');
+  await expect(toast).toBeVisible();
+  await expect(toast).toContainText('Subtitle file unreadable');
+  await expect(toast).toContainText('notes.txt');
+  await toast.getByTestId('notice-dismiss').click();
+  await expect(toast).toHaveCount(0);
   // The failed file changes nothing.
   await expect(page.getByTestId('subtitles')).toHaveAttribute('data-value', 'upload:1');
 });

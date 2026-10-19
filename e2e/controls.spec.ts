@@ -177,7 +177,7 @@ test('play/pause, seek, mute and volume on the control bar; the centre play butt
   await setRange(page, 'volume', 0.5);
   await expect.poll(() => prop(page, 'volume')).toBeCloseTo(0.5, 2);
   // ↑/↓ change the volume by 0.1.
-  await page.locator('h1').click();
+  await page.mouse.click(2, 2); // the page, outside the player
   await page.keyboard.press('ArrowDown');
   await expect.poll(() => prop(page, 'volume')).toBeCloseTo(0.4, 2);
   await page.keyboard.press('ArrowUp');
@@ -249,7 +249,7 @@ test('every icon button has an aria-label and our tooltip (with its key), never 
   await page.mouse.up();
 
   // Keyboard focus shows it at once; Esc hides it.
-  await page.locator('h1').click();
+  await page.mouse.click(2, 2); // the page, outside the player
   await page.getByTestId('mute').focus();
   await page.keyboard.press('Shift+Tab');
   await page.keyboard.press('Tab');
@@ -392,7 +392,7 @@ test('without any fullscreen, our controls stay and there is no fullscreen contr
   await expect(video(page)).not.toHaveAttribute('controls');
   await expect(page.getByTestId('controls')).toHaveCount(1);
   await expect(page.getByTestId('fullscreen')).toHaveCount(0);
-  await page.locator('h1').click();
+  await page.mouse.click(2, 2); // the page, outside the player
   await page.keyboard.press('f');
   await video(page).dblclick({ position: PICTURE });
   expect(await fullscreenTestId(page)).toBeNull();
@@ -411,7 +411,7 @@ test('one Space press toggles play/pause exactly once, with focus on the page, v
   page,
 }) => {
   await playSample(page);
-  await page.locator('h1').click();
+  await page.mouse.click(2, 2); // the page, outside the player
   await spaceToggles(page);
   await spaceToggles(page);
 

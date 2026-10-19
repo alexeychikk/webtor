@@ -49,14 +49,73 @@ test('"Why won\'t my torrent play?" explains WebRTC-only peers and leads to the 
   await expect(page.getByTestId('relay-dialog')).toBeVisible();
 });
 
-test('the no-peers notice links to the help', async ({ page }) => {
+test('the no-peers card links to the help and the relay, also from fullscreen', async ({
+  page,
+}) => {
   // Nobody has this torrent: the watchdog posts `no-peers` after 20 s.
   await page.goto(`./#magnet=${'0'.repeat(39)}1`);
   const notice = page.locator('[data-testid="notice"][data-code="no-peers"]');
   await expect(notice).toBeVisible({ timeout: 40_000 });
+  await expect(notice).toContainText('No browser peers yet');
+  const fullscreenId = () =>
+    page.evaluate(() => document.fullscreenElement?.getAttribute('data-testid') ?? null);
+
+  // Windowed: help.
   await notice.getByTestId('why-link').click();
-  await expect(page.getByTestId('why-dialog')).toBeVisible();
-  await expect(page.getByTestId('why-dialog')).toContainText('cannot serve browsers');
+  const help = page.getByTestId('why-dialog');
+  await expect(help).toBeVisible();
+  await expect(help).toContainText('cannot serve browsers');
+  await help.getByRole('button', { name: 'Close' }).click();
+  await expect(help).toBeHidden();
+
+  // Fullscreen: "Connect a relay" leaves fullscreen first, then opens the relay dialog.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('f');
+  await expect.poll(fullscreenId).toBe('screen');
+  await notice.getByRole('button', { name: 'Connect a relay' }).click();
+  await expect(page.getByTestId('relay-dialog')).toBeVisible();
+  await expect.poll(fullscreenId).toBeNull();
+  // Still searching under the card.
+  await expect(page.getByTestId('status')).toHaveAttribute('data-phase', 'connecting');
+});
+
+test('the empty page shows only the wordmark, tagline, input, relay and help', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('webtor');
+  await expect(page.getByText('Stream torrents right in your browser.')).toBeVisible();
+  await expect(page.getByTestId('relay-button')).toHaveAttribute('aria-label', 'Connect a relay');
+  await expect(page.getByTestId('why-button')).toBeVisible();
+  await expect(page.getByTestId('screen')).toBeHidden();
+  await expect(page.getByLabel('Open .torrent file')).toBeAttached();
+
+  // An invalid value: danger border and helper, nothing starts.
+  const field = page.getByLabel('Magnet link or info hash');
+  await field.fill('not a magnet');
+  await field.press('Enter');
+  await expect(page.getByText('Not a magnet link or info hash')).toBeVisible();
+  await expect(field).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByTestId('screen')).toBeHidden();
+  await field.fill('');
+  await expect(page.getByText('Not a magnet link or info hash')).toHaveCount(0);
+
+  // Pasting a magnet into the empty field plays it at once.
+  const magnet = await fixtureMagnet('sample.mkv');
+  await field.evaluate((el, text) => {
+    const data = new DataTransfer();
+    data.setData('text/plain', text);
+    el.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }),
+    );
+  }, magnet);
+  await expect(page.getByTestId('status')).toContainText('sample.mkv');
+  await expect(page).toHaveURL(/#magnet=/);
+  await expect(field).toHaveValue(magnet);
+
+  // The header wordmark goes back to the empty page.
+  await page.getByRole('link', { name: 'webtor' }).click();
+  await expect(page.getByTestId('screen')).toBeHidden();
+  await expect(page.getByText('Stream torrents right in your browser.')).toBeVisible();
+  expect(page.url()).not.toContain('#magnet');
 });
 
 test('the stats panel shows peers, speed and progress', async ({ page }) => {
@@ -143,7 +202,7 @@ test('keyboard shortcuts: space, arrows, m, c, f — and their help', async ({ p
   const prop = <K extends keyof HTMLVideoElement>(k: K) =>
     video(page).evaluate((v: HTMLVideoElement, k) => v[k as keyof HTMLVideoElement], k);
   // Focus is on the page, not a form control.
-  await page.locator('h1').click();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
   await page.keyboard.press('m');
   expect(await prop('muted')).toBe(true);
@@ -180,8 +239,13 @@ test('keyboard shortcuts: space, arrows, m, c, f — and their help', async ({ p
   await page.getByLabel('Magnet link or info hash').press('m');
   expect(await prop('muted')).toBe(false);
 
+  // `?` opens the help dialog scrolled to its keyboard shortcuts.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('?');
   const help = page.getByTestId('shortcuts-help');
-  await help.getByText('Keyboard shortcuts').click();
+  await expect(page.getByTestId('why-dialog')).toBeVisible();
+  await expect(help).toBeInViewport();
+  await expect(help.locator('kbd').first()).toHaveText('Space');
   await expect(help).toContainText('Space');
   await expect(help).toContainText('Fullscreen');
   await expect(help).toContainText('Next subtitle track');
@@ -218,4 +282,17 @@ test('fits a phone screen without horizontal scrolling', async ({ page }) => {
   await expect(page.getByTestId('files-panel')).toBeVisible();
   await inside('file-list');
   await expect(page.getByLabel('Magnet link or info hash')).toBeVisible();
+  for (const id of ['relay-button', 'why-button']) await inside(id);
+});
+
+test('the empty page fits a phone and `?` opens the shortcuts there too', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('./');
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+  await page.keyboard.press('?');
+  await expect(page.getByTestId('shortcuts-help')).toBeInViewport();
+  await expect(page.getByTestId('shortcuts-help')).toContainText('Next subtitle track');
 });
