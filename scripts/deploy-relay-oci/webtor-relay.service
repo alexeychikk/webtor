@@ -9,9 +9,11 @@ StartLimitIntervalSec=0
 [Service]
 User=webtor-relay
 Group=webtor-relay
-# WEBTOR_RELAY_TOKEN (from RELAY_TOKEN, mode 0600) and WEBTOR_RELAY_PUBLIC_URL (written by the setup).
+# WEBTOR_RELAY_TOKEN (from RELAY_TOKEN, mode 0600); WEBTOR_RELAY_PUBLIC_URL and the video
+# conversion settings for this VM's size (written by the setup on every boot).
 EnvironmentFile=/etc/webtor-relay/token.env
 EnvironmentFile=-/etc/webtor-relay/public.env
+EnvironmentFile=-/etc/webtor-relay/transcode.env
 ExecStart=/usr/local/bin/webtor-relay -listen 127.0.0.1:7881 -data-dir /var/lib/webtor-relay
 Restart=always
 RestartSec=10

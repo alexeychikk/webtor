@@ -159,15 +159,25 @@ checks for `libx264` and prints "video conversion: on (ffmpeg 7.x)" or "off: ins
 - Not bundled in the release assets: +50–80 MB per platform, no official static macOS arm64 build,
   and ffmpeg with libx264 is GPL, so redistributing it carries source-offer duties. The repository
   has no license file yet; that is the owner's call.
-- **Container image:** ships ffmpeg. `relay/Dockerfile` copies a pinned static ffmpeg (linux
-  amd64/arm64) into the distroless image. ko can't add per-arch files, so `release-relay.sh` first
-  builds `ghcr.io/alexeychikk/webtor-relay-base:<ffmpeg version>` with `crane` (pure Go, no Docker
-  daemon). It appends the static ffmpeg layer per platform to
-  `gcr.io/distroless/static-debian12:nonroot`, joins them in one index, and uses that as ko's
-  `defaultBaseImage`.
+- **Container image:** ships ffmpeg. `scripts/relay-ffmpeg.sh` pins one static build (John Van
+  Sickle's ffmpeg 7.0.2 with libx264, linux amd64/arm64, by sha256) and lays it out as
+  `/usr/local/bin/ffmpeg` (on distroless's `PATH`) plus `/licenses/ffmpeg/` (GPLv3 text, the
+  build's library versions, where the exact source is). `relay/Dockerfile` runs it in a build stage
+  and copies the result into the distroless image. ko can't add per-arch files, so
+  `release-relay.sh` first builds `ghcr.io/alexeychikk/webtor-relay-base:<ffmpeg version>` with
+  `crane` (pure Go, no Docker daemon). It appends that layer per platform to
+  `gcr.io/distroless/static-debian12:nonroot`, joins them in one index, and builds ko on it by
+  digest (`KO_DEFAULTBASEIMAGE`); `.ko.yaml`'s `defaultBaseImage` names the same tag. The base is
+  rebuilt on every image release, so distroless updates come along. `--dry-run` pushes both to a
+  throwaway `crane registry serve` on loopback and smoke-tests the exported image (its `PATH`, its
+  ffmpeg, `transcode.available`) without a container runtime.
 - **Oracle Cloud deploy:** cloud-init installs `ffmpeg` from Ubuntu's archive (6.1 with libx264).
-  On the 1/8-OCPU `E2.1.Micro` fallback shape, `setup.sh` sets `WEBTOR_RELAY_NO_TRANSCODE=1`
-  (`nproc` < 2): it can't convert in realtime. User-data can't change after launch, so existing
+  On the `E2.1.Micro` fallback (1 GB, 1/8 OCPU baseline) `setup.sh` sets
+  `WEBTOR_RELAY_NO_TRANSCODE=1`: it can't convert in realtime. The test is memory below 2 GB, not
+  `nproc` < 2 as first planned: the Micro shows 2 vCPUs, while the default 1-OCPU A1 shows 1 and
+  can convert. Below 4 CPUs it sets `WEBTOR_RELAY_TRANSCODE_PRESET=superfast` (720p: 4.7× realtime
+  on 4 cores, about 1.2× on one, against `veryfast`'s 3.4×). Both go to
+  `/etc/webtor-relay/transcode.env` on every boot. User-data can't change after launch, so existing
   VMs get ffmpeg only after destroy + deploy (the `config` tag already says so).
 
 ### Extending to WMV, FLV, MPG/VOB, RMVB (not planned)

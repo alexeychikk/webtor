@@ -41,7 +41,9 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   normal streaming causes (cancelled web seed reads, the nudge). Extend it rather than raising the
   level when the library gets noisier.
 - Release: `scripts/release-relay.sh` (root `CLAUDE.md`). Container defaults come from `-ldflags`
-  (`main.defaultListen`, `main.defaultDataDir`) in both `.ko.yaml` and `Dockerfile`.
+  (`main.defaultListen`, `main.defaultDataDir`) in both `.ko.yaml` and `Dockerfile`. The images'
+  ffmpeg is pinned in `scripts/relay-ffmpeg.sh` (both use it); its version is the base image tag in
+  `.ko.yaml` (the release script checks they match).
 - `scripts/bench-webtorrent.mjs` measures loopback throughput through WebTorrent in Chromium (see
   the root Playwright setup).
 - No GitHub Actions (root `CLAUDE.md`).
