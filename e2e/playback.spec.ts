@@ -116,3 +116,31 @@ test('a web seed that keeps failing shows the stalled message', async ({ page })
   // Still waiting for data: a spinner, never the play button.
   await expect(page.getByTestId('centre')).toHaveAttribute('data-state', /^(loading|buffering)$/);
 });
+
+test('a small SourceBuffer quota (Safari/iPad) is back-pressure: plays to the end and seeks', async ({
+  page,
+}) => {
+  // ~250 KB per SourceBuffer is about 5 s of the fixture's video: the 60 s target hits the quota.
+  await page.addInitScript(() => localStorage.setItem('webtor:sb-quota-bytes', '250000'));
+  const magnet = await fixtureMagnet('sample.mkv');
+  await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
+  const video = page.getByTestId('video');
+  const quotaHits = () =>
+    page.evaluate(() => (globalThis as { __webtorQuotaHits?: number }).__webtorQuotaHits ?? 0);
+  await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
+  await expect.poll(quotaHits, { timeout: 10_000 }).toBeGreaterThan(0);
+
+  await video.evaluate((v: HTMLVideoElement) => (v.currentTime = 8));
+  await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(9);
+  await expect
+    .poll(() => video.evaluate((v: HTMLVideoElement) => v.ended), { timeout: 20_000 })
+    .toBe(true);
+
+  // Back to the start (evicted under the quota): restarts there and plays on.
+  await video.evaluate((v: HTMLVideoElement) => {
+    v.currentTime = 0.5;
+    void v.play();
+  });
+  await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(5);
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});

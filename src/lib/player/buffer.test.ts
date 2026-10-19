@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { bufferedAhead, evictionRange, gapJumpTarget, isBuffered, toRanges } from './buffer';
+import {
+  bufferedAhead,
+  evictionRange,
+  gapJumpTarget,
+  isBuffered,
+  lastAtOrBefore,
+  quotaEvictionRange,
+  toRanges,
+} from './buffer';
 
 describe('bufferedAhead', () => {
   it('measures the contiguous range containing t', () => {
@@ -62,5 +70,27 @@ describe('gapJumpTarget', () => {
     expect(gapJumpTarget(toRanges([[5, 10]]), 0)).toBeNull();
     expect(gapJumpTarget(toRanges([]), 0)).toBeNull();
     expect(gapJumpTarget(toRanges([[0, 4]]), 6)).toBeNull();
+  });
+});
+
+describe('quotaEvictionRange', () => {
+  it('drops all but a second behind the playhead', () => {
+    expect(quotaEvictionRange(toRanges([[0, 100]]), 50)).toEqual([0, 49]);
+    expect(quotaEvictionRange(toRanges([[0, 100]]), 1)).toBeNull();
+    expect(quotaEvictionRange(toRanges([]), 50)).toBeNull();
+  });
+  it('ends on a random-access point so the GOP being played stays', () => {
+    const keyframes = [0, 4, 8, 12];
+    const cut = (c: number) => lastAtOrBefore(keyframes, c);
+    expect(quotaEvictionRange(toRanges([[0, 20]]), 10, cut)).toEqual([0, 8]);
+    expect(quotaEvictionRange(toRanges([[0, 20]]), 4.5, cut)).toBeNull();
+  });
+});
+
+describe('lastAtOrBefore', () => {
+  it('finds the last point at or before t', () => {
+    expect(lastAtOrBefore([1, 3, 5], 3)).toBe(3);
+    expect(lastAtOrBefore([1, 3, 5], 4.9)).toBe(3);
+    expect(lastAtOrBefore([1, 3, 5], 0)).toBe(-Infinity);
   });
 });
