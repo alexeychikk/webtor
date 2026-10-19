@@ -22,7 +22,8 @@ Playwright 1.64 (Chromium). SPA without SvelteKit. Relay: Go (version in `mise.t
 anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torrent engine, 0003
 media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay, 0007 AVI
 playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg, 0008 UI
-design system: dark, Lucide icons, every player control inside the player).
+design system: dark, Lucide icons, every player control inside the player, 0009 per-video watch
+state: remembered tracks and resume).
 
 ## Commands
 
@@ -258,6 +259,11 @@ docs/decisions/                ADRs
   `queryFonts: false` (no local-font prompts, no Google Fonts). Single-threaded without COOP/COEP.
   JASSUB uses `requestVideoFrameCallback` `mediaTime` (element timeline), like the text tracks.
   The remembered choice is `localStorage['webtor:subtitle-language']` (a language code or `off`).
+  **Per-video watch state (ADR 0009, `watch-state.ts`)**: `localStorage['webtor:watch:<infohash>:<path>']`
+  keeps the user's audio track, subtitle track (or Off), delay and position (uploads ≤ 1 M chars in
+  `webtor:watch-upload:…`); it wins over the language preferences, which stay the fallback. Resume
+  starts the pipelines at the keyframe before the saved position (`MsePlayer` `startAt`), not under
+  10 s or in the last 5 % (≤ 60 s); toast `resume-toast` with `start-over`.
   **Subtitle delay** (`SubtitleManager.delay`, ±0.5 s, reset per file) re-fills the showing track
   with `shiftCues` (pure, `cue.ts`); embedded tracks refill from `source.live`, and `appendCues` shifts
   new cues by the track's delay. The JASSUB overlay gets unshifted events and renders with
@@ -293,6 +299,8 @@ activity`: a mouse move shows them for 1 s, a key for 1 s, leaving the player or
 - `multi-file/` = `episode-1.ts` (→ offset.ts, file 0) + `episode-2.mkv` (→ sample.mkv, file 1,
   largest) + `extras.wmv` (fake, unsupported) + `readme.txt`. `<FIXTURE_BASE>/<name>.torrent` is the
   .torrent for any fixture (for upload tests).
+- `resume/` = `movie.mkv` (40 s 320×180; audio "English AAC" + "Russian AC3"; subtitles `embedded:4`
+  "English", `embedded:5` "English SDH", `embedded:6` "Russian") + `extra.mkv` (→ sample.mkv).
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
