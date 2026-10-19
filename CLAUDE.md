@@ -198,8 +198,12 @@ docs/decisions/                ADRs
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
   `localStorage['webtor:sb-quota-bytes']` gives every SourceBuffer a Safari-like byte quota
-  (`simulateQuota`; hits counted in `window.__webtorQuotaHits`). `QuotaExceededError` is
-  back-pressure, never a failure (ADR 0003): keep every append going through `appendChunk`.
+  (`simulateQuota`: 5 % of it until an init segment went in, like WebKit; hits counted in
+  `window.__webtorQuotaHits`, and in the video's `data-quota-hits` and the stats panel's
+  `stats-buffer` with `data-ahead`/`data-target`/`data-quota-hits` for real quotas too).
+  `QuotaExceededError` is back-pressure, never a failure (ADR 0003): keep every append going
+  through `appendChunk`, which sends an init segment alone and the rest in pieces (WebKit's
+  pre-init 5 % was the iPad failure).
 - Icons live in `public/` (`favicon.svg` = the header mark; PNGs rendered by `scripts/make-icons.mjs`),
   linked from `index.html` with root paths that Vite rewrites to the relative base.
 - **Files.** `#magnet=<encoded>&file=<n>`: `n` is the index into `torrent.files` of the file playing
@@ -240,7 +244,7 @@ docs/decisions/                ADRs
   (`data-delay` in s), `subtitle-delay-minus|plus|reset`), `audio-menu` (`audio-option`,
   `data-value`, accessible name `audioOptionText`), `files-panel` (`file-list` / `file` with
   `data-index`, `data-kind`, `aria-current`), `stats-panel` (`stats` with `stats-peers`,
-  `relay-peers`, `stats-download`, `stats-upload`, `stats-progress`), `share-panel` (`share-url`,
+  `relay-peers`, `stats-download`, `stats-upload`, `stats-buffer`, `stats-progress`), `share-panel` (`share-url`,
   only after a refused copy), `more-menu` (`more-sound`, `more-audio|files|stats`, `share-link`). In
   e2e use `e2e/support/player.ts`: `openMenu(page, trigger)`, `closeMenu`, `selectSubtitle` /
   `selectAudio(page, {label} | {value})`, `subtitleGroup`.

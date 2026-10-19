@@ -613,6 +613,7 @@
       data-testid="video"
       data-audio-codec={controller.audioCodec ?? ''}
       data-audio-track={controller.audioTrackId ?? ''}
+      data-quota-hits={controller.buffer?.quotaHits ?? 0}
       playsinline
       onclick={onVideoClick}
     ></video>
@@ -706,7 +707,7 @@
               onselect={selectFile}
             />
           {:else if m.id === 'stats'}
-            <StatsPanel stats={controller.stats} />
+            <StatsPanel stats={controller.stats} buffer={controller.buffer} />
           {:else if m.id === 'share'}
             <div class="share-panel">
               <p>Couldn’t copy. Copy the link from here:</p>

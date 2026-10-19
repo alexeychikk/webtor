@@ -15,12 +15,12 @@ import {
   type QuotaState,
 } from './append';
 import {
+  aheadOf,
   BUFFER_AHEAD_S,
-  bufferedAhead,
   gapJumpTarget,
   isBuffered,
   lastAtOrBefore,
-  quotaEvictionRange,
+  quotaEvictionRanges,
   type Ranges,
 } from './buffer';
 import { preferredAudioLanguage } from './audio-preference';
@@ -819,11 +819,14 @@ export class MsePlayer {
   /** Appends one chunk with back-pressure; `QuotaExceededError` waits for room (append.ts). */
   private async append(p: Pipeline, gen: number, data: Uint8Array) {
     const host: AppendHost = {
+      name: p.kind,
       target: this.bufferAhead,
       currentTime: () => this.video.currentTime,
       ahead: () => this.appendedAhead(p),
       streaming: () => (this.mediaSource as { streaming?: boolean }).streaming !== false,
+      playing: () => !this.video.paused,
       progress: () => this.playbackProgress(),
+      now: () => performance.now(),
       check: () => {
         if (gen !== p.gen || this.destroyed) throw new StalePipeline();
       },
@@ -860,13 +863,13 @@ export class MsePlayer {
     for (const q of this.pipelines) {
       if (q === self || this.destroyed || selfStale()) continue;
       try {
-        const ev = quotaEvictionRange(q.sb.buffered, t, (cut) => this.safeCut(q, cut));
-        if (ev) {
-          await whenIdle(q.sb, () => q.sb.remove(ev[0], ev[1]));
+        const ev = quotaEvictionRanges(q.sb.buffered, t, (cut) => this.safeCut(q, cut));
+        for (const [from, to] of ev) await whenIdle(q.sb, () => q.sb.remove(from, to));
+        if (ev.length > 0) {
           freed = true;
           continue;
         }
-        const ahead = bufferedAhead(q.sb.buffered, t);
+        const ahead = aheadOf(q.sb.buffered, t);
         if (ahead < 2 * MIN_AHEAD_S) continue;
         const keep = Math.max(MIN_AHEAD_S, ahead / 2);
         q.quota.cap = Math.min(q.quota.cap, keep);
@@ -918,25 +921,48 @@ export class MsePlayer {
   /** Seconds of `p`'s media ahead of the playhead, for back-pressure (see `replaceUntil`). */
   private appendedAhead(p: Pipeline): number {
     const t = this.video.currentTime;
-    return p.writtenTo < p.replaceUntil ? p.writtenTo - t : bufferedAhead(p.sb.buffered, t);
+    return p.writtenTo < p.replaceUntil ? p.writtenTo - t : aheadOf(p.sb.buffered, t);
   }
 
-  /** Resolves when the playhead moves (or after a second), so back-pressure loops re-check. */
+  /**
+   * Resolves when the playhead moves, a seek starts, ManagedMediaSource wants data again
+   * (`startstreaming`) or evicted some (`bufferedchange`), or after a second, so back-pressure
+   * loops re-check.
+   */
   private playbackProgress(): Promise<void> {
     return new Promise((resolve) => {
+      const targets: EventTarget[] = [
+        this.video,
+        this.mediaSource,
+        ...this.pipelines.map((p) => p.sb),
+      ];
+      const events = ['timeupdate', 'seeking', 'startstreaming', 'bufferedchange'];
       const done = () => {
         clearTimeout(timer);
-        this.video.removeEventListener('timeupdate', done);
-        this.video.removeEventListener('seeking', done);
-        this.mediaSource.removeEventListener('startstreaming', done);
+        for (const x of targets) for (const e of events) x.removeEventListener(e, done);
         resolve();
       };
       const timer = setTimeout(done, 1000);
-      this.video.addEventListener('timeupdate', done);
-      this.video.addEventListener('seeking', done);
-      // ManagedMediaSource wants data again (after `endstreaming`).
-      this.mediaSource.addEventListener('startstreaming', done);
+      for (const x of targets) for (const e of events) x.addEventListener(e, done);
     });
+  }
+
+  /** What the stats panel shows about buffering (docs/decisions/0003 "Back-pressure and quota"). */
+  bufferInfo(): BufferInfo {
+    const t = this.video.currentTime;
+    let ahead = Infinity;
+    let cap = Infinity;
+    let quotaHits = 0;
+    for (const p of this.pipelines) {
+      ahead = Math.min(ahead, aheadOf(p.sb.buffered, t));
+      cap = Math.min(cap, p.quota.cap);
+      quotaHits += p.quota.hits;
+    }
+    return {
+      ahead: Number.isFinite(ahead) ? ahead : 0,
+      target: Math.min(this.bufferAhead, cap),
+      quotaHits,
+    };
   }
 
   private maybeEndOfStream() {
@@ -945,6 +971,15 @@ export class MsePlayer {
     if (this.pipelines.some((p) => p.sb.updating)) return;
     this.mediaSource.endOfStream();
   }
+}
+
+export interface BufferInfo {
+  /** Seconds buffered ahead of the playhead in every SourceBuffer. */
+  ahead: number;
+  /** Ahead target (s): `BUFFER_AHEAD_S`, lowered by quota hits (`QuotaState.cap`). */
+  target: number;
+  /** `QuotaExceededError`s so far, all SourceBuffers. */
+  quotaHits: number;
 }
 
 /** `t` is unbuffered but there is media both before and after it (well past a small gap). */

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  aheadOf,
   bufferedAhead,
   evictionRange,
   gapJumpTarget,
   isBuffered,
   lastAtOrBefore,
   quotaEvictionRange,
+  quotaEvictionRanges,
   toRanges,
+  totalBuffered,
 } from './buffer';
 
 describe('bufferedAhead', () => {
@@ -84,6 +87,49 @@ describe('quotaEvictionRange', () => {
     const cut = (c: number) => lastAtOrBefore(keyframes, c);
     expect(quotaEvictionRange(toRanges([[0, 20]]), 10, cut)).toEqual([0, 8]);
     expect(quotaEvictionRange(toRanges([[0, 20]]), 4.5, cut)).toBeNull();
+  });
+});
+
+describe('quotaEvictionRanges', () => {
+  it('also drops media that starts past the media at the playhead', () => {
+    // A seek back from 30 s left [30, 40]; the playhead is at 2 in [0, 5].
+    const ranges = toRanges([
+      [0, 5],
+      [30, 40],
+    ]);
+    expect(quotaEvictionRanges(ranges, 2)).toEqual([
+      [0, 1],
+      [30, Infinity],
+    ]);
+    expect(quotaEvictionRanges(ranges, 0.5)).toEqual([[30, Infinity]]);
+  });
+  it('keeps media just past a small gap at the playhead, and nothing behind when starved', () => {
+    expect(quotaEvictionRanges(toRanges([[0.6, 5]]), 0)).toEqual([]);
+    expect(quotaEvictionRanges(toRanges([[0, 3]]), 2.9, undefined, -0.5)).toEqual([[0, 3.4]]);
+    expect(quotaEvictionRanges(toRanges([[0, 3]]), 3)).toEqual([[0, 2]]);
+  });
+});
+
+describe('aheadOf', () => {
+  it('counts media that starts in a small gap after the playhead', () => {
+    expect(aheadOf(toRanges([[0.6, 5]]), 0)).toBeCloseTo(5);
+    expect(aheadOf(toRanges([[0, 5]]), 2)).toBe(3);
+    expect(aheadOf(toRanges([[3, 5]]), 0)).toBe(0);
+    expect(aheadOf(toRanges([[0, 5]]), 6)).toBe(0);
+    expect(aheadOf(toRanges([]), 0)).toBe(0);
+  });
+});
+
+describe('totalBuffered', () => {
+  it('sums every range', () => {
+    expect(
+      totalBuffered(
+        toRanges([
+          [0, 5],
+          [30, 40],
+        ]),
+      ),
+    ).toBe(15);
   });
 });
 

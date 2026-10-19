@@ -1,12 +1,17 @@
 <script lang="ts">
-  /** Content of the stats panel (docs/decisions/0008 §4): peers, speeds, progress; live values. */
+  /**
+   * Content of the stats panel (docs/decisions/0008 §4): peers, speeds, buffer window and quota hits
+   * (docs/decisions/0003), progress; live values.
+   */
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
+  import Layers from '@lucide/svelte/icons/layers';
   import Users from '@lucide/svelte/icons/users';
-  import { formatBytes, formatPercent, formatSpeed } from './format';
+  import { formatBytes, formatPercent, formatSeconds, formatSpeed } from './format';
+  import type { BufferInfo } from './mse-player';
   import type { TorrentStats } from './types';
 
-  let { stats }: { stats: TorrentStats } = $props();
+  let { stats, buffer = null }: { stats: TorrentStats; buffer?: BufferInfo | null } = $props();
 </script>
 
 <dl class="stats" data-testid="stats" aria-label="Download stats">
@@ -27,6 +32,22 @@
     <dt><ArrowUp size={16} aria-hidden="true" /> Up</dt>
     <dd data-testid="stats-upload">{formatSpeed(stats.uploadSpeed)}</dd>
   </div>
+  {#if buffer}
+    <div>
+      <dt><Layers size={16} aria-hidden="true" /> Buffer</dt>
+      <dd
+        data-testid="stats-buffer"
+        data-ahead={buffer.ahead.toFixed(1)}
+        data-target={buffer.target}
+        data-quota-hits={buffer.quotaHits}
+      >
+        {formatSeconds(buffer.ahead)} of {formatSeconds(buffer.target)} ahead
+        {#if buffer.quotaHits > 0}
+          <span class="bytes">· {buffer.quotaHits} quota hits</span>
+        {/if}
+      </dd>
+    </div>
+  {/if}
   <div class="progress">
     <div class="bar" aria-hidden="true">
       <div style:width="{Math.min(1, stats.progress) * 100}%"></div>

@@ -39,7 +39,7 @@ import {
 import { isTorrentId } from '../torrent/trackers';
 import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
-import { MsePlayer, mediaSourceClass } from './mse-player';
+import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
@@ -111,6 +111,8 @@ export class PlayerController {
   magnet = $state<string | null>(null);
   /** Downloaded parts of the playing file (fractions of its bytes) for the seek bar; 1 s tick. */
   downloaded = $state<FractionRanges>([]);
+  /** Buffer window and quota hits of the playing file (stats panel); 1 s tick, null without a file. */
+  buffer = $state<BufferInfo | null>(null);
   /** Element time this file resumed at (watch state), for the "Resumed at" toast; null = none. */
   resumedAt = $state<number | null>(null);
 
@@ -374,6 +376,7 @@ export class PlayerController {
     this.watch = null;
     this.resumedAt = null;
     this.downloaded = [];
+    this.buffer = null;
     this.audioTracks = [];
     this.audioTrackId = null;
     this.audioCodec = null;
@@ -611,6 +614,7 @@ export class PlayerController {
     const webSeeds = t.wires.filter((w) => w.type === 'webSeed').length;
     this.stats = mergeRelayStats(stats, webSeeds, this.relayStats);
     this.updateDownloaded(t);
+    this.buffer = this.player?.bufferInfo() ?? null;
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';
     this.starvedFor = nextStarvedFor(this.starvedFor, {
       waiting: waitingForData,

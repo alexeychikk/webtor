@@ -31,16 +31,38 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   behind the playhead may be left to evict: failing after a few retries killed playback on iPad. On a
   quota hit the pipeline (1) evicts all but 1 s behind the playhead, ending on a keyframe it appended
   (MSE removes up to the next random-access point, which must not be past the playhead; relay video
-  has one every 2 s); (2) caps its own ahead target at 80 % of what was buffered ahead when it hit
-  (never below 3 s) and from then on evicts tightly before every append; (3) waits for playback
-  (`timeupdate`, `seeking`, `startstreaming`, or 1 s) and retries, holding the chunk. Paused, it
-  simply holds. Audio switch: the old track ahead of the new pipeline is dropped first (it gets
-  overwritten anyway). A pipeline starved by the quota (< 3 s ahead) asks the other SourceBuffer for
-  room: evict behind, else halve its media ahead (restart it there, cap it) so audio and video never
-  starve each other under a shared quota. Only a buffer with nothing at the playhead and nothing to
-  free anywhere, 5 hits in a row, fails (`playback-failed`). A hole at the playhead between buffered
-  ranges (UA eviction ahead, `bufferedchange`) restarts the pipelines there on `waiting`. e2e forces
-  a quota with `localStorage['webtor:sb-quota-bytes']`; real Safari/iPad behaviour is checked by hand.
+  has one every 2 s), and any range that starts past the media at the playhead (left by a seek or a
+  UA eviction: the pipeline appends it again anyway); (2) caps its own ahead target at 80 % of what
+  was buffered ahead when it hit (never below 3 s) and from then on evicts tightly before every
+  append; (3) waits for playback (`timeupdate`, `seeking`, `startstreaming`, `bufferedchange`, or
+  1 s) and retries, holding the chunk. Paused, it simply holds. "Ahead" counts media that starts in a
+  small hole after the playhead (`aheadOf`: first frame at 0.6 s, audio after video). Audio switch:
+  the old track ahead of the new pipeline is dropped first (it gets overwritten anyway). A pipeline
+  starved by the quota (< 3 s ahead) asks the other SourceBuffer for room: evict behind, else halve
+  its media ahead (restart it there, cap it) so audio and video never starve each other under a
+  shared quota. A hole at the playhead between buffered ranges (UA eviction ahead, `bufferedchange`)
+  restarts the pipelines there on `waiting`. The stats panel (`stats-buffer`) and the video's
+  `data-quota-hits` show the window and the hits.
+- **Why iPad still failed after that (root cause, 2026-10-19).** WebKit (`SourceBuffer.cpp`)
+  refuses an append when the bytes held plus the append's reach its limit (iOS: ~105 MB per
+  SourceBuffer), and until a SourceBuffer has parsed an init segment that limit is only the audio
+  share, 5 % (~5.5 MB). Mediabunny's first write after every (re)start is `moov` + the whole first
+  fragment, a GOP: a high-bitrate file with long GOPs passes 5.5 MB, so that one append was refused
+  every time. It could not get smaller, nothing was buffered to evict, so the "starved 5 times"
+  rule failed it. The other suspects, checked: an append larger than the whole quota (possible with
+  a long GOP; now split as below); a playhead in a small gap read as "nothing ahead" (fixed by
+  `aheadOf`); stale media far ahead never evicted (now evicted); Safari freeing memory late after
+  `remove()` (WebKit lowers its count at `remove`, but the retries are now time-based anyway);
+  ManagedMediaSource signals (`endstreaming`/`startstreaming` were respected; `bufferedchange` now
+  wakes waiting appends). So `appendChunk` appends the init segment on its own, then the rest in
+  pieces of at most 1 MiB (MSE takes any byte split of the stream). With < 3 s ahead and nothing to
+  free, the piece size halves (down to 16 KiB) and doubles back once 3 s are buffered. Starved
+  (the playhead stands still with < 0.5 s ahead, or < 3 s while playing: decoders hold a few frames
+  back), it also drops what was just played up to the playhead, so a quota of about one GOP still
+  plays. Less than one GOP can't: MSE removes whole GOPs and the playhead needs the next frames of
+  the one being played. It fails (`playback-failed`) only after 5 hits and 20 s without room, with
+  the numbers in the message (SourceBuffer, refused bytes, buffered ranges, playhead, hits). e2e forces a quota with `localStorage['webtor:sb-quota-bytes']`, with WebKit's
+  5 % before the init segment; real Safari/iPad behaviour is checked by hand.
 - **Timestamps:** `Conversion` with `trim.start = K` rebases output to 0, so set
   `sourceBuffer.timestampOffset = K` before the first append (verified in a spike).
 - **Seeking:** if the target is buffered in both SourceBuffers, do nothing. Otherwise debounce (150 ms),
