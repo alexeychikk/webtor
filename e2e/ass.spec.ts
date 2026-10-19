@@ -90,7 +90,7 @@ test('the subtitle delay moves the styled ASS overlay too', async ({ page }) => 
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
 });
 
-test('our fullscreen button fullscreens the player container, and the overlay stays drawn', async ({
+test('the fullscreen icon fullscreens the player container, and the overlay stays drawn', async ({
   page,
 }) => {
   await playSample(page);
@@ -99,8 +99,8 @@ test('our fullscreen button fullscreens the player container, and the overlay st
   await seekTo(page, 3);
   await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
 
-  // The native control would fullscreen the bare video (hiding the canvas): ours replaces it.
-  await expect(video(page)).toHaveAttribute('controlslist', 'nofullscreen');
+  // A native control would fullscreen the bare video (hiding the canvas): our control bar replaces it.
+  await expect(video(page)).not.toHaveAttribute('controls');
   await page.getByTestId('screen').hover();
   await page.getByTestId('fullscreen').click();
   await expect
@@ -125,6 +125,21 @@ test('our fullscreen button fullscreens the player container, and the overlay st
   await page.getByTestId('fullscreen').click();
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
   await expect(canvas(page)).toBeVisible();
+
+  // A double-click on the video does the same.
+  await video(page).dblclick();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement?.getAttribute('data-testid')))
+    .toBe('screen');
+  await expect(canvas(page)).toBeVisible();
+  await seekTo(page, 3);
+  await expect.poll(() => paintedPixels(page), { timeout: 15_000 }).toBeGreaterThan(100);
+  // The control bar sits over the canvas, not under it.
+  const z = (testId: string) =>
+    page.getByTestId(testId).evaluate((el) => Number(getComputedStyle(el).zIndex) || 0);
+  expect(await z('controls')).toBeGreaterThan(await z('ass-canvas'));
+  await page.keyboard.press('f');
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
 });
 
 const UPLOADED_ASS = `[Script Info]
@@ -155,7 +170,7 @@ test('an uploaded .ass file is drawn styled too', async ({ page }) => {
   expect(await shownCues(page)).toEqual([]);
 });
 
-test('without container fullscreen (iOS), ASS is shown as plain text and the button uses the video', async ({
+test('without container fullscreen (iOS), ASS is shown as plain text and the native controls stay', async ({
   page,
 }) => {
   // Like iPhone Safari: no element fullscreen, only the video's own (`webkitEnterFullscreen`).
@@ -169,8 +184,19 @@ test('without container fullscreen (iOS), ASS is shown as plain text and the but
     }
   });
   await playSample(page);
-  await expect(video(page)).not.toHaveAttribute('controlslist', /nofullscreen/);
-  await expect(page.getByTestId('fullscreen')).toBeVisible();
+  // The native controls' fullscreen is the video's own there: the one fullscreen control.
+  await expect(video(page)).toHaveAttribute('controls');
+  await expect(page.getByTestId('fullscreen')).toHaveCount(0);
+  await expect(page.getByTestId('controls')).toHaveCount(0);
+  // `f` enters the video's own fullscreen.
+  await video(page).evaluate((v) => {
+    Object.defineProperty(v, 'webkitEnterFullscreen', {
+      value: () => v.setAttribute('data-entered', '1'),
+    });
+  });
+  await page.locator('h1').click();
+  await page.keyboard.press('f');
+  await expect(video(page)).toHaveAttribute('data-entered', '1');
   await page.getByTestId('subtitles').selectOption({ label: 'Russian · ASS' });
   await seekTo(page, 3);
   await expect.poll(() => shownCues(page)).toEqual(['Привет из ASS']);
