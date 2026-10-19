@@ -131,8 +131,12 @@
   let touch = $state(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
   /** Kind of the last pointerdown on the screen: a touch's click must not play/pause. */
   let lastPointerType = 'mouse';
-  /** The last play/pause toggle, flashed in the centre. */
+  /** The last play/pause toggle, flashed in the centre once: cleared when its animation ends. */
   let flash = $state<Flash | null>(null);
+  let flashCount = 0;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Matches the `.flash` animation in PlayerCentre.svelte. */
+  const FLASH_MS = 400;
 
   const onControls = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest('[data-player-controls]');
@@ -193,7 +197,10 @@
     if (controller.notices.length || controller.error) untrack(() => wake());
   });
 
-  $effect(() => () => clearTimeout(idleTimer));
+  $effect(() => () => {
+    clearTimeout(idleTimer);
+    clearTimeout(flashTimer);
+  });
 
   function togglePlay() {
     const v = video;
@@ -201,7 +208,11 @@
     const willPlay = v.paused;
     if (willPlay) v.play().catch(() => {});
     else v.pause();
-    flash = { playing: willPlay, n: (flash?.n ?? 0) + 1 };
+    // Cleared after the animation, so a later spinner or pause that hands the centre back to
+    // `none` doesn't remount and replay it.
+    flash = { playing: willPlay, n: ++flashCount };
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => (flash = null), FLASH_MS);
   }
 
   function seekBy(by: number) {

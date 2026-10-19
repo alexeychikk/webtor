@@ -224,7 +224,7 @@ docs/decisions/                ADRs
   Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
   (`[data-player-controls]`) they work, except arrows on its sliders. Player.svelte handles them in
   the window's capture phase (preventDefault + stopPropagation, keyup of a handled Space too, no
-  auto-repeat except seeks), so a focused button or native control never toggles a second time.
+  auto-repeat except seeks and volume), so a focused button or native control never toggles a second time.
 - **Player controls (ADR 0004, 0008).** The `<video>` never has `controls`: `PlayerControls.svelte`
   overlays the picture, windowed and fullscreen (text cues are lifted above it via
   `::-webkit-media-text-track-container`). `shown = !playing || menuOpen || pointerOnControls ||

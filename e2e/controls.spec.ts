@@ -150,6 +150,14 @@ test('play/pause, seek, mute and volume on the control bar; the centre play butt
   await centre.getByRole('button', { name: 'Play video' }).click();
   await expect.poll(() => prop(page, 'paused')).toBe(false);
   await expect(centre).toHaveAttribute('data-state', 'none');
+  // The toggle flashes once. When the centre comes back to `none` later (a spinner, a pause that
+  // didn't come from us), the flash doesn't replay.
+  await expect(centre.locator('.flash')).toHaveCount(0);
+  await video(page).evaluate((v: HTMLVideoElement) => v.pause());
+  await expect(centre).toHaveAttribute('data-state', 'play');
+  await video(page).evaluate((v: HTMLVideoElement) => v.play());
+  await expect(centre).toHaveAttribute('data-state', 'none');
+  await expect(centre.locator('.flash')).toHaveCount(0);
   await page.keyboard.press(' ');
   await expect.poll(() => prop(page, 'paused')).toBe(true);
 
