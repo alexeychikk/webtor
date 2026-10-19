@@ -4,7 +4,8 @@
 # ASS (rus) subtitles. Plus a sidecar SRT, and offset.ts: 10 s H.264 + AAC MPEG-TS whose first
 # timestamp is ~1.4 s (the muxer default), for the non-zero start time path. And three AVI files
 # (docs/decisions/0007): avi-h264-mp3.avi (H.264 High with B-frames + VBR MP3, plays in the browser),
-# avi-xvid-mp3.avi and avi-xvid-ac3.avi (MPEG-4 Part 2 "Xvid": needs the relay to convert the video).
+# avi-xvid-mp3.avi and avi-xvid-ac3.avi (MPEG-4 Part 2 "Xvid": needs the relay to convert the video),
+# and avi-h264-noidx.avi: avi-h264-mp3.avi without its index (idx1 cut, AVIF_HASINDEX cleared).
 # Needs an ffmpeg with libx264 + libxvid + libmp3lame + ac3 on PATH, or:
 #   FFMPEG=$(node -e "console.log(require('ffmpeg-static'))") after `npm i --no-save ffmpeg-static`
 set -euo pipefail
@@ -67,6 +68,26 @@ ASS
   -c:v libx264 -preset veryfast -bf 2 -g 48 -pix_fmt yuv420p -b:v 300k \
   -c:a libmp3lame -q:a 5 \
   avi-h264-mp3.avi
+# No index: the player scans movi while playing and shows the avi-no-index notice.
+node - avi-h264-mp3.avi avi-h264-noidx.avi <<'JS'
+const fs = require('node:fs');
+const [src, dst] = process.argv.slice(2);
+const b = fs.readFileSync(src);
+let o = 12;
+let out = b;
+while (o + 8 <= b.length) {
+  const size = b.readUInt32LE(o + 4);
+  if (b.toString('latin1', o, o + 4) === 'idx1') {
+    out = Buffer.concat([b.subarray(0, o), b.subarray(o + 8 + size + (size & 1))]);
+    break;
+  }
+  o += 8 + size + (size & 1);
+}
+out.writeUInt32LE(out.length - 8, 4); // RIFF size
+// avih data starts at 32 (RIFF, AVI, LIST hdrl, avih header); dwFlags is its 4th field.
+out.writeUInt32LE(out.readUInt32LE(32 + 12) & ~0x10, 32 + 12);
+fs.writeFileSync(dst, out);
+JS
 
 for audio in mp3 ac3; do
   case $audio in

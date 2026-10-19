@@ -255,3 +255,57 @@ export function gopPresentationRanks(pocs: ReadonlyArray<number | null>): number
   const keyRank = rank[0] ?? 0;
   return rank.map((r) => r - keyRank);
 }
+
+/**
+ * Key frame test for a chunk without an index flag (the `movi` scan), the way ffmpeg/x264 flag
+ * them: an IDR picture, or an I picture preceded by an SEI recovery point (an open-GOP key frame,
+ * x264 `--open-gop`). Other I pictures (x264's scenecuts inside min-keyint) are not key: their
+ * leading B pictures reference the GOP before them.
+ */
+export function isH264KeyFrame(nals: readonly NalUnit[]): boolean {
+  const i = nals.findIndex((n) => n.type === 1 || n.type === 5);
+  if (i < 0) return false;
+  const nal = nals[i]!;
+  if (nal.type === 5) return true;
+  if (!nals.slice(0, i).some((n) => n.type === 6 && hasRecoveryPoint(n.data))) return false;
+  try {
+    const r = new BitReader(rbsp(nal.data.subarray(0, 16)));
+    r.ue(); // first_mb_in_slice
+    return r.ue() % 5 === 2; // slice_type I
+  } catch {
+    return false;
+  }
+}
+
+/** Whether an SEI NAL unit holds a recovery point message (payloadType 6, H.264 D.1). */
+export function hasRecoveryPoint(sei: Uint8Array): boolean {
+  const b = rbsp(sei);
+  let o = 0;
+  // Each message: payloadType and payloadSize as runs of 0xFF plus a last byte (7.3.2.3.1).
+  while (o < b.length && b[o] !== 0x80) {
+    let type = 0;
+    while (o < b.length && b[o] === 0xff) ((type += 255), o++);
+    if (o >= b.length) return false;
+    type += b[o++]!;
+    if (type === 6) return true;
+    let size = 0;
+    while (o < b.length && b[o] === 0xff) ((size += 255), o++);
+    if (o >= b.length) return false;
+    size += b[o++]!;
+    o += size;
+  }
+  return false;
+}
+
+/**
+ * Key frame test for an MPEG-4 Part 2 (DivX/Xvid) chunk: its first VOP is an I-VOP. Null when the
+ * chunk holds no VOP start code (another codec).
+ */
+export function isMpeg4KeyFrame(chunk: Uint8Array): boolean | null {
+  for (let i = 0; i + 4 < chunk.length; i++) {
+    if (chunk[i] === 0 && chunk[i + 1] === 0 && chunk[i + 2] === 1 && chunk[i + 3] === 0xb6) {
+      return chunk[i + 4]! >> 6 === 0;
+    }
+  }
+  return null;
+}

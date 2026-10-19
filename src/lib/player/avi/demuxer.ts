@@ -6,6 +6,8 @@
  * an upgrade changes what we rely on.
  *
  * Reads go through our own `ByteSource` (a `BlockReader` cache), not Mediabunny's `Reader`.
+ * Chunk positions come from `idx1`, the OpenDML `indx` → `ix##` indexes, or a `movi` scan when
+ * there is no usable index (`index.ts`); the last two grow while playing.
  * Video: H.264 packets stay as stored (Annex B, or length-prefixed with an `avcC` in `strf`); DTS of
  * chunk `i` is `(i + dwStart) · dwScale / dwRate`, PTS comes from the POC rank in the GOP. Audio is
  * re-framed from the stream's bytes (`audio.ts`).
@@ -28,6 +30,8 @@ import {
   avcCodecString,
   gopPocs,
   gopPresentationRanks,
+  isH264KeyFrame,
+  isMpeg4KeyFrame,
   nalUnits,
   parseFirstSlice,
   parsePpsIds,
@@ -36,6 +40,7 @@ import {
   type SliceInfo,
   type Sps,
 } from './h264';
+import { OdmlIndex, ScanIndex, StaticIndex, type AviIndex, type IndexMode } from './index';
 import {
   AVIF_HASINDEX,
   isAvi,
@@ -57,9 +62,13 @@ const HEADER_READ = 64 * 1024;
 const IDENTITY_MATRIX = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 const EPSILON = 1e-7;
 
+/** The AVI format, with the demuxer it created (index mode, seek limit) once an input opened. */
+export type AviFormat = InputFormat & { readonly demuxer: AviDemuxer | null };
+
 /** The AVI input format for `new Input({ formats: [createAviFormat(mb, source), ...ALL_FORMATS] })`. */
-export function createAviFormat(mb: Mediabunny, source: ByteSource): InputFormat {
+export function createAviFormat(mb: Mediabunny, source: ByteSource): AviFormat {
   class AviInputFormat extends mb.InputFormat {
+    demuxer: AviDemuxer | null = null;
     get name() {
       return AVI_FORMAT_NAME;
     }
@@ -73,7 +82,7 @@ export function createAviFormat(mb: Mediabunny, source: ByteSource): InputFormat
     }
     /** Mediabunny internal: the demuxer for an input this format can read. */
     _createDemuxer(): AviDemuxer {
-      return new AviDemuxer(mb, source);
+      return (this.demuxer = new AviDemuxer(mb, source));
     }
   }
   return new AviInputFormat();
@@ -101,10 +110,25 @@ function lastAtOrBefore(n: number, key: (i: number) => number, t: number): numbe
   return found;
 }
 
+/** NAL length size of an `avcC` in `strf` (length-prefixed H.264), 0 for Annex B. */
+function avcLengthSize(extra: Uint8Array): number {
+  return extra[0] === 1 && extra.length >= 7 ? (extra[4]! & 3) + 1 : 0;
+}
+
+/** H.264 per FourCC (`strh.fccHandler` or `biCompression`). */
+function isAvcStream(s: AviStreamHeader): boolean {
+  const clean = (f: string) => f.replace(/\0/g, '').trim();
+  return isH264FourCC(clean(s.handler)) || isH264FourCC(clean(s.video?.compression ?? ''));
+}
+
 export class AviDemuxer {
   private readonly abort = new AbortController();
   readonly reader: BlockReader;
   private backings: Promise<Array<AviVideoBacking | AviAudioBacking>> | null = null;
+  private index: AviIndex | null = null;
+  private video: AviVideoBacking | null = null;
+  /** `avih.dwTotalFrames`: the duration when the index is still being read. */
+  totalFrames = 0;
 
   constructor(
     readonly mb: Mediabunny,
@@ -129,6 +153,21 @@ export class AviDemuxer {
     this.abort.abort();
   }
 
+  /** Where the chunk positions come from; null before the header is read. */
+  get indexMode(): IndexMode | null {
+    return this.index?.mode ?? null;
+  }
+
+  /**
+   * Without an index, seeks reach only what the `movi` scan has seen: the source time of the last
+   * scanned video frame. Null when seeking is unlimited (an index, or the scan is done).
+   */
+  seekLimit(): number | null {
+    const index = this.index;
+    if (!index || index.mode !== 'scan' || index.complete(0)) return null;
+    return this.video?.scannedEnd() ?? 0;
+  }
+
   private read(start: number, end: number): Promise<Uint8Array> {
     return readRange(this.source, start, Math.min(end, this.source.size), this.abort.signal);
   }
@@ -138,7 +177,9 @@ export class AviDemuxer {
     const head = await this.read(0, Math.min(HEADER_READ, size));
     const dv = new DataView(head.buffer, head.byteOffset, head.byteLength);
     if (!isAvi(head)) throw unsupportedAvi('not an AVI file');
-    const riffEnd = 8 + dv.getUint32(4, true);
+    // A writer that never finished leaves RIFF / movi sizes at 0: take the file's size then.
+    const riffSize = dv.getUint32(4, true);
+    const riffEnd = riffSize > 4 ? 8 + riffSize : size;
 
     // Top-level chunks of the first RIFF: `LIST hdrl` … `LIST movi`, then `idx1`.
     let hdrl: ReturnType<typeof parseHdrl> | null = null;
@@ -153,55 +194,107 @@ export class AviDemuxer {
       if (id === 'LIST' && list === 'hdrl') {
         const end = o + 8 + chunkSize;
         const bytes = end <= head.length ? head : await this.read(0, end);
-        hdrl = parseHdrl(bytes, o + 12, end);
+        try {
+          hdrl = parseHdrl(bytes, o + 12, Math.min(end, bytes.length));
+        } catch (err) {
+          // Cut short or damaged: AviFormatError, or a RangeError from a field past the end.
+          throw unsupportedAvi(`damaged AVI header: ${String(err)}`);
+        }
       } else if (id === 'LIST' && list === 'movi') {
         moviPos = o + 8;
-        moviEnd = o + 8 + chunkSize;
+        moviEnd = chunkSize > 4 ? o + 8 + chunkSize : riffEnd;
         break;
       }
       o += 8 + chunkSize + (chunkSize & 1);
     }
     if (!hdrl) throw unsupportedAvi('AVI without a header');
     if (moviPos < 0) throw unsupportedAvi('AVI without movie data');
-    if (riffEnd + 12 <= size) {
-      const next = await this.read(riffEnd, riffEnd + 12);
-      if (readFourCC(next, 0) === 'RIFF' && readFourCC(next, 8) === 'AVIX') {
-        throw unsupportedAvi('OpenDML AVI over 1 GB, not supported yet');
-      }
-    }
+    this.totalFrames = hdrl.main.totalFrames;
+    const streams = hdrl.streams;
 
-    // idx1 follows movi (maybe after other chunks).
-    let tables: ChunkTable[] | null = null;
-    if (hdrl.main.flags & AVIF_HASINDEX) {
-      let p = moviEnd + (moviEnd & 1);
-      while (p + 8 <= Math.min(riffEnd, size)) {
-        const h = await this.read(p, p + 8);
-        const chunkSize = new DataView(h.buffer, h.byteOffset, 8).getUint32(4, true);
-        if (readFourCC(h, 0) === 'idx1') {
-          const idx = await this.read(p + 8, p + 8 + chunkSize);
-          tables = parseIdx1(
-            idx,
-            hdrl.streams.length,
-            moviPos,
-            await this.idx1IsAbsolute(idx, moviPos),
-          );
-          break;
-        }
-        p += 8 + chunkSize + (chunkSize & 1);
-      }
+    // OpenDML indexes cover every RIFF; idx1 only the first. Neither usable: scan movi.
+    const media = streams.filter(
+      (s) => (s.type === 'vids' && s.video) || (s.type === 'auds' && s.audio),
+    );
+    let index: AviIndex | null = null;
+    if (media.length > 0 && media.every((s) => s.superIndex)) {
+      index = new OdmlIndex(streams, (start, end) => this.read(start, end));
+    } else if (hdrl.main.flags & AVIF_HASINDEX) {
+      const tables = await this.readIdx1(streams.length, moviPos, moviEnd, riffEnd);
+      if (tables) index = new StaticIndex(tables);
     }
-    if (!tables || tables.every((t) => t.sizes.length === 0)) {
-      throw unsupportedAvi('AVI without an index, not supported yet');
-    }
+    index ??= new ScanIndex(
+      streams.length,
+      this.reader,
+      moviPos + 4,
+      moviEnd,
+      riffEnd,
+      (s, at, n) => this.isKeyChunk(streams[s], at, n),
+    );
+    this.index = index;
+    // The first part of each stream's index, to open the tracks.
+    if (index.mode === 'scan') await index.grow(0);
+    else await Promise.all(streams.map((_, i) => index.grow(i)));
 
     const backings: Array<AviVideoBacking | AviAudioBacking> = [];
-    hdrl.streams.forEach((s, i) => {
-      const table = tables[i];
-      if (!table || table.sizes.length === 0) return;
-      if (s.type === 'vids' && s.video) backings.push(new AviVideoBacking(this, s, table));
-      else if (s.type === 'auds' && s.audio) backings.push(new AviAudioBacking(this, s, table));
+    streams.forEach((s, i) => {
+      const table = index.tables[i];
+      if (!table || (table.length === 0 && index.complete(i))) return;
+      if (s.type === 'vids' && s.video) {
+        const video = new AviVideoBacking(this, s, index);
+        this.video ??= video;
+        backings.push(video);
+      } else if (s.type === 'auds' && s.audio) backings.push(new AviAudioBacking(this, s, index));
     });
+    if (backings.length === 0) throw unsupportedAvi('AVI without audio or video chunks');
     return backings;
+  }
+
+  /**
+   * `idx1` (after `movi`, maybe after other chunks), split per stream. Null when there is none or
+   * it is unusable: no entries, or entries outside `movi` (a broken or foreign index).
+   */
+  private async readIdx1(
+    streamCount: number,
+    moviPos: number,
+    moviEnd: number,
+    riffEnd: number,
+  ): Promise<ChunkTable[] | null> {
+    const size = this.source.size;
+    let p = moviEnd + (moviEnd & 1);
+    while (p + 8 <= Math.min(riffEnd, size)) {
+      const h = await this.read(p, p + 8);
+      const chunkSize = new DataView(h.buffer, h.byteOffset, 8).getUint32(4, true);
+      if (readFourCC(h, 0) === 'idx1') {
+        const idx = await this.read(p + 8, p + 8 + chunkSize);
+        const absolute = await this.idx1IsAbsolute(idx, moviPos);
+        const tables = parseIdx1(idx, streamCount, moviPos, absolute);
+        const lo = moviPos + 4 + 8;
+        const hi = Math.min(moviEnd, size);
+        const inMovi = tables.every((t) => {
+          for (let i = 0; i < t.length; i++) {
+            if (t.offsets[i]! < lo || t.offsets[i]! + t.sizes[i]! > hi) return false;
+          }
+          return true;
+        });
+        return inMovi && tables.some((t) => t.length > 0) ? tables : null;
+      }
+      p += 8 + chunkSize + (chunkSize & 1);
+    }
+    return null;
+  }
+
+  /** Key frame test for the `movi` scan, from the chunk's first bytes (no index flags there). */
+  private async isKeyChunk(
+    s: AviStreamHeader | undefined,
+    offset: number,
+    size: number,
+  ): Promise<boolean> {
+    if (s?.type !== 'vids' || !s.video || size === 0) return true;
+    // Past the SEI (x264 writes its settings there, several hundred bytes) to the first slice.
+    const head = await this.reader.read(offset, offset + Math.min(size, 8192));
+    if (isAvcStream(s)) return isH264KeyFrame(nalUnits(head, avcLengthSize(s.video.extra)));
+    return isMpeg4KeyFrame(head) ?? true;
   }
 
   /** `idx1` offsets point at chunk headers, relative to the `movi` FourCC or absolute: check one. */
@@ -218,11 +311,44 @@ export class AviDemuxer {
 
 /** The `InputTrackBacking` methods shared by both track kinds. */
 abstract class AviBacking {
+  protected readonly table: ChunkTable;
+
   constructor(
     protected readonly demuxer: AviDemuxer,
     protected readonly stream: AviStreamHeader,
-    protected readonly table: ChunkTable,
-  ) {}
+    protected readonly index: AviIndex,
+  ) {
+    this.table = index.tables[stream.index]!;
+  }
+
+  /** Takes in the chunks the index added since the last call (derived tables). */
+  protected abstract sync(): void;
+
+  /** All of this stream's chunks are known. */
+  protected get complete(): boolean {
+    return this.index.complete(this.stream.index);
+  }
+
+  /** Grows the index until `done()` holds or it is complete; returns `done()`. */
+  protected async growUntil(done: () => boolean): Promise<boolean> {
+    this.sync();
+    while (!done() && !this.complete) {
+      await this.index.grow(this.stream.index);
+      this.sync();
+    }
+    return done();
+  }
+
+  /**
+   * `growUntil` for a lookup by time (a seek). The `movi` scan grows only by reading forward, so a
+   * seek stays within the scanned part (the player clamps seeks to `seekLimit`).
+   */
+  protected growForTime(done: () => boolean): Promise<boolean> {
+    this.sync();
+    if (this.index.mode === 'scan' && this.table.length > 0) return Promise.resolve(done());
+    return this.growUntil(done);
+  }
+
   getId() {
     return this.stream.index + 1;
   }
@@ -277,11 +403,13 @@ abstract class AviBacking {
 /** Video stream: one packet per non-empty chunk (empty chunks are dropped frames). */
 export class AviVideoBacking extends AviBacking {
   /** Chunk index of each packet. */
-  private readonly packetChunk: Uint32Array;
+  private readonly packetChunk: number[] = [];
   /** Packet index of each GOP's first packet (key frames, plus packet 0). */
-  private readonly gopStarts: Uint32Array;
+  private readonly gopStarts: number[] = [];
   /** PTS of each packet once its GOP is analysed (NaN before). */
-  private readonly pts: Float64Array;
+  private readonly pts: number[] = [];
+  /** Chunks of the table taken in by `sync`. */
+  private synced = 0;
   private readonly gopJobs = new Map<number, Promise<void>>();
   private readonly frameDuration: number;
   readonly fourcc: string;
@@ -292,31 +420,42 @@ export class AviVideoBacking extends AviBacking {
   private readonly ppsToSps = new Map<number, number>();
   private configPromise: Promise<VideoDecoderConfig | null> | null = null;
 
-  constructor(demuxer: AviDemuxer, stream: AviStreamHeader, table: ChunkTable) {
-    super(demuxer, stream, table);
+  constructor(demuxer: AviDemuxer, stream: AviStreamHeader, index: AviIndex) {
+    super(demuxer, stream, index);
     const video = stream.video!;
     const handler = stream.handler.replace(/\0/g, '').trim();
     const compression = video.compression.replace(/\0/g, '').trim();
-    this.isAvc = isH264FourCC(handler) || isH264FourCC(compression);
+    this.isAvc = isAvcStream(stream);
     this.fourcc =
       (this.isAvc && !isH264FourCC(handler) ? compression : handler || compression) || '';
     this.frameDuration = stream.rate > 0 && stream.scale > 0 ? stream.scale / stream.rate : 1 / 25;
-    const extra = video.extra;
-    this.lengthSize = extra[0] === 1 && extra.length >= 7 ? (extra[4]! & 3) + 1 : 0;
+    this.lengthSize = avcLengthSize(video.extra);
     if (this.isAvc) this.learnParameterSets(this.extradataNals());
+    this.sync();
+  }
 
-    const n = table.sizes.length;
-    let count = 0;
-    for (let i = 0; i < n; i++) if (table.sizes[i]! > 0) count++;
-    this.packetChunk = new Uint32Array(count);
-    const starts: number[] = [];
-    for (let i = 0, p = 0; i < n; i++) {
-      if (table.sizes[i] === 0) continue;
-      if (p === 0 || table.keys[i]) starts.push(p);
-      this.packetChunk[p++] = i;
+  protected sync() {
+    const t = this.table;
+    for (; this.synced < t.length; this.synced++) {
+      const i = this.synced;
+      if (t.sizes[i] === 0) continue;
+      const p = this.packetChunk.length;
+      if (p === 0 || t.keys[i]) this.gopStarts.push(p);
+      this.packetChunk.push(i);
+      this.pts.push(NaN);
     }
-    this.gopStarts = Uint32Array.from(starts);
-    this.pts = new Float64Array(count).fill(NaN);
+  }
+
+  /** Source time of the last frame known so far (`seekLimit` while scanning). */
+  scannedEnd(): number {
+    this.sync();
+    const n = this.packetChunk.length;
+    return n === 0 ? 0 : this.dts(n - 1);
+  }
+
+  private lastDts(): number {
+    const n = this.packetChunk.length;
+    return n === 0 ? -Infinity : this.dts(n - 1);
   }
 
   getType() {
@@ -354,10 +493,16 @@ export class AviVideoBacking extends AviBacking {
     return false;
   }
   getHasOnlyKeyPackets() {
-    return this.gopStarts.length === this.packetChunk.length;
+    this.sync();
+    return this.complete && this.gopStarts.length === this.packetChunk.length;
   }
+  /** Frame slots × frame duration; while the index still grows, what the headers say. */
   async getDurationFromMetadata() {
-    const slots = Math.max(this.table.sizes.length, this.stream.length);
+    let slots = Math.max(this.table.length, this.stream.length);
+    if (!this.complete) {
+      const ticks = this.index.totalTicks(this.stream.index);
+      slots = Math.max(slots, ticks ?? 0, ticks === null ? this.demuxer.totalFrames : 0);
+    }
     return (slots + this.stream.start) * this.frameDuration;
   }
 
@@ -369,7 +514,7 @@ export class AviVideoBacking extends AviBacking {
     return (this.configPromise ??= (async () => {
       if (!this.isAvc) return null;
       let sps = this.firstSpsNal();
-      if (!sps && this.packetChunk.length > 0) {
+      if (!sps && (await this.growUntil(() => this.packetChunk.length > 0))) {
         this.learnParameterSets(
           nalUnits(await this.readChunk(this.packetChunk[0]!), this.lengthSize),
         );
@@ -394,6 +539,7 @@ export class AviVideoBacking extends AviBacking {
   }
   /** Key frames are GOP starts, so their PTS is their DTS: found from the index alone. */
   async getKeyPacket(timestamp: number, options: RetrievalOptions) {
+    await this.growForTime(() => this.lastDts() > timestamp);
     const g = lastAtOrBefore(this.gopStarts.length, (i) => this.dts(this.gopStarts[i]!), timestamp);
     if (g < 0) return null;
     // Packet 0 starts a GOP even when it isn't flagged key; skip it then.
@@ -406,14 +552,16 @@ export class AviVideoBacking extends AviBacking {
     return this.packetAt(p, options);
   }
   async getNextKeyPacket(packet: EncodedPacket, options: RetrievalOptions) {
-    for (let g = 0; g < this.gopStarts.length; g++) {
+    this.sync();
+    for (let g = Math.max(0, this.gopOf(packet.sequenceNumber)); ; g++) {
+      if (!(await this.growUntil(() => this.gopStarts.length > g))) return null;
       const p = this.gopStarts[g]!;
       if (p > packet.sequenceNumber && this.isKey(p)) return this.packetAt(p, options);
     }
-    return null;
   }
   /** Last packet in presentation order with PTS ≤ `timestamp`. */
   async getPacket(timestamp: number, options: RetrievalOptions) {
+    await this.growForTime(() => this.lastDts() > timestamp);
     const g = lastAtOrBefore(this.gopStarts.length, (i) => this.dts(this.gopStarts[i]!), timestamp);
     if (g < 0) return null;
     await this.analyseGop(g);
@@ -440,7 +588,7 @@ export class AviVideoBacking extends AviBacking {
   }
 
   private async packetAt(p: number, _options: RetrievalOptions): Promise<EncodedPacket | null> {
-    if (p < 0 || p >= this.packetChunk.length) return null;
+    if (p < 0 || !(await this.growUntil(() => p < this.packetChunk.length))) return null;
     const g = this.gopOf(p);
     // A GOP's first packet has rank 0: PTS = DTS without reading the GOP.
     if (p === this.gopStarts[g]) this.pts[p] = this.dts(p);
@@ -456,10 +604,14 @@ export class AviVideoBacking extends AviBacking {
     );
   }
 
-  /** Reads GOP `g`'s packets and sets their PTS from the POC rank (POC type 0), else PTS = DTS. */
-  private analyseGop(g: number): Promise<void> {
+  /**
+   * Reads GOP `g`'s packets and sets their PTS from the POC rank (POC type 0), else PTS = DTS. A
+   * growing index is read up to the next GOP first, so the GOP is whole.
+   */
+  private async analyseGop(g: number): Promise<void> {
+    await this.growUntil(() => this.gopStarts.length > g + 1);
     const [from, to] = this.gopRange(g);
-    if (!Number.isNaN(this.pts[to - 1]!)) return Promise.resolve();
+    if (!Number.isNaN(this.pts[to - 1]!)) return;
     let job = this.gopJobs.get(g);
     if (!job) {
       job = this.computeGop(from, to).finally(() => this.gopJobs.delete(g));
@@ -555,25 +707,36 @@ interface FramePos {
  */
 export class AviAudioBacking extends AviBacking {
   private readonly layout: AudioLayout;
-  /** Stream position of each chunk's first byte; `cum[n]` = stream length. */
-  private readonly cum: Float64Array;
+  /** Stream position of each chunk's first byte; `cum[n]` = stream length (so far). */
+  private readonly cum: number[] = [0];
   /** Chunk index of each non-empty chunk (VBR: one frame each, which times seeks). */
-  private readonly nonEmpty: Uint32Array;
+  private readonly nonEmpty: number[] = [];
   private readonly sampleRate: number;
   private adtsConfig: Promise<Uint8Array | null> | null = null;
 
-  constructor(demuxer: AviDemuxer, stream: AviStreamHeader, table: ChunkTable) {
-    super(demuxer, stream, table);
+  constructor(demuxer: AviDemuxer, stream: AviStreamHeader, index: AviIndex) {
+    super(demuxer, stream, index);
     this.layout = audioLayout(stream.audio!);
     this.sampleRate = stream.audio!.sampleRate || 48_000;
-    const n = table.sizes.length;
-    this.cum = new Float64Array(n + 1);
-    const nonEmpty: number[] = [];
-    for (let i = 0; i < n; i++) {
-      this.cum[i + 1] = this.cum[i]! + table.sizes[i]!;
-      if (table.sizes[i]! > 0) nonEmpty.push(i);
+    this.sync();
+  }
+
+  protected sync() {
+    const t = this.table;
+    for (let i = this.cum.length - 1; i < t.length; i++) {
+      this.cum.push(this.cum[i]! + t.sizes[i]!);
+      if (t.sizes[i]! > 0) this.nonEmpty.push(i);
     }
-    this.nonEmpty = Uint32Array.from(nonEmpty);
+  }
+
+  /** Chunks taken in by `sync`. */
+  private get chunkCount(): number {
+    return this.cum.length - 1;
+  }
+
+  /** Grows the index until the stream has `end` bytes (or is complete). */
+  private need(end: number): Promise<boolean> {
+    return this.growUntil(() => this.streamLength >= end);
   }
 
   getType() {
@@ -596,7 +759,12 @@ export class AviAudioBacking extends AviBacking {
   }
   async getDurationFromMetadata() {
     const wf = this.stream.audio!;
-    const total = this.cum[this.cum.length - 1]!;
+    const { scale, rate } = this.stream;
+    if (!this.complete) {
+      const ticks = this.index.totalTicks(this.stream.index) ?? this.stream.length;
+      return rate > 0 && ticks > 0 ? (ticks * scale) / rate : null;
+    }
+    const total = this.streamLength;
     if (this.stream.sampleSize === 0 && this.stream.rate > 0) {
       return (this.nonEmpty.length * this.stream.scale) / this.stream.rate;
     }
@@ -652,16 +820,18 @@ export class AviAudioBacking extends AviBacking {
     const { scale, rate, sampleSize } = this.stream;
     if (this.layout.kind === 'chunks') {
       const per = this.layout.samplesPerChunk / this.sampleRate;
-      const k = Math.min(Math.floor(timestamp / per + EPSILON), this.nonEmpty.length - 1);
+      const want = Math.floor(timestamp / per + EPSILON);
+      await this.growForTime(() => this.nonEmpty.length > want);
+      const k = Math.min(want, this.nonEmpty.length - 1);
       return k < 0 ? null : this.chunkPacket(k, options);
     }
     let anchor: FramePos;
     if (sampleSize === 0 && rate > 0 && scale > 0) {
       // VBR: one frame per non-empty chunk, each dwScale / dwRate long.
-      const k = Math.max(
-        0,
-        Math.min(Math.floor((timestamp * rate) / scale + EPSILON), this.nonEmpty.length - 1),
-      );
+      const want = Math.floor((timestamp * rate) / scale + EPSILON);
+      await this.growForTime(() => this.nonEmpty.length > want);
+      if (this.nonEmpty.length === 0) return null;
+      const k = Math.max(0, Math.min(want, this.nonEmpty.length - 1));
       anchor = {
         pos: this.cum[this.nonEmpty[k]!]!,
         samples: Math.round(((k * scale) / rate) * this.sampleRate),
@@ -673,6 +843,8 @@ export class AviAudioBacking extends AviBacking {
       const frameBytes = framer.headerSize === 0 ? framer.parse(new Uint8Array(0), 0)!.size : 0;
       let pos = Math.max(0, Math.floor(timestamp * avg) - (frameBytes ? 0 : 4096));
       if (frameBytes) pos -= pos % frameBytes;
+      const want = pos;
+      await this.growForTime(() => this.streamLength > want);
       pos = Math.min(pos, Math.max(0, this.streamLength - 1));
       anchor = { pos, samples: Math.round((pos / avg) * this.sampleRate) };
     }
@@ -705,10 +877,11 @@ export class AviAudioBacking extends AviBacking {
   private async readStream(pos: number, length: number): Promise<Uint8Array> {
     const end = Math.min(pos + length, this.streamLength);
     if (end <= pos) return new Uint8Array(0);
-    let c = lastAtOrBefore(this.table.sizes.length, (i) => this.cum[i]!, pos);
+    const n = this.chunkCount;
+    let c = lastAtOrBefore(n, (i) => this.cum[i]!, pos);
     const parts: Uint8Array[] = [];
     let p = pos;
-    while (p < end && c < this.table.sizes.length) {
+    while (p < end && c < n) {
       const chunkEnd = this.cum[c + 1]!;
       if (chunkEnd > p) {
         const to = Math.min(end, chunkEnd);
@@ -730,11 +903,13 @@ export class AviAudioBacking extends AviBacking {
   /** The frame at stream position `pos` (null if there's none), clipped at the stream end. */
   private async frameAt(pos: number): Promise<AudioFrame | null> {
     const framer = this.framer;
+    await this.need(pos + Math.max(1, framer.headerSize));
     const head = framer.headerSize
       ? await this.readStream(pos, framer.headerSize)
       : new Uint8Array(0);
     const frame = framer.parse(head, 0);
     if (!frame || pos >= this.streamLength) return null;
+    await this.need(pos + frame.size);
     return this.clip(pos, frame);
   }
 
@@ -753,12 +928,16 @@ export class AviAudioBacking extends AviBacking {
   private async resync(pos: number): Promise<{ pos: number; frame: AudioFrame } | null> {
     const framer = this.framer;
     if (framer.headerSize === 0) {
-      const frame =
-        pos < this.streamLength ? this.clip(pos, framer.parse(new Uint8Array(0), 0)!) : null;
+      const whole = framer.parse(new Uint8Array(0), 0)!;
+      await this.need(pos + whole.size);
+      const frame = pos < this.streamLength ? this.clip(pos, whole) : null;
       return frame && frame.size > 0 ? { pos, frame } : null;
     }
     const WINDOW = 16 * 1024;
-    for (let start = pos; start < this.streamLength && start < pos + 256 * 1024; start += WINDOW) {
+    for (let start = pos; start < pos + 256 * 1024; start += WINDOW) {
+      // The window plus room for the frame after a header found in it (largest: DTS, 16 KiB).
+      await this.need(start + WINDOW + 24 * 1024);
+      if (start >= this.streamLength) break;
       const b = await this.readStream(start, WINDOW + 8 * 1024);
       for (let i = 0; i < Math.min(WINDOW, b.length); i++) {
         const frame = framer.parse(b, i);
@@ -793,7 +972,8 @@ export class AviAudioBacking extends AviBacking {
   }
 
   private async chunkPacket(k: number, _options: RetrievalOptions): Promise<EncodedPacket | null> {
-    if (this.layout.kind !== 'chunks' || k < 0 || k >= this.nonEmpty.length) return null;
+    if (this.layout.kind !== 'chunks' || k < 0) return null;
+    if (!(await this.growUntil(() => this.nonEmpty.length > k))) return null;
     const per = this.layout.samplesPerChunk / this.sampleRate;
     const data = await this.readChunk(this.nonEmpty[k]!);
     return new this.mb.EncodedPacket(data, 'key', k * per, per, k);
