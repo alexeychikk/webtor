@@ -7,6 +7,7 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleQuestionMark from '@lucide/svelte/icons/circle-question-mark';
+  import History from '@lucide/svelte/icons/history';
   import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import RotateCw from '@lucide/svelte/icons/rotate-cw';
   import SearchX from '@lucide/svelte/icons/search-x';
@@ -18,6 +19,7 @@
   import { relaySettings } from '../torrent/relay-settings.svelte';
   import IconButton from '../ui/IconButton.svelte';
   import { PLAYBACK_ERROR_TITLES, playbackErrorMessage, type PlaybackErrorCode } from './errors';
+  import { formatTime } from './format';
   import { errorActions, type StateCard, type StateToast } from './states';
 
   let {
@@ -28,6 +30,9 @@
     shown,
     onretry,
     ondismiss,
+    resumedAt = null,
+    onstartover,
+    ondismissresume,
   }: {
     card: StateCard | null;
     toasts: readonly StateToast[];
@@ -38,6 +43,10 @@
     shown: boolean;
     onretry: () => void;
     ondismiss: (code: PlaybackErrorCode) => void;
+    /** Element time the file resumed at (watch state): the "Resumed at · Start over" toast. */
+    resumedAt?: number | null;
+    onstartover?: () => void;
+    ondismissresume?: () => void;
   } = $props();
 
   let moreOpen = $state(false);
@@ -46,8 +55,29 @@
 </script>
 
 <div class="states" class:carded={card !== null}>
-  {#if toasts.length}
+  {#if toasts.length || (resumedAt !== null && !card)}
     <div class="toasts" class:hidden={!shown}>
+      {#if resumedAt !== null && !card}
+        <div class="toast" data-testid="resume-toast" role="status">
+          <div class="toast-row">
+            <span class="toast-icon resume"><History size={18} aria-hidden="true" /></span>
+            <span class="toast-title">Resumed at {formatTime(resumedAt)}</span>
+            <button
+              type="button"
+              class="toast-action"
+              data-testid="start-over"
+              onclick={() => onstartover?.()}>Start over</button
+            >
+            <IconButton
+              class="small"
+              testid="resume-dismiss"
+              icon={X}
+              label="Dismiss"
+              onclick={() => ondismissresume?.()}
+            />
+          </div>
+        </div>
+      {/if}
       {#each toasts as t (t.code)}
         {@const open = expanded === t.code}
         <div class="toast" class:open data-testid="notice" data-code={t.code} role="status">
@@ -214,6 +244,29 @@
     flex: none;
     margin-right: var(--space-1);
     color: var(--warning);
+  }
+  .toast-icon.resume {
+    color: var(--accent-fg);
+  }
+  .toast-action {
+    flex: none;
+    height: 2rem;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: none;
+    color: var(--accent-fg);
+    font: inherit;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+  }
+  .toast-action:hover {
+    background: var(--surface-3);
+  }
+  .toast-action:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .toast-title {
     flex: 1;
