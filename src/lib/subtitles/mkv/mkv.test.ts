@@ -6,6 +6,7 @@ import type { SubtitleCue } from '../cue';
 import { assBlockText } from './blocks';
 import { ID, readVint } from './ebml';
 import {
+  EmbeddedSubtitleScan,
   MAX_FONT_BYTES,
   assHeaderOf,
   embeddedTrackInfo,
@@ -455,5 +456,37 @@ describe('embedded selector entries', () => {
   it('takes the Text field of an ASS block', () => {
     expect(assBlockText('12,0,Default,,0,0,0,,Hi, there')).toBe('Hi, there');
     expect(assBlockText('broken')).toBe('broken');
+  });
+});
+
+describe('embedded subtitle scan following the playhead', () => {
+  /** Stand-in for the `<video>`: the scan reads `currentTime` and listens for `seeking`. */
+  function fakeVideo(currentTime: number) {
+    return Object.assign(new EventTarget(), { currentTime }) as unknown as HTMLVideoElement;
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  it('rescans the margin behind a seek target that an earlier scan started after', async () => {
+    const { source } = memorySource(fixture);
+    const header = (await readMkvHeader(new ByteReader(source)))!;
+    // Opened at 8.5 s (or the first scan was aborted by a seek there): read from 3.5 s on.
+    const video = fakeVideo(8.5);
+    const texts: string[] = [];
+    const scan = new EmbeddedSubtitleScan(source, header, video, 0, {
+      onCues: (_, cues) => texts.push(...cues.map((c) => c.text)),
+      onError: (err) => {
+        throw err;
+      },
+    });
+    scan.setActive(true);
+    await settle();
+    expect(texts).not.toContain('Hello from English SRT');
+
+    // Back to 3.5 s: inside the covered range, but its 5 s margin (the 1–3 s cue) was never read.
+    video.currentTime = 3.5;
+    video.dispatchEvent(new Event('seeking'));
+    await settle();
+    expect(texts).toContain('Hello from English SRT');
+    scan.destroy();
   });
 });

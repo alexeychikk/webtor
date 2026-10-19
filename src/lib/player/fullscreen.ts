@@ -45,12 +45,22 @@ export function detectDisplayCapabilities(
   };
 }
 
-/** What the player's fullscreen button does: the container, the bare video (iOS), or no button. */
+/** What the player's fullscreen control does: the container, the bare video (iOS), or none. */
 export type FullscreenMethod = 'container' | 'video' | 'none';
 
 export function fullscreenMethod(caps: DisplayCapabilities): FullscreenMethod {
   if (caps.containerFullscreen) return 'container';
   return caps.videoFullscreen ? 'video' : 'none';
+}
+
+/**
+ * Which controls the player shows. Where the container can go fullscreen: our control bar, whose one
+ * fullscreen button fullscreens the container (a native control would fullscreen the bare video and
+ * hide the ASS overlay, and Firefox's can't be hidden). Elsewhere the browser's native controls,
+ * whose fullscreen (iOS) is the video's own, or which show none where fullscreen isn't allowed.
+ */
+export function controlsFor(method: FullscreenMethod): 'own' | 'native' {
+  return method === 'container' ? 'own' : 'native';
 }
 
 /** How an ASS/SSA track is drawn right now: libass on the overlay canvas, or plain text cues. */

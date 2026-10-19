@@ -112,6 +112,7 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  PlayerControls.svelte        our control bar (play, seek, time, volume, the one fullscreen icon)
   avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
@@ -119,7 +120,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   StatsPanel.svelte ShareButton.svelte   peers/speed/progress panel; "Copy share link" (`shareUrl`)
 src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay);
                                open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
-  fullscreen.ts                capabilities (styled ASS, container/video fullscreen), button method,
+  fullscreen.ts                capabilities (styled ASS, container/video fullscreen), fullscreen method,
+                               own control bar vs native controls (`controlsFor`),
                                ASS styled-vs-text decision; prefixed Fullscreen API glue
 src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004)
   manager.svelte.ts            selector state; one TextTrack of VTTCues per source; default pick;
@@ -177,8 +179,10 @@ docs/decisions/                ADRs
   only with 2+ video files), `torrent-file` (the .torrent input), `video`, `status` (with `data-phase`), `error` and `notice` (with
   `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
   `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off), `subtitle-upload` (file
-  input), `screen` (the container our fullscreen button and the `f` shortcut fullscreen),
-  `fullscreen` (that button, `aria-pressed`) and `ass-canvas` (the JASSUB overlay; exists only while
+  input), `screen` (the container our fullscreen button, the `f` shortcut and a double-click on the
+  video fullscreen), `controls` (our control bar; class `shown`) with `play-pause`, `seek`, `time`,
+  `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label` "Fullscreen" /
+  "Exit fullscreen"; none of these exist on iOS or without fullscreen: native controls there) and `ass-canvas` (the JASSUB overlay; exists only while
   an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas after a paused
   seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
   when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish hooks: `why-button`
@@ -208,7 +212,18 @@ docs/decisions/                ADRs
   `timeOffset = −delay` (`AssOverlay.setDelay`). Any renderer must draw cues shifted by it. Note: a disabled
   `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
 - Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
-  Ctrl/Meta/Alt; they act only while a file is open (not idle/error).
+  Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
+  (`[data-player-controls]`) they work, except arrows on its sliders. Player.svelte handles them in
+  the window's capture phase (preventDefault + stopPropagation, keyup of a handled Space too, no
+  auto-repeat except seeks), so a focused button or native control never toggles a second time.
+- **Player controls (ADR 0004).** Where the container can go fullscreen (`controlsFor` = `own`), the
+  `<video>` has no `controls`: `PlayerControls.svelte` sits below the picture, and over it in
+  fullscreen (text cues are lifted above it via `::-webkit-media-text-track-container`). While
+  playing, the bar and cursor hide 1 s after the pointer rests (3 s after a touch), at once when it
+  leaves the player or window; any move, touch or key shows them; kept while paused or with the
+  pointer on the bar. Hidden = `visibility: hidden` (Playwright `toBeHidden`). No "Exit fullscreen"
+  text anywhere (aria-label/title only). Click on the video = play/pause, double-click =
+  fullscreen. iOS (video-only fullscreen) and pages without fullscreen keep the native controls.
 - AVI fixtures (ADR 0007): `avi-h264-mp3.avi` (12 s 640×360 H.264 High with B-frames + VBR MP3; plays
   in the browser), `avi-xvid-mp3.avi` and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·

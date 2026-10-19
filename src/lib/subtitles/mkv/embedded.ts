@@ -172,11 +172,13 @@ export class EmbeddedSubtitleScan {
     try {
       while (this.active && !this.destroyed) {
         const t = this.sourceTime();
-        if (t >= this.from && this.until >= t + SCAN_REFILL_S) return;
+        // Covered only with the margin behind the playhead too: a cue still on screen can start
+        // a Cluster or two earlier (an aborted scan may have started past it).
+        const from = Math.max(0, t - SCAN_BEHIND_S);
+        if (from >= this.from && this.until >= t + SCAN_REFILL_S) return;
         const abort = new AbortController();
         this.scanAbort = abort;
         try {
-          const from = Math.max(0, t - SCAN_BEHIND_S);
           this.until = await this.scanner.scan(from, t + SCAN_AHEAD_S, abort.signal);
           this.from = from;
         } catch (err) {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assRenderMode,
+  controlsFor,
   detectDisplayCapabilities,
   fullscreenMethod,
   type DisplayCapabilities,
@@ -79,14 +80,22 @@ describe('display capabilities', () => {
   });
 });
 
-describe('fullscreen button', () => {
-  it('fullscreens the container where it can, else the video (iOS), else is hidden', () => {
+describe('fullscreen control', () => {
+  it('fullscreens the container where it can, else the video (iOS), else there is none', () => {
     expect(fullscreenMethod(caps({}))).toBe('container');
     expect(fullscreenMethod(caps({ videoFullscreen: true }))).toBe('container');
     expect(fullscreenMethod(caps({ containerFullscreen: false, videoFullscreen: true }))).toBe(
       'video',
     );
     expect(fullscreenMethod(caps({ containerFullscreen: false }))).toBe('none');
+  });
+
+  it('is our control bar where the container can go fullscreen, else the native controls', () => {
+    expect(controlsFor(fullscreenMethod(detectDisplayCapabilities(desktop())))).toBe('own');
+    expect(controlsFor(fullscreenMethod(detectDisplayCapabilities(iphone)))).toBe('native');
+    expect(controlsFor('container')).toBe('own');
+    expect(controlsFor('video')).toBe('native');
+    expect(controlsFor('none')).toBe('native');
   });
 });
 
