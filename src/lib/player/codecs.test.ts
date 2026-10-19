@@ -10,6 +10,7 @@ import {
   type TranscodeTarget,
 } from './codecs';
 import type { AudioTrackInfo } from './types';
+import { matchAudioTrack } from './watch-state';
 
 // What desktop Chromium on Linux typically reports: H.264 8-bit, VP9, AV1, AAC, Opus; no HEVC, no AC-3.
 const chromiumLinux = (mime: string) =>
@@ -243,6 +244,22 @@ describe('pickLoadableAudioTrack', () => {
       outputCodec: null,
       reason: 'the AC-3 converter failed to load',
     });
+  });
+  it('prefers the restored track, and the language preference once it fails', async () => {
+    const restore = (list: readonly AudioTrackInfo[]) =>
+      matchAudioTrack(list, { id: 3, language: 'rus', label: 't3', codec: 'eac3' });
+    const ok = await pickLoadableAudioTrack(tracks, 'eng', async () => {}, restore);
+    expect(ok.track?.id).toBe(3);
+    const r = await pickLoadableAudioTrack(
+      tracks,
+      'eng',
+      async (t) => {
+        if (t.id === 3) throw new Error('chunk 404');
+      },
+      restore,
+    );
+    expect(r.track?.id).toBe(1);
+    expect(r.failed).toEqual([3]);
   });
   it('plays muted when every load fails', async () => {
     const r = await pickLoadableAudioTrack(tracks, null, () => Promise.reject(new Error('x')));

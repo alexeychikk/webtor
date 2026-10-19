@@ -101,4 +101,33 @@ for audio in mp3 ac3; do
     "${acodec[@]}" \
     "avi-xvid-$audio.avi"
 done
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi
+# resume/: a two-video torrent for the per-video watch state (resume, remembered tracks).
+# movie.mkv: 40 s 320x180 H.264 · audio eng AAC (default) + rus AC-3 · two English SRT tracks
+# ("English", "English SDH") and one Russian; extra.mkv is sample.mkv (symlink).
+mkdir -p resume
+srt() { # $1 = text prefix: one 1 s cue every 2 s
+  for i in $(seq 0 19); do
+    printf '%d\n00:00:%02d,000 --> 00:00:%02d,000\n%s %d\n\n' $((i + 1)) $((i * 2)) $((i * 2 + 1)) "$1" "$i"
+  done
+}
+srt 'English' > "$tmp/en.srt"
+srt 'English SDH' > "$tmp/sdh.srt"
+srt 'Русский' > "$tmp/ru.srt"
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i testsrc2=size=320x180:rate=24:duration=40 \
+  -f lavfi -i sine=frequency=440:duration=40 \
+  -f lavfi -i sine=frequency=660:duration=40 \
+  -i "$tmp/en.srt" -i "$tmp/sdh.srt" -i "$tmp/ru.srt" \
+  -map 0:v -map 1:a -map 2:a -map 3 -map 4 -map 5 \
+  -c:v libx264 -preset veryfast -g 48 -pix_fmt yuv420p -b:v 120k \
+  -c:a:0 aac -b:a:0 48k -c:a:1 ac3 -b:a:1 96k -ac:a:1 2 \
+  -c:s srt \
+  -metadata:s:a:0 language=eng -metadata:s:a:0 title="English AAC" \
+  -metadata:s:a:1 language=rus -metadata:s:a:1 title="Russian AC3" \
+  -metadata:s:s:0 language=eng -metadata:s:s:0 title="English" \
+  -metadata:s:s:1 language=eng -metadata:s:s:1 title="English SDH" \
+  -metadata:s:s:2 language=rus -metadata:s:s:2 title="Russian" \
+  -disposition:a:0 default \
+  resume/movie.mkv
+ln -sfn ../sample.mkv resume/extra.mkv
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv
