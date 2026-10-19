@@ -2,7 +2,10 @@
 # Regenerates e2e/fixtures/sample.mkv: 12 s 640x360 H.264, two audio tracks (eng AAC 440 Hz,
 # rus AC-3 880 Hz — the second one forces the in-browser transcode path), embedded SRT (eng) and
 # ASS (rus) subtitles. Plus a sidecar SRT, and offset.ts: 10 s H.264 + AAC MPEG-TS whose first
-# timestamp is ~1.4 s (the muxer default), for the non-zero start time path. Needs an ffmpeg with libx264 + ac3 on PATH, or:
+# timestamp is ~1.4 s (the muxer default), for the non-zero start time path. And three AVI files
+# (docs/decisions/0007): avi-h264-mp3.avi (H.264 High with B-frames + VBR MP3, plays in the browser),
+# avi-xvid-mp3.avi and avi-xvid-ac3.avi (MPEG-4 Part 2 "Xvid": needs the relay to convert the video).
+# Needs an ffmpeg with libx264 + libxvid + libmp3lame + ac3 on PATH, or:
 #   FFMPEG=$(node -e "console.log(require('ffmpeg-static'))") after `npm i --no-save ffmpeg-static`
 set -euo pipefail
 FFMPEG=${FFMPEG:-ffmpeg}
@@ -57,4 +60,24 @@ ASS
   -c:v libx264 -preset veryfast -g 24 -pix_fmt yuv420p -b:v 150k \
   -c:a aac -b:a 48k \
   offset.ts
-ls -l sample.mkv sidecar.en.srt offset.ts
+# AVI: 12 s, 24 fps, closed 2 s GOPs. ffmpeg writes idx1 (and OpenDML indx/ix## only past 1 GB).
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i testsrc2=size=640x360:rate=24:duration=12 \
+  -f lavfi -i sine=frequency=440:duration=12 \
+  -c:v libx264 -preset veryfast -bf 2 -g 48 -pix_fmt yuv420p -b:v 300k \
+  -c:a libmp3lame -q:a 5 \
+  avi-h264-mp3.avi
+
+for audio in mp3 ac3; do
+  case $audio in
+    mp3) acodec=(-c:a libmp3lame -b:a 96k) ;;
+    ac3) acodec=(-c:a ac3 -b:a 96k -ac 2) ;;
+  esac
+  "$FFMPEG" -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=320x180:rate=24:duration=12 \
+    -f lavfi -i sine=frequency=880:duration=12 \
+    -c:v libxvid -vtag XVID -bf 2 -g 48 -q:v 12 \
+    "${acodec[@]}" \
+    "avi-xvid-$audio.avi"
+done
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi

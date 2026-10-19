@@ -171,6 +171,22 @@ what you download through it.
   `error` line on stderr is worth a look.
 - SIGINT/SIGTERM shut down gracefully: in-flight requests get 3 s, then torrents are dropped and
   their data deleted. A second Ctrl-C kills the process.
+- **Video conversion** (optional, needs ffmpeg with libx264). Browsers can't decode DivX/Xvid, so
+  the app asks the relay to convert the video track: `GET {relay URL}/v1/torrents/<infohash>/transcode/<file
+index>?start=<seconds>` streams fragmented MP4 (H.264 High, CRF 23, keyframe every 2 s, no audio:
+  the browser handles audio and subtitles itself) starting at `start`. The relay looks for ffmpeg at
+  `-ffmpeg`, then on `PATH`, then next to its own binary, and prints `Video conversion: on (…)` or
+  `off` at startup. Install it with `winget install ffmpeg`, `brew install ffmpeg` or
+  `apt install ffmpeg`, then restart the relay. Video taller than `-transcode-max-height` is scaled
+  down (never up). At most `-max-transcodes` conversions run at once: a request for the same file
+  (a seek) replaces its conversion, one for another file gets 429 `{"error": "transcode-busy",
+"maxTranscodes": N}`. Without ffmpeg it answers 503 `transcode-unavailable`, and 422
+  `transcode-failed` (with ffmpeg's last error lines in `detail`) when ffmpeg can't read the file.
+  ffmpeg converts only as fast as the browser reads, stops when the request ends, and is killed when
+  its output hasn't moved for 10 minutes (a paused tab). `/v1/info` reports it as
+  `transcode: {available, ffmpeg, maxHeight, preset, maxTranscodes}`. On 4 ARM cores `veryfast` at
+  720p converts 2–3× faster than realtime; on a slower machine lower `-transcode-max-height` or pick
+  a faster preset.
 - Multi-file torrents work, but WebTorrent puts file names into web seed URLs without
   percent-encoding them. A `?` is recovered from the query string. A `#` truncates the URL, so the
   relay picks the only file that continues the truncated path with `#` and is long enough for the
@@ -181,22 +197,27 @@ what you download through it.
 
 Every flag can also be set by its environment variable (handy in Docker).
 
-| Flag                   | Env                                | Default                                                               |
-| ---------------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| `-listen`              | `WEBTOR_RELAY_LISTEN`              | `127.0.0.1:7881` (image: `0.0.0.0:7881`)                              |
-| `-public-url`          | `WEBTOR_RELAY_PUBLIC_URL`          | `http://<listen>`                                                     |
-| `-token`               | `WEBTOR_RELAY_TOKEN`               | generated, saved in data dir                                          |
-| `-data-dir`            | `WEBTOR_RELAY_DATA_DIR`            | `<user cache dir>/webtor-relay` (image: `/home/nonroot/webtor-relay`) |
-| `-peer-port`           | `WEBTOR_RELAY_PEER_PORT`           | `42069` (`0` = random)                                                |
-| `-max-torrents`        | `WEBTOR_RELAY_MAX_TORRENTS`        | `3`                                                                   |
-| `-metadata-timeout`    | `WEBTOR_RELAY_METADATA_TIMEOUT`    | `90s`                                                                 |
-| `-idle-timeout`        | `WEBTOR_RELAY_IDLE_TIMEOUT`        | `10m`                                                                 |
-| `-readahead`           | `WEBTOR_RELAY_READAHEAD`           | `33554432` (32 MiB)                                                   |
-| `-no-upload`           | `WEBTOR_RELAY_NO_UPLOAD`           | off                                                                   |
-| `-no-default-trackers` | `WEBTOR_RELAY_NO_DEFAULT_TRACKERS` | off                                                                   |
-| `-no-dht`              | `WEBTOR_RELAY_NO_DHT`              | off                                                                   |
-| `-debug`               | `WEBTOR_RELAY_DEBUG`               | off (logs every API request)                                          |
-| `-version`             |                                    | print the version and exit                                            |
+| Flag                    | Env                                 | Default                                                               |
+| ----------------------- | ----------------------------------- | --------------------------------------------------------------------- |
+| `-listen`               | `WEBTOR_RELAY_LISTEN`               | `127.0.0.1:7881` (image: `0.0.0.0:7881`)                              |
+| `-public-url`           | `WEBTOR_RELAY_PUBLIC_URL`           | `http://<listen>`                                                     |
+| `-token`                | `WEBTOR_RELAY_TOKEN`                | generated, saved in data dir                                          |
+| `-data-dir`             | `WEBTOR_RELAY_DATA_DIR`             | `<user cache dir>/webtor-relay` (image: `/home/nonroot/webtor-relay`) |
+| `-peer-port`            | `WEBTOR_RELAY_PEER_PORT`            | `42069` (`0` = random)                                                |
+| `-max-torrents`         | `WEBTOR_RELAY_MAX_TORRENTS`         | `3`                                                                   |
+| `-metadata-timeout`     | `WEBTOR_RELAY_METADATA_TIMEOUT`     | `90s`                                                                 |
+| `-idle-timeout`         | `WEBTOR_RELAY_IDLE_TIMEOUT`         | `10m`                                                                 |
+| `-readahead`            | `WEBTOR_RELAY_READAHEAD`            | `33554432` (32 MiB)                                                   |
+| `-no-upload`            | `WEBTOR_RELAY_NO_UPLOAD`            | off                                                                   |
+| `-no-default-trackers`  | `WEBTOR_RELAY_NO_DEFAULT_TRACKERS`  | off                                                                   |
+| `-no-dht`               | `WEBTOR_RELAY_NO_DHT`               | off                                                                   |
+| `-ffmpeg`               | `WEBTOR_RELAY_FFMPEG`               | `ffmpeg` on `PATH`, then next to the relay binary                     |
+| `-no-transcode`         | `WEBTOR_RELAY_NO_TRANSCODE`         | off (video conversion on when ffmpeg is found)                        |
+| `-max-transcodes`       | `WEBTOR_RELAY_MAX_TRANSCODES`       | `1`                                                                   |
+| `-transcode-preset`     | `WEBTOR_RELAY_TRANSCODE_PRESET`     | `veryfast` (libx264: `ultrafast` … `veryslow`)                        |
+| `-transcode-max-height` | `WEBTOR_RELAY_TRANSCODE_MAX_HEIGHT` | `720`                                                                 |
+| `-debug`                | `WEBTOR_RELAY_DEBUG`                | off (logs every API request)                                          |
+| `-version`              |                                     | print the version and exit                                            |
 
 ## Development
 

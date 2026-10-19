@@ -167,19 +167,19 @@ importers:
   .:
     dependencies:
       '@mediabunny/aac-encoder':
-        specifier: ^1.61.6
+        specifier: 1.61.6
         version: 1.61.6(mediabunny@1.61.6)
       '@mediabunny/ac3':
-        specifier: ^1.61.6
+        specifier: 1.61.6
         version: 1.61.6(mediabunny@1.61.6)
       '@mediabunny/dts':
-        specifier: ^1.61.6
+        specifier: 1.61.6
         version: 1.61.6(mediabunny@1.61.6)
       jassub:
         specifier: ^2.5.21
         version: 2.5.21
       mediabunny:
-        specifier: ^1.61.6
+        specifier: 1.61.6
         version: 1.61.6
       webtorrent:
         specifier: ^3.0.21

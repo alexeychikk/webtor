@@ -4,7 +4,9 @@
 //   - an `xs=` metadata source: GET {base}/v1/torrents/{infohash}/metainfo?<magnet query> returns the
 //     .torrent once the relay has fetched the info dictionary from the swarm, and
 //   - a BEP-19 web seed: GET {base}/v1/torrents/{infohash}/webseed/[<name>/<path>] serves file bytes
-//     with HTTP Range, downloading the covering pieces from regular peers on demand.
+//     with HTTP Range, downloading the covering pieces from regular peers on demand, and
+//   - a video converter (optional, needs ffmpeg): GET {base}/v1/torrents/{infohash}/transcode/{file}
+//     streams a file's video as fragmented H.264 MP4 (transcode.go, ADR 0007).
 //
 // WebTorrent in the page then verifies every piece hash itself, so the browser pipeline is unchanged.
 // See docs/decisions/0006-regular-peers-relay.md.
@@ -62,6 +64,8 @@ type Options struct {
 	Readahead int64
 	// DataDir, when set, is the client's NewStorage directory: a torrent's data dir is deleted on drop.
 	DataDir string
+	// Transcode configures video conversion; its FFmpeg path turns it on.
+	Transcode TranscodeOptions
 	// App, when set, is served at "/" (the embedded web app).
 	App    fs.FS
 	Logger *slog.Logger
@@ -76,6 +80,9 @@ type Server struct {
 	mu       sync.Mutex
 	torrents map[metainfo.Hash]*entry
 	closed   bool
+	// jobs are the running video conversions (transcode.go); jobsStopped refuses new ones.
+	jobs        map[jobKey]*transcodeJob
+	jobsStopped bool
 }
 
 type entry struct {
@@ -119,7 +126,10 @@ func New(cl *torrent.Client, opts Options) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &Server{cl: cl, opts: opts, log: opts.Logger, torrents: map[metainfo.Hash]*entry{}}, nil
+	if err := opts.Transcode.setDefaults(); err != nil {
+		return nil, err
+	}
+	return &Server{cl: cl, opts: opts, log: opts.Logger, torrents: map[metainfo.Hash]*entry{}, jobs: map[jobKey]*transcodeJob{}}, nil
 }
 
 // RunJanitor drops idle torrents until ctx is done.
@@ -146,8 +156,10 @@ func (s *Server) dropIdle(now time.Time) {
 	}
 }
 
-// Close drops every torrent and deletes its data. New requests get 503 afterwards.
+// Close kills every video conversion, drops every torrent and deletes its data. New requests get
+// 503 afterwards.
 func (s *Server) Close() {
+	s.StopTranscodes()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
@@ -188,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/torrents/{ih}/files", s.handleFiles)
 	mux.HandleFunc("GET /v1/torrents/{ih}/webseed/{path...}", s.handleWebseed)
 	mux.HandleFunc("HEAD /v1/torrents/{ih}/webseed/{path...}", s.handleWebseed)
+	mux.HandleFunc("GET /v1/torrents/{ih}/transcode/{fileIndex}", s.handleTranscode)
 	api := cors(s.logRequests(mux))
 	app := appHandler(s.opts.App)
 	prefix := "/" + s.opts.Token
@@ -290,8 +303,27 @@ func (w *statusWriter) WriteHeader(code int) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// APIVersion is /v1/info's "api": 2 added .../transcode/{fileIndex} and the "transcode" object.
+const APIVersion = 2
+
+// TranscodeInfo is /v1/info's "transcode" object.
+type TranscodeInfo struct {
+	Available     bool   `json:"available"`
+	FFmpeg        string `json:"ffmpeg"`
+	MaxHeight     int    `json:"maxHeight"`
+	Preset        string `json:"preset"`
+	MaxTranscodes int    `json:"maxTranscodes"`
+}
+
 func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"name": "webtor-relay", "version": Version, "api": 1})
+	t := s.opts.Transcode
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name": "webtor-relay", "version": Version, "api": APIVersion,
+		"transcode": TranscodeInfo{
+			Available: t.FFmpeg != "", FFmpeg: t.FFmpegVersion, MaxHeight: t.MaxHeight, Preset: t.Preset,
+			MaxTranscodes: t.MaxJobs,
+		},
+	})
 }
 
 // handleMetainfo adds the torrent (magnet params in the query: tr=, dn=, x.pe=, ws=) and waits for

@@ -92,6 +92,17 @@ describe('decideAudio', () => {
     });
   });
 
+  it('copies MP3 as mp4a.6b where MSE takes it, before any other path', () => {
+    const with6b = (mime: string) => mime === 'audio/mp4; codecs="mp4a.6b"';
+    expect(decideAudio(src('mp3', 'mp3', true), with6b, opus)).toEqual({
+      playback: 'copy',
+      mime: 'audio/mp4; codecs="mp4a.6b"',
+      outputCodec: 'mp3',
+    });
+    const noMp3 = (mime: string) => chromiumLinux(mime) && !mime.includes('mp3');
+    expect(decideAudio(src('mp3', 'mp3', true), noMp3, opus).playback).toBe('transcode');
+  });
+
   it.each([
     ['ac3', 'ac-3', 'ac3'],
     ['eac3', 'ec-3', 'ac3'],

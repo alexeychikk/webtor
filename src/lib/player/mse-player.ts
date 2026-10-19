@@ -138,8 +138,11 @@ export class MsePlayer {
     const isTypeSupported = (mime: string) => MS.isTypeSupported(mime);
 
     const mb = await import('mediabunny');
+    const { AVI_FORMAT_NAME, createAviFormat } = await import('./avi/demuxer');
+    const { aviVideoFormatName } = await import('./avi/fourcc');
     const input = new mb.Input({
-      formats: mb.ALL_FORMATS,
+      // Our AVI demuxer (ADR 0007) on Mediabunny's internals; Mediabunny is pinned for it.
+      formats: [createAviFormat(mb, source), ...mb.ALL_FORMATS],
       source: new mb.CustomSource({
         getSize: () => source.size,
         read: (start, end) => source.read(start, end),
@@ -157,6 +160,14 @@ export class MsePlayer {
         throw err;
       }
       if (!videoTrack) throw new PlaybackError('no-playable-file', 'no video track');
+      if (
+        (await videoTrack.getCodec()) === null &&
+        (await input.getFormat()).name === AVI_FORMAT_NAME
+      ) {
+        // DivX/Xvid & co.: no browser decodes them; the relay can convert them (ADR 0007 §2).
+        const fourcc = String((await videoTrack.getInternalCodecId()) ?? '');
+        throw new PlaybackError('video-needs-relay', aviVideoFormatName(fourcc));
+      }
 
       const video_ = decideVideo(
         await videoTrack.getCodec(),
