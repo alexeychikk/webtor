@@ -1,4 +1,10 @@
 <script lang="ts">
+  import Check from '@lucide/svelte/icons/check';
+  import CircleAlert from '@lucide/svelte/icons/circle-alert';
+  import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+  import X from '@lucide/svelte/icons/x';
+  import IconButton from '../ui/IconButton.svelte';
+  import { showPageDialog } from '../ui/page-dialog';
   import { PLAYBACK_ERROR_MESSAGES } from '../player/errors';
   import {
     checkRelayUrl,
@@ -39,7 +45,7 @@
       url = initial;
       touched = initial !== '';
       test = { state: 'idle' };
-      dialog.showModal();
+      void showPageDialog(dialog, () => relaySettings.dialogOpen);
     } else if (!relaySettings.dialogOpen && dialog.open) {
       dialog.close();
     }
@@ -89,9 +95,18 @@
   }
 </script>
 
-<dialog bind:this={dialog} data-testid="relay-dialog" aria-labelledby="relay-title" onclose={close}>
+<dialog
+  bind:this={dialog}
+  class="page-dialog"
+  data-testid="relay-dialog"
+  aria-labelledby="relay-title"
+  onclose={close}
+>
   <form onsubmit={save}>
-    <h2 id="relay-title">Connect a relay</h2>
+    <div class="dialog-header">
+      <h2 id="relay-title">Connect a relay</h2>
+      <IconButton icon={X} label="Close" onclick={close} />
+    </div>
     <p>
       A browser can only download from peers that speak WebRTC, and most torrents have none.
       <strong>webtor-relay</strong> is a small program you run yourself. It talks to regular BitTorrent
@@ -128,14 +143,20 @@
         aria-invalid={problem ? 'true' : undefined}
         aria-describedby="relay-url-problem"
       />
-      <button type="button" onclick={runTest} disabled={test.state === 'testing'}>Test</button>
+      <button type="button" class="btn" onclick={runTest} disabled={test.state === 'testing'}
+        >Test</button
+      >
     </div>
     {#if problem}
       <p class="problem" id="relay-url-problem">{problem}</p>
     {/if}
     <p class="test" data-testid="relay-test" data-state={test.state} aria-live="polite">
-      {#if test.state === 'testing'}Testing…{:else if test.state === 'ok'}Connected to webtor-relay
-        {test.version}.{:else if test.state === 'failed'}{test.message}{/if}
+      {#if test.state === 'testing'}<span class="icon spin"><LoaderCircle size={18} /></span
+        >Testing…{:else if test.state === 'ok'}<span class="icon"><Check size={18} /></span
+        >Connected to webtor-relay
+        {test.version}.{:else if test.state === 'failed'}<span class="icon"
+          ><CircleAlert size={18} /></span
+        >{test.message}{/if}
     </p>
     {#if test.state === 'ok'}
       <p
@@ -156,60 +177,95 @@
 
     <div class="actions">
       {#if relaySettings.base}
-        <button type="button" onclick={remove}>Disconnect relay</button>
+        <button type="button" class="btn btn-danger" onclick={remove}>Disconnect relay</button>
       {/if}
       <span class="spacer"></span>
-      <button type="button" onclick={close}>Cancel</button>
-      <button type="submit" disabled={!check.ok}>Save</button>
+      <button type="button" class="btn" onclick={close}>Cancel</button>
+      <button type="submit" class="btn btn-primary" disabled={!check.ok}>Save</button>
     </div>
   </form>
 </dialog>
 
 <style>
-  dialog {
-    max-width: 40rem;
-    width: calc(100% - 2rem);
+  ol {
+    padding-left: var(--space-5);
   }
-  h2 {
-    margin-top: 0;
+  li {
+    margin-bottom: var(--space-1);
   }
-  h3 {
-    margin-bottom: 0.25rem;
+  label {
+    display: block;
+    margin: var(--space-4) 0 var(--space-2);
+    font-weight: var(--weight-medium);
   }
   .row {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   input {
     flex: 1;
-    padding: 0.5rem;
+    min-width: 0;
+    min-height: var(--hit);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-1);
+    color: var(--text);
+  }
+  input::placeholder {
+    color: var(--text-faint);
+  }
+  input[aria-invalid='true'] {
+    border-color: var(--danger);
   }
   .problem {
-    color: crimson;
+    margin: var(--space-2) 0 0;
+    color: var(--danger);
+  }
+  .test {
+    display: flex;
+    gap: var(--space-2);
+    align-items: flex-start;
+    margin: var(--space-3) 0 0;
   }
   .test:empty {
     display: none;
   }
+  .icon {
+    display: inline-grid;
+    flex: none;
+    padding-top: 3px;
+  }
+  .spin {
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
   .test[data-state='ok'] {
-    color: seagreen;
+    color: var(--success);
   }
   .test[data-state='failed'] {
-    color: crimson;
+    color: var(--danger);
   }
   .transcode {
-    margin-top: 0;
+    margin-top: var(--space-1);
   }
   .transcode[data-available='false'] {
     color: var(--warning);
   }
   .privacy {
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.25rem;
-    background: color-mix(in srgb, orange 18%, transparent);
+    margin: var(--space-5) 0;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--warning-soft);
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .spacer {
     flex: 1;

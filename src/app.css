@@ -44,3 +44,134 @@ a {
   white-space: nowrap;
   border: 0;
 }
+
+/* Page dialogs (relay, help; ADR 0008 §6). */
+dialog.page-dialog {
+  box-sizing: border-box;
+  width: calc(100% - 2rem);
+  max-width: 36rem;
+  max-height: calc(100dvh - 2rem);
+  padding: var(--space-5);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: var(--shadow-2);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+dialog.page-dialog::backdrop {
+  background: rgb(0 0 0 / 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+@media (prefers-reduced-motion: no-preference) {
+  dialog.page-dialog[open] {
+    animation: dialog-in var(--dur-base) var(--ease-out);
+  }
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+dialog.page-dialog h2,
+dialog.page-dialog h3 {
+  line-height: var(--leading-tight);
+}
+dialog.page-dialog h3 {
+  margin: var(--space-5) 0 var(--space-2);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+}
+dialog.page-dialog p,
+dialog.page-dialog li {
+  color: var(--text-muted);
+}
+dialog.page-dialog strong {
+  color: var(--text);
+}
+dialog.page-dialog code,
+dialog.page-dialog kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+.dialog-header {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) var(--space-3) 0;
+}
+.dialog-header h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+}
+
+/* Text buttons: primary (filled accent), ghost, danger (ghost with danger text). */
+.btn {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: center;
+  min-height: var(--hit);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+@media (pointer: coarse) {
+  .btn {
+    min-height: var(--hit-touch);
+  }
+}
+@media (hover: hover) {
+  .btn:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.08);
+  }
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.btn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+.btn-primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+@media (hover: hover) {
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+}
+.btn-primary:disabled {
+  background: var(--surface-3);
+}
+.btn-danger {
+  border-color: transparent;
+  color: var(--danger);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .btn {
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      transform var(--dur-fast) var(--ease-out);
+  }
+}
