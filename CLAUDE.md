@@ -20,7 +20,8 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
 Vite 8 · Svelte 5 (runes) · TypeScript 6 (not 7: svelte-check) · pnpm 12 · Vitest 5 ·
 Playwright 1.64 (Chromium). SPA without SvelteKit. Relay: Go (version in `mise.toml`) +
 anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torrent engine, 0003
-media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay).
+media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay, 0007 AVI
+playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg).
 
 ## Commands
 
@@ -194,6 +195,8 @@ docs/decisions/                ADRs
   `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
 - Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
   Ctrl/Meta/Alt; they act only while a file is open (not idle/error).
+- AVI fixtures (ADR 0007): `avi-h264-mp3.avi` (12 s 640×360 H.264 High with B-frames + VBR MP3; plays
+  in the browser), `avi-xvid-mp3.avi` and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay).
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the
