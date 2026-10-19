@@ -69,6 +69,11 @@ func run() error {
 	noUpload := flag.Bool("no-upload", envBool("WEBTOR_RELAY_NO_UPLOAD"), "never upload to peers (default: upload while a torrent is open)")
 	noDefaultTrackers := flag.Bool("no-default-trackers", envBool("WEBTOR_RELAY_NO_DEFAULT_TRACKERS"), "announce only to the magnet's own trackers")
 	noDHT := flag.Bool("no-dht", envBool("WEBTOR_RELAY_NO_DHT"), "disable the DHT")
+	ffmpegPath := flag.String("ffmpeg", os.Getenv("WEBTOR_RELAY_FFMPEG"), "ffmpeg for video conversion (default: ffmpeg on PATH, then next to this binary)")
+	noTranscode := flag.Bool("no-transcode", envBool("WEBTOR_RELAY_NO_TRANSCODE"), "never convert video (ffmpeg isn't looked for)")
+	maxTranscodes := flag.Int("max-transcodes", envInt("WEBTOR_RELAY_MAX_TRANSCODES", relay.DefaultMaxTranscodes), "video conversions at once; one more (another file) gets HTTP 429")
+	transcodePreset := flag.String("transcode-preset", envOr("WEBTOR_RELAY_TRANSCODE_PRESET", relay.DefaultTranscodePreset), "libx264 preset: "+strings.Join(relay.X264Presets, ", "))
+	transcodeMaxHeight := flag.Int("transcode-max-height", envInt("WEBTOR_RELAY_TRANSCODE_MAX_HEIGHT", relay.DefaultTranscodeMaxHeight), "scale converted video down to this height (never up)")
 	debug := flag.Bool("debug", envBool("WEBTOR_RELAY_DEBUG"), "log every API request (never the token)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -125,6 +130,21 @@ func run() error {
 		DataDir:         piecesDir,
 		App:             webapp.FS(),
 		Logger:          logger,
+		Transcode: relay.TranscodeOptions{
+			MaxJobs:   *maxTranscodes,
+			Preset:    *transcodePreset,
+			MaxHeight: *transcodeMaxHeight,
+		},
+	}
+	conversion := "off (-no-transcode)"
+	if !*noTranscode {
+		path, version, err := relay.DetectFFmpeg(context.Background(), *ffmpegPath)
+		if err != nil {
+			conversion = fmt.Sprintf("off: %v. Install ffmpeg (winget install ffmpeg, brew install ffmpeg, apt install ffmpeg) and restart", err)
+		} else {
+			opts.Transcode.FFmpeg, opts.Transcode.FFmpegVersion = path, version
+			conversion = fmt.Sprintf("on (ffmpeg %s, up to %dp, preset %s)", version, opts.Transcode.MaxHeight, opts.Transcode.Preset)
+		}
 	}
 	if !*noDefaultTrackers {
 		opts.ExtraTrackers = defaultTrackers
@@ -142,12 +162,15 @@ func run() error {
 	// The only place the token is ever printed: the user needs these links.
 	fmt.Printf("webtor-relay %s\n\nOpen:       %s\nRelay URL:  %s  (paste into the app's relay setting)\nOr open:    %s\n\n",
 		relay.Version, links.Open, links.Relay, links.Hosted)
+	fmt.Println("Video conversion:", conversion)
 	fmt.Println("Peers see this machine's IP address. Keep the relay URL secret: it is the password.")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go srv.RunJanitor(ctx)
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	// Conversions stream until the client goes away; kill them first so Shutdown can finish.
+	hs.RegisterOnShutdown(srv.StopTranscodes)
 	served := make(chan error, 1)
 	go func() { served <- hs.Serve(ln) }()
 	logger.Info("listening", "http", ln.Addr().String(), "peer-port", cl.LocalPort(),
