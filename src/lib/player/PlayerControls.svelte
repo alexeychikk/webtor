@@ -2,7 +2,7 @@
   /**
    * The player's own control layer (docs/decisions/0008), on every platform: top and bottom scrims,
    * the title strip and the bar (seek bar with downloaded/buffered/played layers, play/pause, mute
-   * and volume, time, fullscreen). It overlays the picture, windowed and fullscreen, and fades out
+   * and volume, time, the stats chip and menu triggers Player.svelte passes in, fullscreen). It overlays the picture, windowed and fullscreen, and fades out
    * with the cursor while playing (`shown`, decided by Player.svelte).
    */
   import Maximize from '@lucide/svelte/icons/maximize';
@@ -18,6 +18,7 @@
   import type { MediaState } from './media-state.svelte';
   import { pointerFraction, timeFractions, type FractionRanges } from './seek';
   import { SEEK_STEP_S, seekTarget } from './shortcuts';
+  import type { Snippet } from 'svelte';
 
   let {
     video,
@@ -30,6 +31,8 @@
     touch,
     ontoggleplay,
     ontogglefullscreen,
+    status,
+    buttons,
   }: {
     video: HTMLVideoElement | undefined;
     media: MediaState;
@@ -47,6 +50,10 @@
     touch: boolean;
     ontoggleplay: () => void;
     ontogglefullscreen: () => void;
+    /** After the time: the stats chip. */
+    status?: Snippet;
+    /** The right cluster before fullscreen: menu triggers, share, More. */
+    buttons?: Snippet;
   } = $props();
 
   /** The seek slider's value while it is dragged, until the seek it ends in is done. */
@@ -230,7 +237,9 @@
     </div>
     <span class="time" data-testid="time">{formatTime(shownTime)}{' / '}{formatTime(duration)}</span
     >
+    {@render status?.()}
     <div class="right">
+      {@render buttons?.()}
       {#if canFullscreen}
         <IconButton
           testid="fullscreen"
@@ -322,6 +331,9 @@
     display: flex;
     gap: var(--space-1);
     margin-left: auto;
+  }
+  .row {
+    min-width: 0;
   }
   .time {
     padding: 0 var(--space-2);

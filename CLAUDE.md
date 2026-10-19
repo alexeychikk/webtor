@@ -128,9 +128,11 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
   shortcuts.ts                 keyboard shortcuts (key → action, SHORTCUTS for the help); Player.svelte runs them
-  StatsPanel.svelte ShareButton.svelte   peers/speed/progress panel; "Copy share link" (`shareUrl`)
+  AudioMenu.svelte StatsPanel.svelte MoreMenu.svelte   menu contents (audio-options.ts: option text)
+  share-link.svelte.ts         "Copy share link" state (`shareUrl`, idle/copied/failed)
 src/lib/ui/IconButton.svelte   icon-only button + our tooltip (400 ms hover / focus-visible, kbd chip, clamped
                                to `[data-tooltip-bounds]`, hidden with the controls); tooltip-context.ts
+  menu.ts Menu.svelte          player menus: panel (inside the screen) or bottom sheet, listbox keys
 src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay);
                                open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
   fullscreen.ts                capabilities (styled ASS, container/video fullscreen), fullscreen method,
@@ -188,25 +190,36 @@ docs/decisions/                ADRs
   destroys the MsePlayer and subtitle sources and opens a new one on the same torrent; after a fatal
   error it reloads the torrent on that file. An opened/dropped `.torrent` (`TorrentInput` =
   `Uint8Array`) goes straight to WebTorrent (no relay); its `magnetURI` then goes into the hash.
-- UI test hooks: `data-testid` `file-list` / `file` (`data-index`, `data-kind`, `aria-current`; shown
-  only with 2+ video files), `torrent-file` (the .torrent input), `video`, `status` (sr-only live region "<phase> · <file name>", with `data-phase`), `error` and `notice` (with
-  `data-code` = the `PlaybackErrorCode`), `audio-track` (the audio `<select>`), `subtitles` (the
-  `<select>`; values `sidecar:<file index>`, `upload:<n>`, `""` = Off), `subtitle-upload` (file
-  input), `screen` (the container our fullscreen button, the `f` shortcut and a double-click on the
-  video fullscreen), `title` (file name, top strip), `controls` (our control bar; class `shown`) with
-  `play-pause` (not on touch), `seek` (`seek-downloaded`, `seek-buffered`: one child per range;
-  `seek-hover` time chip), `time`, `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`,
-  `aria-label` "Fullscreen" / "Exit fullscreen"; absent without any fullscreen), `tooltip` (inside an
-  icon button while shown), `centre` (`data-state` `loading|buffering|play|pause|replay|none`) with
-  `centre-button` and, on touch, `seek-back` / `seek-forward`, and `ass-canvas` (the JASSUB overlay; exists only while
-  an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas after a paused
-  seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`, `opus`…; empty
-  when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish hooks: `why-button`
-  (header), `why-link` (in no-peers/stalled notices), `why-dialog`, `why-relay`; `stats` with
-  `stats-peers`, `stats-download`, `stats-upload`, `stats-progress`; `share-link` (`data-state`
-  `idle|copied|failed`; `share-url` shows the link when the clipboard is denied); `shortcuts-help`;
-  `subtitle-delay` (`data-delay` in s), `subtitle-delay-minus|plus|reset`. Check shown cues through
-  `video.textTracks` (`mode === 'showing'`, `activeCues`) after a paused seek.
+- UI test hooks: `data-testid` `torrent-file` (the .torrent input), `video`, `status` (sr-only live
+  region "<phase> · <file name>", with `data-phase`), `error` and `notice` (with `data-code` = the
+  `PlaybackErrorCode`), `subtitle-upload` (hidden file input, always in the screen), `screen` (the
+  container our fullscreen button, the `f` shortcut and a double-click on the video fullscreen),
+  `title` (file name, top strip), `controls` (our control bar; class `shown`) with `play-pause` (not
+  on touch), `seek` (`seek-downloaded`, `seek-buffered`: one child per range; `seek-hover` time
+  chip), `time`, `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label`
+  "Fullscreen" / "Exit fullscreen"; absent without any fullscreen), `tooltip` (inside an icon button
+  while shown), `centre` (`data-state` `loading|buffering|play|pause|replay|none`) with
+  `centre-button` and, on touch, `seek-back` / `seek-forward`, and `ass-canvas` (the JASSUB overlay;
+  exists only while an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas
+  after a paused seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`,
+  `opus`…; empty when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish
+  hooks: `why-button` (header), `why-link` (in no-peers/stalled notices), `why-dialog`, `why-relay`;
+  `shortcuts-help`. Check shown cues through `video.textTracks` (`mode === 'showing'`,
+  `activeCues`) after a paused seek.
+- **Menu hooks (ADR 0008 §4).** Bar triggers (`aria-haspopup`, `aria-expanded`): `subtitles`
+  (`data-value`: `sidecar:<file index>`, `upload:<n>`, `""` = Off), `audio-track` (`data-value` = track
+  id), `files-button` (2+ video files), `stats-button` (chip), `share-link` (`data-state`
+  `idle|copied|failed`); under 40rem of player width `more-button` replaces audio/files/stats/share.
+  Menus exist only while open, one at a time, as `[data-player-menu]` with `data-presentation`
+  `panel|sheet` (`menuPresentation`, `src/lib/ui/menu.ts`; `Menu.svelte`): `subtitles-menu`
+  (`subtitle-option` with `data-value`/`data-kind`, `subtitles-loading`, `subtitle-delay`
+  (`data-delay` in s), `subtitle-delay-minus|plus|reset`), `audio-menu` (`audio-option`,
+  `data-value`, accessible name `audioOptionText`), `files-panel` (`file-list` / `file` with
+  `data-index`, `data-kind`, `aria-current`), `stats-panel` (`stats` with `stats-peers`,
+  `relay-peers`, `stats-download`, `stats-upload`, `stats-progress`), `share-panel` (`share-url`,
+  only after a refused copy), `more-menu` (`more-sound`, `more-audio|files|stats`, `share-link`). In
+  e2e use `e2e/support/player.ts`: `openMenu(page, trigger)`, `closeMenu`, `selectSubtitle` /
+  `selectAudio(page, {label} | {value})`, `subtitleGroup`.
 - Embedded MKV tracks are `embedded:<TrackNumber>` (sample.mkv: `embedded:4` "English · SRT",
   `embedded:5` "Russian · ASS"). Their cues stream in: `SubtitleManager.addEmbedded` lists them,
   `appendCues` adds what the scanner finds, and the scanner runs only while one is selected.
@@ -231,7 +244,9 @@ docs/decisions/                ADRs
   Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
   (`[data-player-controls]`) they work, except arrows on its sliders. Player.svelte handles them in
   the window's capture phase (preventDefault + stopPropagation, keyup of a handled Space too, no
-  auto-repeat except seeks and volume), so a focused button or native control never toggles a second time.
+  auto-repeat except seeks and volume), so a focused button or native control never toggles a second time. Inside an open menu
+  (`[data-player-menu]`) only the menu handles keys: Esc closes it first (focus back on the
+  trigger), and Enter/Space/↓ on an `aria-haspopup` trigger open it. An open menu pins the controls.
 - **Player controls (ADR 0004, 0008).** The `<video>` never has `controls`: `PlayerControls.svelte`
   overlays the picture, windowed and fullscreen (text cues are lifted above it via
   `::-webkit-media-text-track-container`). `shown = !playing || menuOpen || pointerOnControls ||

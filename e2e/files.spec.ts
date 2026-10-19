@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { FIXTURE_BASE, fixtureMagnet } from './support/fixtures';
+import { closeMenu, openMenu, selectSubtitle, subtitleGroup } from './support/player';
 
 // e2e/fixtures/multi-file: episode-1.ts (offset.ts, 10 s, smaller), episode-2.mkv (sample.mkv,
 // 12 s, largest), extras.wmv (unsupported container) and readme.txt (not a video).
@@ -8,8 +9,18 @@ const video = (page: Page) => page.getByTestId('video');
 const currentTime = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.currentTime);
 const duration = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.duration);
 const fileButton = (page: Page, name: string) => page.getByTestId('file').filter({ hasText: name });
-const fileIndex = async (page: Page, name: string) =>
-  Number(await fileButton(page, name).getAttribute('data-index'));
+const fileIndex = async (page: Page, name: string) => {
+  await openFiles(page);
+  return Number(await fileButton(page, name).getAttribute('data-index'));
+};
+/** Opens the files drawer (picking a file closes it). */
+const openFiles = (page: Page) => openMenu(page, 'files-button');
+/** Picks a file in the files drawer. */
+async function pickFile(page: Page, name: string) {
+  await openFiles(page);
+  await fileButton(page, name).click();
+  await expect(page.getByTestId('files-panel')).toHaveCount(0);
+}
 
 async function torrentBytes(name: string): Promise<Buffer> {
   const res = await fetch(`${FIXTURE_BASE}/${name}.torrent`);
@@ -23,6 +34,8 @@ test('a multi-file torrent auto-picks the largest video and switches to another 
   const magnet = await fixtureMagnet('multi-file');
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
 
+  await expect(page.getByTestId('files-button')).toHaveAttribute('aria-label', 'Files (2 of 3)');
+  await openFiles(page);
   const files = page.getByTestId('file');
   await expect(files).toHaveText([
     /episode-1\.ts\s*325 kB/,
@@ -37,8 +50,10 @@ test('a multi-file torrent auto-picks the largest video and switches to another 
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
   expect(await duration(page)).toBeGreaterThan(11.5);
 
-  await fileButton(page, 'episode-1.ts').click();
+  await pickFile(page, 'episode-1.ts');
+  await openFiles(page);
   await expect(fileButton(page, 'episode-1.ts')).toHaveAttribute('aria-current', 'true');
+  await closeMenu(page);
   await expect(page.getByTestId('status')).toContainText('episode-1.ts');
   const first = await fileIndex(page, 'episode-1.ts');
   await expect(page).toHaveURL(new RegExp(`&file=${first}$`));
@@ -49,7 +64,7 @@ test('a multi-file torrent auto-picks the largest video and switches to another 
   await expect(page.getByTestId('error')).toHaveCount(0);
 
   // And back again: the torrent stays, only the playback session is rebuilt.
-  await fileButton(page, 'episode-2.mkv').click();
+  await pickFile(page, 'episode-2.mkv');
   await expect.poll(() => duration(page), { timeout: 30_000 }).toBeGreaterThan(11.5);
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
   await expect(page.getByTestId('error')).toHaveCount(0);
@@ -60,8 +75,9 @@ test('#file= in the hash selects that file on load', async ({ page }) => {
   // Torrent file order: episode-1.ts, episode-2.mkv, extras.wmv, readme.txt (sorted by path).
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}&file=0`);
   await expect(page.getByTestId('status')).toContainText('episode-1.ts');
-  await expect(fileButton(page, 'episode-1.ts')).toHaveAttribute('aria-current', 'true');
   expect(await fileIndex(page, 'episode-1.ts')).toBe(0);
+  await expect(fileButton(page, 'episode-1.ts')).toHaveAttribute('aria-current', 'true');
+  await closeMenu(page);
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
   expect(await duration(page)).toBeLessThan(10.5);
   await expect(page).toHaveURL(/&file=0$/);
@@ -84,8 +100,8 @@ test('an opened .torrent file plays and its magnet goes into the hash', async ({
   await expect(page.getByTestId('status')).toContainText('sample.mkv');
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
   await expect(page.getByTestId('error')).toHaveCount(0);
-  // A single-file torrent: nothing to choose, so no list.
-  await expect(page.getByTestId('file-list')).toHaveCount(0);
+  // A single-file torrent: nothing to choose, so no files button.
+  await expect(page.getByTestId('files-button')).toHaveCount(0);
   await expect(page).toHaveURL(/#magnet=magnet%3A%3Fxt%3Durn%3Abtih%3A[0-9a-f]{40}.*&file=0$/);
 });
 
@@ -102,7 +118,9 @@ test('a .torrent file dropped on the page plays', async ({ page }) => {
     }
   }, bytes);
   await expect(page.getByTestId('status')).toContainText('episode-2.mkv');
+  await openFiles(page);
   await expect(page.getByTestId('file')).toHaveCount(3);
+  await closeMenu(page);
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
 });
 
@@ -137,31 +155,32 @@ test('switching files drops the embedded subtitles of the previous file', async 
         }),
       t,
     );
-  const embedded = page.getByTestId('subtitles').locator('optgroup[label="Embedded"] option');
+  const embedded = () => subtitleGroup(page, 'Embedded');
 
   const magnet = await fixtureMagnet('multi-file');
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect(page.getByTestId('status')).toContainText('episode-2.mkv');
-  await expect(embedded).toHaveCount(2);
-  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await expect(await embedded()).toHaveCount(2);
+  await selectSubtitle(page, { label: 'English · SRT' });
   await seekTo(2);
   await expect.poll(shownCues).toEqual(['Hello from English SRT']);
 
   // episode-1.ts has no subtitles: nothing listed, no cues left over from the MKV's scan.
-  await fileButton(page, 'episode-1.ts').click();
+  await pickFile(page, 'episode-1.ts');
   await expect.poll(() => duration(page), { timeout: 30_000 }).toBeLessThan(10.5);
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
-  await expect(embedded).toHaveCount(0);
-  await expect(page.getByTestId('subtitles')).toHaveValue('');
+  await expect(await embedded()).toHaveCount(0);
+  await closeMenu(page);
+  await expect(page.getByTestId('subtitles')).toHaveAttribute('data-value', '');
   await seekTo(2);
   expect(await allCues()).toBe(0);
   expect(await shownCues()).toEqual([]);
 
   // Back on the MKV: its tracks again, each cue once.
-  await fileButton(page, 'episode-2.mkv').click();
+  await pickFile(page, 'episode-2.mkv');
   await expect.poll(() => duration(page), { timeout: 30_000 }).toBeGreaterThan(11.5);
-  await expect(embedded).toHaveCount(2);
-  await page.getByTestId('subtitles').selectOption({ label: 'English · SRT' });
+  await expect(await embedded()).toHaveCount(2);
+  await selectSubtitle(page, { label: 'English · SRT' });
   await seekTo(2);
   await expect.poll(shownCues).toEqual(['Hello from English SRT']);
   await expect(page.getByTestId('error')).toHaveCount(0);

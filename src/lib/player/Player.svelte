@@ -1,8 +1,27 @@
 <script lang="ts">
+  import ArrowDown from '@lucide/svelte/icons/arrow-down';
+  import AudioLines from '@lucide/svelte/icons/audio-lines';
+  import Captions from '@lucide/svelte/icons/captions';
+  import CaptionsOff from '@lucide/svelte/icons/captions-off';
+  import Check from '@lucide/svelte/icons/check';
+  import Copy from '@lucide/svelte/icons/copy';
+  import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
+  import Link from '@lucide/svelte/icons/link';
+  import ListVideo from '@lucide/svelte/icons/list-video';
+  import Users from '@lucide/svelte/icons/users';
   import { relaySettings } from '../torrent/relay-settings.svelte';
-  import { channelsLabel, codecLabel } from './codecs';
   import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
-  import { untrack } from 'svelte';
+  import AudioMenu from './AudioMenu.svelte';
+  import { audioTrackTitle } from './audio-options';
+  import { formatSpeed } from './format';
+  import MoreMenu from './MoreMenu.svelte';
+  import { ShareLink } from './share-link.svelte';
+  import IconButton from '../ui/IconButton.svelte';
+  import Menu from '../ui/Menu.svelte';
+  import { menuPresentation } from '../ui/menu';
+  import { SUBTITLE_EXTENSIONS } from '../subtitles/parse';
+  import { subtitleTrackText } from '../subtitles/tracks';
+  import { tick, untrack } from 'svelte';
   import { provideControlsShown } from '../ui/tooltip-context';
   import type { Flash } from './centre';
   import { MediaState } from './media-state.svelte';
@@ -17,7 +36,6 @@
   } from './fullscreen';
   import type { PlayerController, Phase } from './controller.svelte';
   import PlayerControls from './PlayerControls.svelte';
-  import ShareButton from './ShareButton.svelte';
   import {
     repeats,
     seekTarget,
@@ -27,7 +45,6 @@
     type ShortcutAction,
   } from './shortcuts';
   import StatsPanel from './StatsPanel.svelte';
-  import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
   import FileList from '../torrent/FileList.svelte';
   import { isTorrentFile } from '../torrent/files';
@@ -48,22 +65,6 @@
     error: 'Stopped',
   };
 
-  /** e.g. `Russian AC3 · rus · AC-3 5.1 → Opus`, or `… — unavailable: codec not supported`. */
-  function audioOptionText(t: AudioTrackInfo): string {
-    const parts = [t.label];
-    if (t.language !== 'und' && t.language !== t.label) parts.push(t.language);
-    parts.push([codecLabel(t.codec), channelsLabel(t.channels)].filter(Boolean).join(' '));
-    let text = parts.join(' · ');
-    if (t.playback === 'transcode') text += ` → ${codecLabel(t.outputCodec)}`;
-    if (t.playback === 'unsupported') text += ` — unavailable: ${t.reason ?? 'not supported'}`;
-    return text;
-  }
-
-  function onAudioChange(event: Event) {
-    const id = Number((event.currentTarget as HTMLSelectElement).value);
-    void controller.selectAudioTrack(id);
-  }
-
   const isRelayError = (code: PlaybackErrorCode) => code.startsWith('relay-');
   const phaseText = $derived(
     controller.phase === 'connecting' && controller.viaRelay
@@ -73,6 +74,14 @@
   /** Screen readers hear "<phase> · <file name>" (the picture shows the spinner and title). */
   const statusText = $derived([phaseText, controller.fileName].filter((part) => part).join(' · '));
   let dragging = $state(false);
+  const MENU_TESTIDS: Record<MenuId, string> = {
+    subtitles: 'subtitles-menu',
+    audio: 'audio-menu',
+    files: 'files-panel',
+    stats: 'stats-panel',
+    share: 'share-panel',
+    more: 'more-menu',
+  };
 
   // Our control layer everywhere (docs/decisions/0008). Its fullscreen icon fullscreens the
   // container where it can, so the ASS overlay canvas stays over the picture (0004); on iPhone the
@@ -120,11 +129,134 @@
   const IDLE_TOUCH_MS = 3000;
   let activity = $state(false);
   let pointerOnControls = $state(false);
-  /** A menu of the control bar is open (redesign ticket 2): keeps the controls. */
-  let menuOpen = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const playing = $derived(!media.paused && !media.ended);
+  // Menus of the control bar (docs/decisions/0008 §4): one open at a time, and it keeps the
+  // controls shown. A panel inside the screen when there is room (or fullscreen), else a sheet.
+  type MenuId = 'subtitles' | 'audio' | 'files' | 'stats' | 'share' | 'more';
+  /** `fromMore`: opened from the compact bar's More menu (a Back row returns there). */
+  let menu = $state<{ id: MenuId; fromMore: boolean } | null>(null);
+  const menuOpen = $derived(menu !== null);
+  let screenWidth = $state(0);
+  let screenHeight = $state(0);
   const controlsShown = $derived(!playing || menuOpen || pointerOnControls || activity);
+
+  const presentation = $derived(menuPresentation({ screenHeight, fullscreen }));
+  const remPx =
+    typeof getComputedStyle === 'function'
+      ? parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+      : 16;
+  /** Compact bar (screen < 40rem, §3.6): stats, audio, files and share move into More. */
+  const compact = $derived(screenWidth > 0 && screenWidth < 40 * remPx);
+  /** A pointerdown outside just closed a menu: that press's click on the picture doesn't play/pause. */
+  let menuClosedAt = 0;
+
+  const share = new ShareLink(() => ({
+    magnet: controller.magnet,
+    fileIndex: controller.fileIndex,
+  }));
+  $effect(() => () => share.dispose());
+
+  const showAudio = $derived(
+    controller.audioTracks.length > 1 ||
+      (controller.audioTracks.length > 0 && controller.audioTrackId === null),
+  );
+  const showFiles = $derived(controller.files.length > 1);
+  const showStats = $derived(controller.phase !== 'error');
+  const selectedAudio = $derived(
+    controller.audioTracks.find((t) => t.id === controller.audioTrackId),
+  );
+  const audioLabel = $derived(selectedAudio?.label ?? 'Muted');
+  const filePosition = $derived(
+    `${controller.files.findIndex((f) => f.index === controller.fileIndex) + 1} of ${controller.files.length}`,
+  );
+  const selectedSubtitle = $derived(
+    controller.subtitles.tracks.find((t) => t.key === controller.subtitles.selected),
+  );
+  const speedText = $derived(formatSpeed(controller.stats.downloadSpeed));
+  const statsText = $derived(`${controller.stats.numPeers} peers · ${speedText}`);
+  const silent = $derived(media.muted || media.volume === 0);
+
+  const MENU_TITLES: Record<MenuId, string> = {
+    subtitles: 'Subtitles',
+    audio: 'Audio',
+    files: 'Files',
+    stats: 'Download stats',
+    share: 'Share link',
+    more: 'More',
+  };
+
+  /** The bar button a menu hangs from (More for menus opened from it). */
+  function triggerFor(id: MenuId): HTMLElement | null {
+    return screen?.querySelector<HTMLElement>(`[data-menu-trigger="${id}"]`) ?? null;
+  }
+
+  function anchorFor(m: { id: MenuId }) {
+    return triggerFor(m.id) ?? triggerFor('more');
+  }
+
+  function toggleMenu(id: MenuId) {
+    menu = menu?.id === id ? null : { id, fromMore: false };
+  }
+
+  function closeMenu(refocus: boolean) {
+    const m = menu;
+    if (!m) return;
+    menu = null;
+    // After the menu is gone: closing the sheet's modal <dialog> moves the focus itself.
+    if (refocus) void tick().then(() => anchorFor(m)?.focus());
+    else menuClosedAt = performance.now();
+  }
+
+  /** ↓ on a trigger opens its menu (Enter and Space click it). */
+  function onTriggerKey(id: MenuId) {
+    return (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowDown' || event.ctrlKey || event.metaKey || event.altKey) return;
+      event.preventDefault();
+      if (menu?.id !== id) menu = { id, fromMore: false };
+    };
+  }
+
+  const triggerProps = (id: MenuId, popup: 'listbox' | 'dialog' | 'menu' = 'dialog') => ({
+    'data-menu-trigger': id,
+    'aria-haspopup': popup,
+    'aria-expanded': menu?.id === id,
+    onkeydown: onTriggerKey(id),
+  });
+
+  function toggleMute() {
+    if (!video) return;
+    video.muted = !video.muted;
+    if (!video.muted && video.volume === 0) video.volume = 1;
+  }
+
+  async function copyShareLink() {
+    if (!(await share.copy())) menu = { id: 'share', fromMore: menu?.id === 'more' };
+  }
+
+  let subtitleInput = $state<HTMLInputElement>();
+
+  function onSubtitleUpload(event: Event & { currentTarget: HTMLInputElement }) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    // Clear it, so picking the same file again still fires `change`.
+    input.value = '';
+    if (file) void controller.subtitles.addFile(file);
+  }
+
+  function selectFile(index: number) {
+    closeMenu(true);
+    if (index !== controller.fileIndex) void controller.selectFile(index);
+  }
+
+  // Nothing to choose from once stopped; a fullscreen change moves everything around.
+  $effect(() => {
+    if (controller.phase === 'error' || controller.phase === 'idle') untrack(() => (menu = null));
+  });
+  $effect(() => {
+    void fullscreen;
+    untrack(() => (menu = null));
+  });
   provideControlsShown(() => controlsShown);
 
   /** Touch input: decided by the last pointer, starting from the primary pointer's kind. */
@@ -139,7 +271,9 @@
   const FLASH_MS = 400;
 
   const onControls = (target: EventTarget | null) =>
-    target instanceof Element && !!target.closest('[data-player-controls]');
+    target instanceof Element && !!target.closest('[data-player-controls], [data-player-menu]');
+  const inMenu = (target: EventTarget | null) =>
+    target instanceof Element && !!target.closest('[data-player-menu]');
 
   function wake(ms = IDLE_MS) {
     activity = true;
@@ -222,13 +356,17 @@
 
   /** A mouse click on the picture plays/pauses; a tap only toggles the controls (pointerdown). */
   function onVideoClick() {
-    if (lastPointerType === 'touch') return;
+    if (lastPointerType === 'touch' || performance.now() - menuClosedAt < 500) return;
     togglePlay();
   }
 
   /** A double-click anywhere on the picture (not on the bar) toggles fullscreen. */
   function onScreenDblClick(event: MouseEvent) {
-    if (event.target instanceof Element && event.target.closest('[data-player-bar]')) return;
+    if (
+      event.target instanceof Element &&
+      event.target.closest('[data-player-bar], [data-player-menu]')
+    )
+      return;
     toggleFullscreen();
   }
 
@@ -247,6 +385,14 @@
   let spaceHandled = false;
 
   function onKeyDown(event: KeyboardEvent) {
+    // Esc closes the open menu and gives the focus back to its trigger; only the next Esc leaves
+    // fullscreen (where the browser lets the page keep it).
+    if (event.key === 'Escape' && menu) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu(true);
+      return;
+    }
     const v = video;
     if (!v || event.defaultPrevented || controller.phase === 'idle' || controller.phase === 'error')
       return;
@@ -254,6 +400,14 @@
     // A key typed in a dialog (relay settings, help) is not meant for the player.
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (target?.closest('dialog')) return;
+    // A menu's keys are its own (arrows move, Enter/Space pick); so are a trigger's Enter, Space
+    // and ↓, which open its menu.
+    if (inMenu(target)) return;
+    if (
+      target?.hasAttribute('aria-haspopup') &&
+      [' ', 'Spacebar', 'Enter', 'ArrowDown'].includes(event.key)
+    )
+      return;
     const action = shortcutFor({
       key: event.key,
       ctrlKey: event.ctrlKey,
@@ -317,6 +471,86 @@
 
 <svelte:window onkeydowncapture={onKeyDown} onkeyupcapture={onKeyUp} />
 
+{#snippet statsChip()}
+  <button
+    type="button"
+    class="stats-chip"
+    data-testid="stats-button"
+    aria-label="Download stats"
+    {...triggerProps('stats')}
+    onclick={() => toggleMenu('stats')}
+  >
+    <Users size={16} aria-hidden="true" />
+    <span>{controller.stats.numPeers}</span>
+    <ArrowDown size={16} aria-hidden="true" />
+    <span>{speedText}</span>
+  </button>
+{/snippet}
+
+{#snippet barButtons()}
+  {#if controller.phase !== 'error'}
+    <span class="trigger-wrap">
+      <IconButton
+        testid="subtitles"
+        icon={controller.subtitles.selected === null ? CaptionsOff : Captions}
+        class={controller.subtitles.selected === null ? '' : 'on'}
+        label={selectedSubtitle
+          ? `Subtitles: ${subtitleTrackText(selectedSubtitle)}`
+          : 'Subtitles: off'}
+        shortcut="C"
+        data-value={controller.subtitles.selected ?? ''}
+        {...triggerProps('subtitles', 'listbox')}
+        onclick={() => toggleMenu('subtitles')}
+      />
+      {#if controller.subtitles.loading}<span class="badge spin" aria-hidden="true"></span>{/if}
+    </span>
+  {/if}
+  {#if !compact}
+    {#if showAudio}
+      <span class="trigger-wrap">
+        <IconButton
+          testid="audio-track"
+          icon={AudioLines}
+          label={selectedAudio ? `Audio: ${audioTrackTitle(selectedAudio)}` : 'Audio: muted'}
+          data-value={controller.audioTrackId ?? ''}
+          {...triggerProps('audio', 'listbox')}
+          onclick={() => toggleMenu('audio')}
+        />
+        {#if controller.audioTrackId === null}<span class="badge warn" aria-hidden="true"
+          ></span>{/if}
+      </span>
+    {/if}
+    {#if showFiles}
+      <IconButton
+        testid="files-button"
+        icon={ListVideo}
+        label="Files ({filePosition})"
+        {...triggerProps('files')}
+        onclick={() => toggleMenu('files')}
+      />
+    {/if}
+    {#if controller.magnet}
+      <IconButton
+        testid="share-link"
+        icon={share.state === 'copied' ? Check : Link}
+        class={share.state === 'copied' ? 'copied' : ''}
+        label={share.state === 'copied' ? 'Link copied' : 'Copy share link'}
+        data-state={share.state}
+        data-menu-trigger="share"
+        onclick={() => void copyShareLink()}
+      />
+    {/if}
+  {:else}
+    <IconButton
+      testid="more-button"
+      icon={EllipsisVertical}
+      label="More"
+      {...triggerProps('more', 'menu')}
+      onclick={() => toggleMenu('more')}
+    />
+  {/if}
+{/snippet}
+
 <section
   class="player"
   class:dragging
@@ -333,6 +567,8 @@
     class:idle={!controlsShown}
     class:lift={controlsShown}
     bind:this={screen}
+    bind:clientWidth={screenWidth}
+    bind:clientHeight={screenHeight}
     data-testid="screen"
     data-tooltip-bounds
     onpointermove={onScreenPointerMove}
@@ -364,6 +600,8 @@
       shown={controlsShown}
       ontoggleplay={togglePlay}
       ontogglefullscreen={toggleFullscreen}
+      status={showStats && !compact ? statsChip : undefined}
+      buttons={barButtons}
     />
     <PlayerCentre
       {media}
@@ -375,44 +613,97 @@
       ontoggleplay={togglePlay}
       onseek={seekBy}
     />
+    <input
+      bind:this={subtitleInput}
+      class="sr-only"
+      type="file"
+      tabindex="-1"
+      aria-hidden="true"
+      accept={SUBTITLE_EXTENSIONS.join(',')}
+      data-testid="subtitle-upload"
+      onchange={onSubtitleUpload}
+    />
+    {#if menu && screen}
+      {@const m = menu}
+      {#key m.id}
+        <Menu
+          title={m.id === 'files' ? `Files · ${filePosition}` : MENU_TITLES[m.id]}
+          testid={MENU_TESTIDS[m.id]}
+          {presentation}
+          drawer={m.id === 'files'}
+          {screen}
+          anchor={anchorFor(m)}
+          onclose={closeMenu}
+          onback={m.fromMore ? () => (menu = { id: 'more', fromMore: false }) : undefined}
+        >
+          {#if m.id === 'subtitles'}
+            <SubtitleMenu
+              subtitles={controller.subtitles}
+              onpicked={() => closeMenu(true)}
+              onupload={() => subtitleInput?.click()}
+            />
+          {:else if m.id === 'audio'}
+            <AudioMenu
+              tracks={controller.audioTracks}
+              selected={controller.audioTrackId}
+              onselect={(id) => {
+                closeMenu(true);
+                void controller.selectAudioTrack(id);
+              }}
+            />
+          {:else if m.id === 'files'}
+            <FileList
+              files={controller.files}
+              selected={controller.fileIndex}
+              onselect={selectFile}
+            />
+          {:else if m.id === 'stats'}
+            <StatsPanel stats={controller.stats} />
+          {:else if m.id === 'share'}
+            <div class="share-panel">
+              <p>Couldn’t copy. Copy the link from here:</p>
+              <div class="share-row">
+                <input
+                  type="text"
+                  readonly
+                  value={share.url}
+                  data-menu-item
+                  data-testid="share-url"
+                  aria-label="Share link (copy it from here)"
+                  onfocus={(e) => e.currentTarget.select()}
+                  {@attach (el) => el.select()}
+                />
+                <IconButton
+                  icon={share.state === 'copied' ? Check : Copy}
+                  label={share.state === 'copied' ? 'Link copied' : 'Copy link'}
+                  onclick={() => void share.copy()}
+                />
+              </div>
+            </div>
+          {:else if m.id === 'more'}
+            <MoreMenu
+              {silent}
+              ontogglemute={toggleMute}
+              rows={[
+                ...(showAudio ? [{ id: 'audio' as const, value: audioLabel }] : []),
+                ...(showFiles ? [{ id: 'files' as const, value: filePosition }] : []),
+                ...(showStats ? [{ id: 'stats' as const, value: statsText }] : []),
+              ]}
+              share={controller.magnet ? share : null}
+              onopen={(id) => (menu = { id, fromMore: true })}
+              onshare={() => void copyShareLink()}
+            />
+          {/if}
+        </Menu>
+      {/key}
+    {/if}
   </div>
-
-  {#if controller.audioTracks.length > 0}
-    <p class="tracks">
-      <label for="audio-track">Audio</label>
-      <select
-        id="audio-track"
-        data-testid="audio-track"
-        value={controller.audioTrackId ?? ''}
-        onchange={onAudioChange}
-        disabled={controller.audioTrackId === null}
-      >
-        {#if controller.audioTrackId === null}<option value="">Muted</option>{/if}
-        {#each controller.audioTracks as t (t.id)}
-          <option
-            value={t.id}
-            disabled={t.playback === 'unsupported'}
-            title={t.playback === 'transcode'
-              ? `Converted in the browser to ${codecLabel(t.outputCodec)}`
-              : t.reason}>{audioOptionText(t)}</option
-          >
-        {/each}
-      </select>
-    </p>
-  {/if}
 
   <p class="sr-only" data-testid="status" data-phase={controller.phase} aria-live="polite">
     {statusText}
   </p>
 
-  {#if controller.phase !== 'error'}
-    <StatsPanel stats={controller.stats} />
-  {/if}
-
   <div class="actions">
-    {#if controller.magnet}
-      <ShareButton magnet={controller.magnet} fileIndex={controller.fileIndex} />
-    {/if}
     <details class="shortcuts" data-testid="shortcuts-help">
       <summary>Keyboard shortcuts</summary>
       <dl>
@@ -450,14 +741,12 @@
     </p>
   {/each}
 
-  <FileList
-    files={controller.files}
-    selected={controller.fileIndex}
-    onselect={(index) => void controller.selectFile(index)}
-  />
-
-  {#if controller.phase !== 'error'}
-    <SubtitleMenu subtitles={controller.subtitles} />
+  {#if controller.subtitles.notice && controller.phase !== 'error'}
+    {@const n = controller.subtitles.notice}
+    <p class="notice" data-testid="notice" data-code={n.code}>
+      {PLAYBACK_ERROR_MESSAGES[n.code]}
+      {#if n.detail}<span class="detail">({n.detail})</span>{/if}
+    </p>
   {/if}
 </section>
 
@@ -514,14 +803,95 @@
       transition: transform var(--dur-base) var(--ease-out);
     }
   }
-  .tracks {
+  /* Bar additions: the stats chip, trigger badges, active toggles. */
+  .stats-chip {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: var(--space-1);
+    height: 2rem;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .stats-chip span + :global(svg) {
+    margin-left: var(--space-2);
+  }
+  @media (hover: hover) {
+    .stats-chip:hover {
+      background: rgb(255 255 255 / 0.12);
+      color: var(--text);
+    }
+  }
+  .stats-chip[aria-expanded='true'] {
+    background: rgb(255 255 255 / 0.16);
+    color: var(--text);
+  }
+  .stats-chip:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgb(0 0 0 / 0.5);
+  }
+  .screen :global(.icon-button.on) {
+    color: var(--accent-fg);
+  }
+  .screen :global(.icon-button.copied) {
+    color: var(--success);
+  }
+  .trigger-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .badge {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  .badge.warn {
+    background: var(--warning);
+  }
+  .badge.spin {
+    border: 2px solid var(--text-muted);
+    border-top-color: transparent;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .share-panel {
+    padding: 0 var(--space-4);
+  }
+  .share-panel p {
+    margin: 0 0 var(--space-2);
+    color: var(--text-muted);
+  }
+  .share-row {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
-  .tracks select {
+  .share-row input {
+    flex: 1;
     min-width: 0;
-    max-width: 100%;
+    padding: var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-1);
+    color: var(--text);
+    font: inherit;
   }
   .dragging .screen {
     outline: 2px dashed var(--accent-fg);
@@ -597,5 +967,8 @@
   }
   .notice {
     background: color-mix(in srgb, orange 18%, transparent);
+  }
+  .detail {
+    opacity: 0.75;
   }
 </style>

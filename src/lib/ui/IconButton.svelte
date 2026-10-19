@@ -156,6 +156,10 @@
       background: rgb(255 255 255 / 0.12);
     }
   }
+  /* A menu trigger while its menu is open. */
+  .icon-button[aria-expanded='true'] {
+    background: rgb(255 255 255 / 0.16);
+  }
   .icon-button:active {
     transform: scale(0.94);
   }
