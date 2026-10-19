@@ -228,6 +228,8 @@ test('every icon button has an aria-label and our tooltip (with its key), never 
   await page.keyboard.press(' ');
   const screen = page.getByTestId('screen');
   const buttons = screen.getByRole('button');
+  // The centre play button (the 4th) appears once the pause has landed.
+  await expect(page.getByTestId('centre-button')).toBeVisible();
   expect(await buttons.count()).toBeGreaterThanOrEqual(4);
   for (const button of await buttons.all()) {
     await expect(button).toHaveAttribute('aria-label', /\S/);
