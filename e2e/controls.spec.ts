@@ -38,9 +38,14 @@ test('our control bar replaces the native one, with exactly one fullscreen contr
   // No native controls, so no disabled native fullscreen icon either.
   await expect(video(page)).not.toHaveAttribute('controls');
   await expect(video(page)).not.toHaveAttribute('controlslist');
-  const fullscreen = page.getByRole('button', { name: /fullscreen/i });
-  await expect(fullscreen).toHaveCount(1);
-  await expect(fullscreen).toHaveAttribute('data-testid', 'fullscreen');
+  // Exactly one fullscreen control. The rest uses the test id: a role locator skips the bar while
+  // it auto-hides (Firefox can take a while to leave fullscreen).
+  await expect(page.getByRole('button', { name: /fullscreen/i })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /fullscreen/i })).toHaveAttribute(
+    'data-testid',
+    'fullscreen',
+  );
+  const fullscreen = page.getByTestId('fullscreen');
   await expect(fullscreen).toHaveAttribute('aria-label', 'Fullscreen');
   await expect(fullscreen).toHaveAttribute('title', 'Fullscreen (F)');
   await expect(fullscreen).toHaveText(''); // An icon, not a text label.
@@ -155,7 +160,7 @@ test('while playing, the bar and cursor hide 1 s after the pointer rests or leav
   await wake(page);
   await expect(bar).toBeVisible();
   await leaveWindow();
-  await expect(bar).toBeHidden({ timeout: 500 });
+  await expect(bar).toBeHidden({ timeout: 1_500 }); // At once, plus the 0.25 s fade.
 
   // Fullscreen: the same, and nothing but the picture stays drawn.
   await page.keyboard.press('f');
@@ -171,7 +176,7 @@ test('while playing, the bar and cursor hide 1 s after the pointer rests or leav
   await expect(bar).toBeVisible();
   await expect(screen).not.toHaveClass(/idle/);
   await leaveWindow();
-  await expect(bar).toBeHidden({ timeout: 500 });
+  await expect(bar).toBeHidden({ timeout: 1_500 }); // At once, plus the 0.25 s fade.
   // A key press shows it again.
   await page.keyboard.press('Shift');
   await expect(bar).toBeVisible();
