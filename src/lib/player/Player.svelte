@@ -897,7 +897,7 @@
   .screen.carded:not(.fullscreen) {
     display: flex;
     align-items: center;
-    min-height: min(24rem, 90vh);
+    min-height: min(30rem, 90vh);
   }
   .drop-overlay {
     position: absolute;

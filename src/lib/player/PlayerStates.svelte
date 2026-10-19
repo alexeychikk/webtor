@@ -250,7 +250,8 @@
     gap: var(--space-3);
     align-items: center;
     justify-content: center;
-    padding: var(--space-3);
+    /* Clear of the title strip and the control bar, which stay usable around the card. */
+    padding: 2.75rem var(--space-3) calc(var(--hit) + var(--space-6));
     overflow: auto;
   }
   .card {

@@ -106,7 +106,8 @@ relay-v<version> --cleanup-tag` first.
 ## Layout
 
 ```
-src/App.svelte                 shell: input → player
+src/App.svelte                 shell: hero (phase idle: mark, tagline, pill input) → watch (64 px header, player);
+                               paste-to-play, page-wide .torrent drop, wordmark = home (stops, clears the hash)
 src/styles/tokens.css          design tokens (colour, type, space, radius, motion, player z-layers), ADR 0008
 src/lib/torrent/               WebTorrent client, trackers, file classification; memory-store.ts (when OPFS can't write)
   files.ts FileList.svelte     video file list (playable / greyed-out unsupported), pick, picker UI
@@ -121,6 +122,9 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   PlayerControls.svelte        control layer over the picture: scrims, title strip, seek bar (track, downloaded,
                                buffered, played; hover time), play, volume, time, the one fullscreen icon
+  PlayerStates.svelte states.ts   in-player states (ADR 0008): error card (Retry, relay CTA),
+                               no-peers card (spinner keeps going), toasts (hide with the controls, dismissable);
+                               `playerStates`/`errorActions` are the pure rules, titles in `PLAYBACK_ERROR_TITLES`
   PlayerCentre.svelte centre.ts   centre of the picture: play/pause/replay circle, toggle flash, loading/buffering
                                spinner, touch ±5 s (`centreState` is the pure rule)
   media-state.svelte.ts seek.ts   `<video>` state as runes; `downloadedRanges` (piece bitfield → file fractions)
@@ -132,8 +136,10 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   share-link.svelte.ts         "Copy share link" state (`shareUrl`, idle/copied/failed)
 src/lib/ui/IconButton.svelte   icon-only button + our tooltip (400 ms hover / focus-visible, kbd chip, clamped
                                to `[data-tooltip-bounds]`, hidden with the controls); tooltip-context.ts
+  page-dialog.ts               `showPageDialog`: leave fullscreen, then `showModal()` (help, relay dialogs)
   menu.ts Menu.svelte          player menus: panel (inside the screen) or bottom sheet, listbox keys
-src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay);
+src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay;
+                               last section: keyboard shortcuts, opened scrolled there by `?`);
                                open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
   fullscreen.ts                capabilities (styled ASS, container/video fullscreen), fullscreen method,
                                `controlsFor` (always `own` now: no native controls anywhere),
@@ -208,7 +214,13 @@ docs/decisions/                ADRs
   after a paused seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`,
   `opus`…; empty when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish
   hooks: `why-button` (header), `why-link` (in no-peers/stalled notices), `why-dialog`, `why-relay`;
-  `shortcuts-help`. Check shown cues through `video.textTracks` (`mode === 'showing'`,
+  `shortcuts-help` (last section of the help dialog; `?` opens it, also while idle). States: `error`
+  is the card (`role=alert`) with `retry` (same file again) and "Relay settings"/"Set up a relay";
+  `notice[data-code=no-peers]` is a card, every other notice a toast (`role=status`, `notice-dismiss`)
+  that hides with the controls: assert toasts with `toBeAttached`/`toContainText` while playing.
+  Drops: `page-drop` (a .torrent anywhere outside the player) and `drop-overlay` (on the player:
+  subtitles or a .torrent). Dialogs (`page-dialog`, `src/lib/ui/page-dialog.ts`) leave fullscreen
+  before `showModal()`. Check shown cues through `video.textTracks` (`mode === 'showing'`,
   `activeCues`) after a paused seek.
 - **Menu hooks (ADR 0008 §4).** Bar triggers (`aria-haspopup`, `aria-expanded`): `subtitles`
   (`data-value`: `sidecar:<file index>`, `upload:<n>`, `""` = Off), `audio-track` (`data-value` = track
@@ -294,7 +306,7 @@ urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer cou
   `relayUrl` (a webtor-relay that reaches it) and `noTranscodeRelayUrl` (same, `-no-transcode`)
   (`e2e/support/relay-stack.mjs`, builds both Go commands). The relays find ffmpeg through
   `WEBTOR_RELAY_FFMPEG` or `PATH`; without it the conversion spec skips. Relay test hooks:
-  `relay-button`, `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`,
+  `relay-button` (aria-label "Connect a relay" / "Relay: on", `data-active`), `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`,
   `relay-transcode` (`data-available`).
 - **Relay video conversion (ADR 0007 §2).** An AVI whose video codec is null (DivX/Xvid) plays
   only with a relay whose `/v1/info` has `transcode.available`: `MsePlayer`'s video pipeline then
