@@ -50,8 +50,14 @@ test('our control bar replaces the native one, with exactly one fullscreen contr
   await expect(fullscreen).toHaveAttribute('aria-label', 'Exit fullscreen');
   // The bar is inside the fullscreen element, at the bottom of the screen.
   await expect
-    .poll(async () => (await page.getByTestId('controls').boundingBox())?.width)
-    .toBe(page.viewportSize()!.width);
+    .poll(() =>
+      page.getByTestId('controls').evaluate((bar) => {
+        const fs = document.fullscreenElement?.getBoundingClientRect();
+        const b = bar.getBoundingClientRect();
+        return !!fs && b.width === fs.width && Math.abs(b.bottom - fs.bottom) < 1;
+      }),
+    )
+    .toBe(true);
 
   await fullscreen.click();
   await expect.poll(() => fullscreenTestId(page)).toBeNull();
