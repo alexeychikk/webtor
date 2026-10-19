@@ -43,12 +43,12 @@ const INIT = concat(box('ftyp', new Uint8Array(8)), box('moov', new Uint8Array(1
 /** Bytes per second of media: 400 kbit/s. */
 const BYTES_PER_S = 50_000;
 
-function fragment(start: number, end: number): Uint8Array<ArrayBuffer> {
+function fragment(start: number, end: number, rate = BYTES_PER_S): Uint8Array<ArrayBuffer> {
   const times = new Uint8Array(16);
   const view = new DataView(times.buffer);
   view.setFloat64(0, start);
   view.setFloat64(8, end);
-  return concat(box('moof', times), box('mdat', new Uint8Array((end - start) * BYTES_PER_S - 40)));
+  return concat(box('moof', times), box('mdat', new Uint8Array((end - start) * rate - 40)));
 }
 
 /** Mediabunny's writes for `n` fragments of `len` s from `first`: init + fragment, then one each. */
@@ -151,7 +151,15 @@ class FakeSourceBuffer extends EventTarget implements AppendBuffer {
 }
 
 /** A playhead that moves through what is buffered while `playing`, and the host around it. */
-function setup(quota: number, opts: { relieve?: () => Promise<boolean> } = {}) {
+/**
+ * `gop`/`first`: the stream's keyframes (one per fragment), known ahead like the demuxer's index,
+ * for `safeCut` (MSE removes up to the next keyframe: a cut must not empty the GOP being played).
+ */
+function setup(
+  quota: number,
+  opts: { relieve?: () => Promise<boolean>; gop?: number; first?: number } = {},
+) {
+  const { gop = 1, first = 0 } = opts;
   const sb = new FakeSourceBuffer(quota);
   const q = newQuotaState();
   const state = { t: 0, clock: 0, playing: true, streaming: true, maxAhead: 0 };
@@ -166,7 +174,7 @@ function setup(quota: number, opts: { relieve?: () => Promise<boolean> } = {}) {
     progress: () => new Promise((resolve) => waiters.push(resolve)),
     now: () => state.clock,
     check: () => {},
-    safeCut: (cut) => cut,
+    safeCut: (cut) => first + Math.floor((cut - first) / gop + 1e-9) * gop,
     staleAhead: () => null,
     relieve: opts.relieve ?? (async () => false),
   };
@@ -184,7 +192,7 @@ function setup(quota: number, opts: { relieve?: () => Promise<boolean> } = {}) {
     for (const wake of w) wake();
   }
   /** Appends `chunks` one after the other, like a pipeline's WritableStream. */
-  function produce(chunks: Uint8Array<ArrayBuffer>[]) {
+  function produce(chunks: Iterable<Uint8Array<ArrayBuffer>>) {
     let settled = false;
     let error: unknown = null;
     const done = (async () => {
@@ -227,7 +235,7 @@ describe('appendChunk under a WebKit-like quota', () => {
     const chunks = writes(10, 2);
     expect(isQuotaError(() => new FakeSourceBuffer(1_000_000).appendBuffer(chunks[0]!))).toBe(true);
 
-    const { sb, state, produce, runUntil } = setup(1_000_000);
+    const { sb, state, produce, runUntil } = setup(1_000_000, { gop: 2 });
     const run = produce(chunks);
     await runUntil(() => run.settled && state.t >= 20);
     expect(run.error).toBeNull();
@@ -235,6 +243,26 @@ describe('appendChunk under a WebKit-like quota', () => {
     expect(sb.fragments).toBe(10);
     expect(state.t).toBe(20);
   });
+
+  it('plays a 4K-like stream under an iPad-sized quota in bounded appends', async () => {
+    // 40 Mbit/s with 5 s GOPs (25 MB fragments), 105 MB per SourceBuffer (5.25 MB before the init
+    // segment): the first write alone (moov + 25 MB) was refused every time.
+    const rate = 5_000_000;
+    const { sb, q, state, produce, runUntil } = setup(110_376_422, { gop: 5 });
+    function* stream() {
+      yield concat(INIT, fragment(0, 5, rate));
+      for (let i = 1; i < 16; i++) yield fragment(i * 5, (i + 1) * 5, rate);
+    }
+    const run = produce(stream());
+    await runUntil(() => run.settled && state.t >= 80, 8000);
+    expect(run.error).toBeNull();
+    expect(state.t).toBe(80);
+    expect(sb.appends[0]).toBe(INIT.byteLength);
+    expect(Math.max(...sb.appends)).toBeLessThanOrEqual(MAX_APPEND_BYTES);
+    expect(q.hits).toBeGreaterThan(0);
+    // A window, not the 60 s target: what fits (22 s) plus the fragment going in.
+    expect(state.maxAhead).toBeLessThan(30);
+  }, 30_000);
 
   it('waits for playback instead of failing when nothing behind can be evicted', async () => {
     // 10 s of media fit; the time target (60 s) never would.
@@ -279,7 +307,7 @@ describe('appendChunk under a WebKit-like quota', () => {
   it('counts media just past the playhead (a small gap) as ahead, also while paused', async () => {
     // The first frame is at 0.6 s (audio after video, or an MPEG-TS start offset). bufferedAhead
     // reads 0 there: the old code took that as starved and failed while the playhead sat still.
-    const { q, state, produce, runUntil, tick } = setup(4 * BYTES_PER_S);
+    const { q, state, produce, runUntil, tick } = setup(4 * BYTES_PER_S, { first: 0.6 });
     state.playing = false;
     const run = produce(writes(20, 1, 0.6));
     for (let i = 0; i * 250 < 2 * STARVED_TIMEOUT_MS; i++) await tick();
