@@ -112,6 +112,7 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
@@ -233,9 +234,18 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,
 urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer count. No relay set =
   the original path, untouched. Never log or show the relay URL: the token is a password.
-- Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns a magnet that only a TCP seeder on
-  loopback has (no `xs=`/`ws=`) and the URL of a webtor-relay that reaches it
-  (`e2e/support/relay-stack.mjs`, builds both Go commands). Relay test hooks: `relay-button`,
-  `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`.
+- Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns magnets that only a TCP seeder on
+  loopback has (no `xs=`/`ws=`): `magnet` (sample.mkv), `aviMagnet` (avi-xvid-ac3.avi), plus
+  `relayUrl` (a webtor-relay that reaches it) and `noTranscodeRelayUrl` (same, `-no-transcode`)
+  (`e2e/support/relay-stack.mjs`, builds both Go commands). The relays find ffmpeg through
+  `WEBTOR_RELAY_FFMPEG` or `PATH`; without it the conversion spec skips. Relay test hooks:
+  `relay-button`, `relay-dialog`, `relay-url`, `relay-test` (`data-state`), `relay-peers`,
+  `relay-transcode` (`data-available`).
+- **Relay video conversion (ADR 0007 §2).** An AVI whose video codec is null (DivX/Xvid) plays
+  only with a relay whose `/v1/info` has `transcode.available`: `MsePlayer`'s video pipeline then
+  streams the relay's `transcode` fMP4 into the video SourceBuffer (`remote-video.ts`), and audio
+  and subtitles stay local. A seek aborts the fetch and requests `?start=t` (element time,
+  `timestampOffset` from `appendOffset`, no keyframe lookup). An opened .torrent is POSTed to the
+  relay's `metainfo` first.
 - Web seeds need CORS that allows the `Range` and `Cache-Control` request headers (WebTorrent sends
   both).

@@ -155,7 +155,9 @@ what you download through it.
 - At most `-max-torrents` torrents are open at once. Opening one more answers HTTP 429 with
   `{"error": "…", "maxTorrents": N}`, unless an open one has had no request for a minute: that one is
   dropped to make room.
-- A metainfo request waits up to `-metadata-timeout` for the swarm, then answers 504.
+- A metainfo request waits up to `-metadata-timeout` for the swarm, then answers 504. A `POST` of a
+  .torrent file to the same URL adds the torrent from that file at once (the app does this for a
+  .torrent you opened).
 - A torrent with no request for `-idle-timeout` is dropped. A request in progress (a metainfo wait,
   a web seed read) always keeps its torrent.
 - Downloaded data lives in `<data-dir>/pieces/<infohash>/` only while the torrent is open. It is

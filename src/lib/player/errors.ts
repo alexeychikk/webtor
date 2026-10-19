@@ -21,7 +21,11 @@ export type PlaybackErrorCode =
   | 'relay-unreachable'
   | 'relay-no-metadata'
   | 'relay-busy'
-  | 'relay-error';
+  | 'relay-error'
+  | 'relay-transcode-unavailable'
+  | 'relay-transcode-busy'
+  | 'relay-transcode-failed'
+  | 'relay-transcode-slow';
 
 export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'invalid-input': 'That is not a magnet link, info hash or .torrent file.',
@@ -41,7 +45,7 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
     'Try Safari, or Chrome/Edge on a device with hardware HEVC support.',
   'video-needs-relay':
     'This video uses an old format that browsers can’t play. Converting it needs a relay you run ' +
-    'yourself (webtor-relay).',
+    'yourself (webtor-relay) with ffmpeg installed.',
   'unsupported-audio-codec':
     'This audio track cannot be played or converted in the browser. Pick another audio track.',
   'no-mse': 'This browser cannot stream video (Media Source Extensions missing; iOS needs 17.1+).',
@@ -62,6 +66,14 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'relay-busy':
     'Your relay is already streaming its maximum number of torrents. Stop one or raise -max-torrents.',
   'relay-error': 'Your relay could not load this torrent.',
+  'relay-transcode-unavailable':
+    'Your relay can’t convert video. Install ffmpeg on its computer and restart webtor-relay.',
+  'relay-transcode-busy':
+    'Your relay is already converting another video. Close it, or raise -max-transcodes.',
+  'relay-transcode-failed': 'Your relay could not convert this video.',
+  'relay-transcode-slow':
+    'Your relay converts video slower than it plays. Start it with a lower -transcode-max-height ' +
+    'or a faster -transcode-preset.',
 };
 
 export class PlaybackError extends Error {
@@ -79,7 +91,7 @@ export function playbackErrorMessage(code: PlaybackErrorCode, detail?: string): 
   if (code === 'video-needs-relay' && detail) {
     return (
       `This video uses an old ${detail} format that browsers can’t play. Converting it needs a ` +
-      'relay you run yourself (webtor-relay).'
+      'relay you run yourself (webtor-relay) with ffmpeg installed.'
     );
   }
   return PLAYBACK_ERROR_MESSAGES[code] + (detail ? ` (${detail})` : '');

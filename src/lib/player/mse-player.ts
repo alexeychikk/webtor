@@ -17,6 +17,13 @@ import {
 } from './codecs';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import {
+  MAX_REMOTE_RESUMES,
+  REMOTE_VIDEO_MIME,
+  remoteResumePoint,
+  transcodeSlow,
+  type RemoteVideo,
+} from './remote-video';
+import {
   appendOffset,
   elementDuration,
   restartPoint,
@@ -65,6 +72,8 @@ interface Pipeline {
   sbMime: string;
   /** Audio only: copy or transcode. */
   decision?: AudioDecision;
+  /** Video converted by the relay (ADR 0007 §2) instead of a local `Conversion`. */
+  remote?: RemoteState;
   /** Bumped on every (re)start; work belonging to an older generation stops. */
   gen: number;
   conversion: Conversion | null;
@@ -82,6 +91,15 @@ interface Pipeline {
   replaceUntil: number;
 }
 
+interface RemoteState {
+  /** Ends the current relay request (seek, restart, destroy). */
+  abort: AbortController | null;
+  /** `performance.now()` of the current request, for `transcodeSlow`. */
+  startedAt: number;
+  /** Stream cuts in a row without data in between (see `MAX_REMOTE_RESUMES`). */
+  cuts: number;
+}
+
 export interface MsePlayerOptions {
   /** Fatal error after `open` resolved (pipeline or media element failure). */
   onError(err: PlaybackError): void;
@@ -90,6 +108,13 @@ export interface MsePlayerOptions {
    * one was opening): `open` then rejects instead of attaching its MediaSource over the newer one.
    */
   isStale?(): boolean;
+  /**
+   * Asked when the browser can't decode the video (DivX/Xvid AVI): the relay's conversion to use, or
+   * a rejection with a `relay-*` `PlaybackError`. Without it such a file fails with `video-needs-relay`.
+   */
+  remoteVideo?(): Promise<RemoteVideo>;
+  /** A non-fatal condition that came up while playing (e.g. `relay-transcode-slow`). */
+  onNotice?(code: PlaybackErrorCode): void;
 }
 
 export class MsePlayer {
@@ -103,6 +128,7 @@ export class MsePlayer {
   private readonly abort = new AbortController();
   private readonly bufferAhead = bufferAheadSeconds();
   private switchGen = 0;
+  private slowNoticed = false;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -118,6 +144,7 @@ export class MsePlayer {
     private readonly audioDecisions: ReadonlyMap<number, AudioDecision>,
     notices: PlaybackErrorCode[],
     private readonly opts: MsePlayerOptions,
+    private readonly remote: RemoteVideo | null,
   ) {
     this.audioTracks = audioTracks;
     this.notices = notices;
@@ -160,20 +187,27 @@ export class MsePlayer {
         throw err;
       }
       if (!videoTrack) throw new PlaybackError('no-playable-file', 'no video track');
+      let remote: RemoteVideo | null = null;
       if (
         (await videoTrack.getCodec()) === null &&
         (await input.getFormat()).name === AVI_FORMAT_NAME
       ) {
         // DivX/Xvid & co.: no browser decodes them; the relay can convert them (ADR 0007 §2).
         const fourcc = String((await videoTrack.getInternalCodecId()) ?? '');
-        throw new PlaybackError('video-needs-relay', aviVideoFormatName(fourcc));
+        if (!opts.remoteVideo)
+          throw new PlaybackError('video-needs-relay', aviVideoFormatName(fourcc));
+        remote = await opts.remoteVideo();
       }
 
-      const video_ = decideVideo(
-        await videoTrack.getCodec(),
-        await videoTrack.getCodecParameterString(),
-        isTypeSupported,
-      );
+      const video_ = remote
+        ? isTypeSupported(REMOTE_VIDEO_MIME)
+          ? ({ ok: true, mime: REMOTE_VIDEO_MIME } as const)
+          : ({ ok: false, code: 'unsupported-video-codec', detail: 'H.264 High' } as const)
+        : decideVideo(
+            await videoTrack.getCodec(),
+            await videoTrack.getCodecParameterString(),
+            isTypeSupported,
+          );
       if (!video_.ok) throw new PlaybackError(video_.code, video_.detail);
 
       const canEncode = (codec: 'opus' | 'aac') =>
@@ -261,10 +295,12 @@ export class MsePlayer {
         audioDecisions,
         notices,
         opts,
+        remote,
       );
       try {
         try {
           player.addPipeline('video', videoTrack.id, video_.mime);
+          if (remote) player.pipelines[0]!.remote = { abort: null, startedAt: 0, cuts: 0 };
           if (audio && audioDecision && audioDecision.playback !== 'unsupported') {
             player.addPipeline('audio', audio.id, audioDecision.mime, audioDecision);
           }
@@ -354,10 +390,7 @@ export class MsePlayer {
     this.destroyed = true;
     clearTimeout(this.seekTimer);
     this.abort.abort();
-    for (const p of this.pipelines) {
-      p.gen++;
-      void p.conversion?.cancel().catch(() => {});
-    }
+    for (const p of this.pipelines) void this.stopPipeline(p);
     if (!this.input.disposed) this.input.dispose();
     // Leave the element alone if a newer player already attached its own MediaSource.
     if (this.video.src === this.objectUrl) {
@@ -365,6 +398,17 @@ export class MsePlayer {
       this.video.load();
     }
     URL.revokeObjectURL(this.objectUrl);
+  }
+
+  /** Invalidates `p`'s current run (its conversion or relay request); resolves once it is cancelled. */
+  private stopPipeline(p: Pipeline): { g: number; cancel: Promise<void> | undefined } {
+    const g = ++p.gen;
+    const c = p.conversion;
+    p.conversion = null;
+    p.done = false;
+    p.remote?.abort?.abort();
+    if (p.remote) p.remote.abort = null;
+    return { g, cancel: c?.cancel().catch(() => {}) };
   }
 
   private addPipeline(
@@ -392,7 +436,14 @@ export class MsePlayer {
   private listen() {
     const { signal } = this.abort;
     this.video.addEventListener('seeking', () => this.onSeeking(), { signal });
-    this.video.addEventListener('waiting', () => this.jumpGap(), { signal });
+    this.video.addEventListener(
+      'waiting',
+      () => {
+        this.jumpGap();
+        this.checkTranscodeSpeed();
+      },
+      { signal },
+    );
     this.video.addEventListener(
       'error',
       () => {
@@ -418,6 +469,22 @@ export class MsePlayer {
     if (target !== null) this.video.currentTime = target;
   }
 
+  /** `relay-transcode-slow` once the element starves for video the relay is still converting. */
+  private checkTranscodeSpeed() {
+    const p = this.pipelines.find((x) => x.remote);
+    if (!p?.remote || this.destroyed || this.slowNoticed) return;
+    const slow = transcodeSlow({
+      videoBuffered: p.sb.buffered,
+      currentTime: this.video.currentTime,
+      seeking: this.video.seeking,
+      done: p.done,
+      sinceStartMs: performance.now() - p.remote.startedAt,
+    });
+    if (!slow) return;
+    this.slowNoticed = true;
+    this.opts.onNotice?.('relay-transcode-slow');
+  }
+
   /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
   private onSeeking() {
     const t = this.video.currentTime;
@@ -433,22 +500,20 @@ export class MsePlayer {
   private async restartAt(t: number) {
     const gen = ++this.seekGen;
     // Stop the old pipelines first so their reads stop competing with the keyframe lookup.
-    const stopped = this.pipelines.map((p) => {
-      const g = ++p.gen;
-      const c = p.conversion;
-      p.conversion = null;
-      p.done = false;
-      return { p, g, cancel: c?.cancel().catch(() => {}) };
-    });
+    const stopped = this.pipelines.map((p) => ({ p, ...this.stopPipeline(p) }));
     try {
-      const key = await new this.mb.EncodedPacketSink(this.videoTrack).getKeyPacket(
-        toSourceTime(this.timeline, t),
-        {
-          verifyKeyPackets: true,
-        },
-      );
+      // The relay's conversion starts exactly at `t` (ffmpeg input -ss), and every audio packet is a
+      // key packet: no keyframe to look up.
+      const key = this.remote
+        ? null
+        : await new this.mb.EncodedPacketSink(this.videoTrack).getKeyPacket(
+            toSourceTime(this.timeline, t),
+            { verifyKeyPackets: true },
+          );
       if (gen !== this.seekGen || this.destroyed) return;
-      const k = restartPoint(this.timeline, key?.timestamp);
+      const k = this.remote
+        ? toSourceTime(this.timeline, t)
+        : restartPoint(this.timeline, key?.timestamp);
       await Promise.all(
         stopped.map(async ({ p, g, cancel }) => {
           await cancel;
@@ -479,6 +544,7 @@ export class MsePlayer {
    * to which another track's media is still buffered and gets overwritten (audio switch).
    */
   private async startPipeline(p: Pipeline, k: number, gen: number, replaceUntil = -Infinity) {
+    if (p.remote) return this.startRemote(p, k, gen);
     const { mb } = this;
     const offset = appendOffset(this.timeline, k);
     p.writtenTo = -Infinity;
@@ -544,6 +610,76 @@ export class MsePlayer {
         this.fail(err);
       },
     );
+  }
+
+  /** Starts the relay's conversion at source time `k` and pumps it into `p`'s SourceBuffer. */
+  private async startRemote(p: Pipeline, k: number, gen: number) {
+    const remote = p.remote!;
+    const offset = appendOffset(this.timeline, k);
+    p.writtenTo = -Infinity;
+    p.replaceUntil = -Infinity;
+    const abort = new AbortController();
+    remote.abort = abort;
+    remote.startedAt = performance.now();
+    let body: ReadableStream<Uint8Array>;
+    try {
+      body = await this.remote!.open(offset, abort.signal);
+    } catch (err) {
+      if (gen !== p.gen || this.destroyed) return;
+      throw err;
+    }
+    if (gen !== p.gen || this.destroyed) return void abort.abort();
+    await settled(p.sb);
+    if (gen !== p.gen || this.destroyed) return void abort.abort();
+    // The relay's output starts at 0 for `start` = offset.
+    p.sb.timestampOffset = offset;
+    void this.pumpRemote(p, gen, body);
+  }
+
+  /**
+   * Reads the relay's stream into the SourceBuffer. `append` waits while enough is buffered ahead,
+   * and not reading is the back-pressure: the relay's ffmpeg blocks on its pipe (ADR 0007 §2).
+   */
+  private async pumpRemote(p: Pipeline, gen: number, body: ReadableStream<Uint8Array>) {
+    const remote = p.remote!;
+    const reader = body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (gen !== p.gen || this.destroyed) return;
+        if (done) break;
+        remote.cuts = 0;
+        await this.append(p, gen, value);
+      }
+    } catch (err) {
+      if (gen !== p.gen || this.destroyed || err instanceof StalePipeline) return;
+      if (err instanceof PlaybackError) return this.fail(err);
+      // The stream broke off (the relay ended a job idle for long, e.g. a paused tab, or the network
+      // dropped): go on from what is buffered.
+      void this.resumeRemote(p, gen).catch((e: unknown) => this.fail(e));
+      return;
+    } finally {
+      reader.releaseLock();
+    }
+    p.done = true;
+    this.maybeEndOfStream();
+  }
+
+  private async resumeRemote(p: Pipeline, gen: number) {
+    const remote = p.remote!;
+    if (++remote.cuts > MAX_REMOTE_RESUMES) {
+      throw new PlaybackError(
+        'relay-transcode-failed',
+        'the relay’s video stream keeps breaking off',
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000 * remote.cuts));
+    if (gen !== p.gen || this.destroyed) return;
+    const { g } = this.stopPipeline(p);
+    const at = remoteResumePoint(p.sb.buffered, this.video.currentTime);
+    await this.resetBuffer(p, at);
+    if (g !== p.gen || this.destroyed) return;
+    await this.startRemote(p, toSourceTime(this.timeline, at), g);
   }
 
   /** Appends one chunk, waiting while enough is buffered ahead and evicting what is far behind. */

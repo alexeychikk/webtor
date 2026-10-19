@@ -36,7 +36,7 @@ export function checkRelayUrl(input: string, pageProtocol: string): RelayUrlChec
 }
 
 export interface RelayEndpoints {
-  /** `GET` → `{name: 'webtor-relay', version, api: 1}`. */
+  /** `GET` → `{name: 'webtor-relay', version, api: 2, transcode: {available, ffmpeg, …}}`. */
   info: string;
   /**
    * `GET` → .torrent (info dict only) once the swarm delivered it; 504 after ~90 s without; 429
@@ -49,6 +49,12 @@ export interface RelayEndpoints {
   stats: string;
   /** BEP-19 web seed URL for WebTorrent's `urlList`. */
   webseed: string;
+  /**
+   * `GET` → fragmented MP4 (H.264, no audio) of file `fileIndex` from element time `start` on, its
+   * timestamps starting at 0 (api 2, ADR 0007 §2). Errors: 503 `transcode-unavailable`, 429
+   * `transcode-busy`, 422 `transcode-failed`.
+   */
+  transcode(fileIndex: number, start: number): string;
 }
 
 /**
@@ -67,6 +73,9 @@ export function relayEndpoints(
     files: `${t}/files`,
     stats: `${t}/stats`,
     webseed: `${t}/webseed/`,
+    // Millisecond precision is plenty for ffmpeg's `-ss` and keeps the URL readable.
+    transcode: (fileIndex, start) =>
+      `${t}/transcode/${fileIndex}?start=${Math.max(0, Math.round(start * 1000) / 1000)}`,
   };
 }
 
@@ -137,7 +146,13 @@ export type RelayFailure =
   | { kind: 'bad-response' };
 
 export type RelayErrorCode =
-  'relay-unreachable' | 'relay-no-metadata' | 'relay-busy' | 'relay-error';
+  | 'relay-unreachable'
+  | 'relay-no-metadata'
+  | 'relay-busy'
+  | 'relay-error'
+  | 'relay-transcode-unavailable'
+  | 'relay-transcode-busy'
+  | 'relay-transcode-failed';
 
 /**
  * Error code for a failed metainfo fetch. 504 is the relay saying the swarm gave no metadata; 429
@@ -151,6 +166,22 @@ export function relayErrorCode(f: RelayFailure): RelayErrorCode {
   return 'relay-error';
 }
 
+/**
+ * Error code for a failed `…/transcode/{file}` request (ADR 0007 §2). The relay's JSON `error` names
+ * the case; 504 means its swarm sent no input in time.
+ */
+export function relayTranscodeErrorCode(f: RelayFailure): RelayErrorCode {
+  if (f.kind === 'network') return 'relay-unreachable';
+  if (f.kind === 'timeout') return 'relay-transcode-failed';
+  if (f.kind !== 'http') return 'relay-error';
+  if (f.status === 503 && f.message === 'transcode-unavailable') {
+    return 'relay-transcode-unavailable';
+  }
+  if (f.status === 429) return 'relay-transcode-busy';
+  if (f.status === 422 || f.status === 504) return 'relay-transcode-failed';
+  return 'relay-error';
+}
+
 /** Technical detail appended to the message (never contains the relay URL: the token is a password). */
 export function relayErrorDetail(f: RelayFailure): string | undefined {
   if (f.kind === 'http') {
@@ -161,18 +192,59 @@ export function relayErrorDetail(f: RelayFailure): string | undefined {
   return undefined;
 }
 
+/** `/v1/info`'s `transcode` object (api 2): can this relay convert video with ffmpeg? */
+export interface RelayTranscodeInfo {
+  available: boolean;
+  /** ffmpeg version, `''` when unavailable. */
+  ffmpeg: string;
+  maxHeight: number;
+  preset: string;
+}
+
 export interface RelayInfo {
   name: 'webtor-relay';
   version: string;
   api: number;
+  /** Relays before api 2 have no video conversion: `available: false`. */
+  transcode: RelayTranscodeInfo;
 }
+
+const NO_TRANSCODE: RelayTranscodeInfo = { available: false, ffmpeg: '', maxHeight: 0, preset: '' };
 
 /** Validates `GET /v1/info`; `null` when the body isn't a webtor-relay's. */
 export function parseRelayInfo(json: unknown): RelayInfo | null {
   if (typeof json !== 'object' || json === null) return null;
-  const { name, version, api } = json as Record<string, unknown>;
+  const { name, version, api, transcode } = json as Record<string, unknown>;
   if (name !== 'webtor-relay' || typeof api !== 'number') return null;
-  return { name, version: typeof version === 'string' ? version : '?', api };
+  return {
+    name,
+    version: typeof version === 'string' ? version : '?',
+    api,
+    transcode: parseTranscodeInfo(transcode),
+  };
+}
+
+function parseTranscodeInfo(json: unknown): RelayTranscodeInfo {
+  if (typeof json !== 'object' || json === null) return NO_TRANSCODE;
+  const { available, ffmpeg, maxHeight, preset } = json as Record<string, unknown>;
+  if (available !== true) return NO_TRANSCODE;
+  return {
+    available: true,
+    ffmpeg: typeof ffmpeg === 'string' ? ffmpeg : '',
+    maxHeight: typeof maxHeight === 'number' ? maxHeight : 0,
+    preset: typeof preset === 'string' ? preset : '',
+  };
+}
+
+/** One line for the relay dialog: whether (and how) the relay converts DivX/Xvid video. */
+export function transcodeSummary(t: RelayTranscodeInfo): string {
+  if (!t.available) {
+    return 'Video conversion: off. To play DivX/Xvid AVIs, install ffmpeg on the relay’s computer and restart it.';
+  }
+  const details = [t.ffmpeg && `ffmpeg ${t.ffmpeg}`, t.maxHeight > 0 && `up to ${t.maxHeight}p`]
+    .filter(Boolean)
+    .join(', ');
+  return `Video conversion: on${details ? ` (${details})` : ''}.`;
 }
 
 /** The part of `GET …/stats` the UI uses. */

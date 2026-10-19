@@ -1,6 +1,6 @@
 # 0007 — AVI: our own demuxer inside Mediabunny, relay-side video conversion for DivX/Xvid
 
-Date: 2026-10-19 · Status: accepted (§1 in-browser AVI implemented; relay conversion pending) · Extends 0003 and 0006
+Date: 2026-10-19 · Status: accepted, implemented · Extends 0003 and 0006
 
 ## Context
 
@@ -136,8 +136,17 @@ pipe:1`. Input `-ss` with transcoding is frame-accurate, so the output starts ex
 - **App errors:** `relay-transcode-unavailable` ("your relay can't convert video: install ffmpeg on
   its computer and restart it"), `relay-transcode-busy`, `relay-transcode-failed`, plus the
   notice above. A torrent opened from a `.torrent` file skips the relay (0006). When it needs
-  conversion, the app first asks the relay for `metainfo` with the torrent's magnet so that the
-  relay joins the swarm.
+  conversion, the app first POSTs that file to `{base}/v1/torrents/{ih}/metainfo` (the relay
+  answers like GET) and adds the relay's web seed. A magnet would not do: the relay could only get
+  the info dict from peers, and a web seed or the browser can't give it one.
+- **In the app** (`remote-video.ts`, `MsePlayer` `remoteVideo`): the controller passes a
+  `RemoteVideo` only with a relay set; it checks `/v1/info` `transcode.available` first
+  (`relay-transcode-unavailable`), and without a relay the AVI fails with `video-needs-relay`. The
+  SourceBuffer is `video/mp4; codecs="avc1.640028"`. The fetch has a 90 s deadline for the headers
+  only (ffmpeg's first fragment waits for torrent data). A response cut before its end (a killed
+  idle job, a relay restart) resumes at the buffered end, up to 3 times in a row with 1–3 s
+  back-off, then `relay-transcode-failed`. The `relay-transcode-slow` notice fires once per file,
+  on a `waiting` with < 0.5 s buffered, 5 s after a (re)start of the request.
 
 ### 3. How ffmpeg ships: an optional dependency found at runtime
 

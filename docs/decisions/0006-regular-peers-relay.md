@@ -36,6 +36,9 @@ and a default public tracker list. WebRTC and seeding-after-done are off. API (`
   holds only `info`, or 504 when the swarm gave no metadata. With `-max-torrents` (default 3)
   torrents busy it answers 429 `{error, maxTorrents}` (the app shows `relay-busy`); a torrent idle
   for a minute is evicted instead.
+- `POST {base}/v1/torrents/{ih}/metainfo` with a .torrent as the body (no Content-Type, so CORS
+  needs no preflight beyond Private Network Access) adds the torrent from it at once and answers
+  like GET. The app uses it for an opened .torrent that needs relay video conversion (0007).
 - `GET {base}/v1/torrents/{ih}/files` → `[{index, path, length, webseedPath}]`.
 - `GET {base}/v1/torrents/{ih}/stats` → swarm peers/seeders, bytes. This is what the UI shows,
   because WebTorrent only sees one wire, the web seed.
