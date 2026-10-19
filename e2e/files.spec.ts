@@ -27,7 +27,7 @@ test('a multi-file torrent auto-picks the largest video and switches to another 
   await expect(files).toHaveText([
     /episode-1\.ts\s*325 kB/,
     /episode-2\.mkv\s*708 kB/,
-    /extras\.avi/,
+    /extras\.wmv/,
   ]);
   await expect(fileButton(page, 'extras.wmv')).toBeDisabled();
   await expect(fileButton(page, 'episode-2.mkv')).toHaveAttribute('aria-current', 'true');

@@ -112,6 +112,9 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   controller.svelte.ts         torrent → file pick → MsePlayer; phase/stats/notices for the UI
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
+                               on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
+                               audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
   shortcuts.ts                 keyboard shortcuts (key → action, SHORTCUTS for the help); Player.svelte runs them
   StatsPanel.svelte ShareButton.svelte   peers/speed/progress panel; "Copy share link" (`shareUrl`)
 src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay);
@@ -144,6 +147,11 @@ docs/decisions/                ADRs
   `*.svelte.ts` modules, no Svelte 4 stores. Components in PascalCase, modules in kebab-case.
 - Import WebTorrent as `import WebTorrent from 'webtorrent/dist/webtorrent.min.js'` (prebuilt browser
   ESM; no Node polyfills). Never import `webtorrent` bare in browser code.
+- **Mediabunny is pinned exactly** (`mediabunny`, `@mediabunny/*` at the same version, no `^`): the AVI
+  demuxer implements internals. Upgrade all together and keep `src/lib/player/avi/demuxer.test.ts` green.
+- AVI scope: idx1-indexed files up to 1 GB, H.264 video (non-H.264 → `video-needs-relay`, naming the
+  format). OpenDML and index-less AVIs fail with `unsupported-container`. PTS comes from POC type 0
+  ranks within a GOP (open GOPs and POC type 1 are approximated). MP3 is copied as `mp4a.6b`.
 - Lazy-load heavy parts: `mediabunny` when the first torrent is added, `@mediabunny/ac3|dts|aac-encoder`
   and `jassub` only when a track needs them.
 - Decide capabilities by feature detection (`MediaSource.isTypeSupported`, `canEncodeAudio`,
