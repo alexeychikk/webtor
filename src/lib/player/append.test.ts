@@ -396,6 +396,31 @@ describe('appendChunk under a WebKit-like quota', () => {
     expect(err.message).toContain('buffered nothing at 0.0 s');
     expect(err.message).toMatch(/\d+ quota hits/);
   });
+  it('waits, then gives up, on an init segment over MIN_APPEND_BYTES that never fits (no spin)', async () => {
+    // A big moov (many tracks/sample tables): above the smallest piece, so halving can't help; it
+    // goes in whole or not at all. Pre-init budget 500 B: it never fits.
+    const init = concat(box('ftyp', new Uint8Array(8)), box('moov', new Uint8Array(40_000)));
+    expect(init.byteLength).toBeGreaterThan(MIN_APPEND_BYTES);
+    const { sb, state, produce, runUntil } = setup(10_000);
+    let attempts = 0;
+    const append = sb.appendBuffer.bind(sb);
+    sb.appendBuffer = (data) => {
+      // A retry without a wait would call this thousands of times before the first tick.
+      if (++attempts > 1000) throw new Error('append retried without waiting');
+      append(data);
+    };
+    const run = produce([concat(init, fragment(0, 1))]);
+    await runUntil(() => run.settled || state.clock >= STARVED_TIMEOUT_MS - 1000);
+    expect(run.settled).toBe(false);
+    const ticks = STARVED_TIMEOUT_MS / 250;
+    expect(attempts).toBeLessThan(2 * ticks);
+    await runUntil(() => run.settled, 200);
+    expect(run.error).toBeInstanceOf(PlaybackError);
+    expect((run.error as PlaybackError).message).toContain(
+      `video: ${init.byteLength} B append refused`,
+    );
+    expect(sb.appends).toEqual([]);
+  });
 });
 
 describe('initSegmentLength', () => {

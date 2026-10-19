@@ -88,12 +88,17 @@ test('switching from English AAC to Russian AC3 transcodes to Opus and keeps pla
   await expect(video(page)).toHaveAttribute('data-audio-codec', 'opus');
   await expect(page.getByTestId('error')).toHaveCount(0);
 
-  // The chosen language is remembered: the next load starts on the Russian track, transcoded.
+  // The chosen track is remembered: the next load starts on the Russian track, transcoded. Let
+  // the video finish first, so the reload starts from 0: a reload at 10–11.4 s would resume there
+  // (resume.spec.ts covers that), and a resuming element reports the resume time before any media
+  // is in, so `currentTime > 1` would prove nothing.
+  await expect(video(page)).toHaveJSProperty('ended', true, { timeout: 20_000 });
   await page.reload();
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
+  await expect(page.getByTestId('resume-toast')).toHaveCount(0);
   await expect(video(page)).toHaveAttribute('data-audio-codec', 'opus');
   await expect(select).toHaveAttribute('data-value', russian);
-  expect(await decodedAudio(page)).toBeGreaterThan(0);
+  await expect.poll(() => decodedAudio(page), { timeout: 10_000 }).toBeGreaterThan(0);
 });
 
 test('tracks the browser cannot play or convert are disabled, and the video plays muted', async ({

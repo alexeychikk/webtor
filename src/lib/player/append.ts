@@ -178,20 +178,24 @@ export async function appendChunk(
   const init = initSegmentLength(data);
   let pos = 0;
   while (pos < data.byteLength) {
-    const size = pos === 0 && init > 0 ? init : Math.min(q.chunk, data.byteLength - pos);
-    if (await appendPiece(sb, data.subarray(pos, pos + size), host, q)) pos += size;
+    const isInit = pos === 0 && init > 0;
+    const size = isInit ? init : Math.min(q.chunk, data.byteLength - pos);
+    if (await appendPiece(sb, data.subarray(pos, pos + size), host, q, !isInit)) pos += size;
   }
 }
 
 /**
  * Appends one piece, retrying on quota hits. False when the piece size was halved instead: the
- * caller splits again.
+ * caller splits again. An unsplittable piece (the init segment, which goes in whole) is never
+ * halved: returning false would only bring the same piece back at once, a microtask loop. It waits
+ * for room like a piece at the smallest size, and fails the same way.
  */
 async function appendPiece(
   sb: AppendBuffer,
   piece: Uint8Array<ArrayBuffer>,
   host: AppendHost,
   q: QuotaState,
+  splittable: boolean,
 ): Promise<boolean> {
   let starvedHits = 0;
   let starvedSince = 0;
@@ -241,7 +245,7 @@ async function appendPiece(
     }
     if (ahead < MIN_AHEAD_S && (await host.relieve())) continue;
     // Little ahead and nothing to free: a smaller piece may still fit in what is left.
-    if (ahead < MIN_AHEAD_S && piece.byteLength > MIN_APPEND_BYTES) {
+    if (ahead < MIN_AHEAD_S && splittable && piece.byteLength > MIN_APPEND_BYTES) {
       q.chunk = Math.max(MIN_APPEND_BYTES, Math.floor(piece.byteLength / 2));
       return false;
     }
