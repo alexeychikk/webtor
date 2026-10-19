@@ -8,8 +8,9 @@ import {
   appendChunk,
   MIN_AHEAD_S,
   newQuotaState,
-  settled,
+  resetFrom,
   simulateQuota,
+  startAt,
   whenIdle,
   type AppendHost,
   type QuotaState,
@@ -648,15 +649,12 @@ export class MsePlayer {
 
   /** Drops everything buffered from element time `from` on and resets the parser. */
   private async resetBuffer(p: Pipeline, from = 0) {
-    await settled(p.sb);
-    if (this.destroyed) return;
-    // remove() also re-opens an `ended` MediaSource, after which abort() is allowed.
-    const { buffered } = p.sb;
-    if (buffered.length > 0 && buffered.end(buffered.length - 1) > from) {
-      p.sb.remove(from, Infinity);
-      await settled(p.sb);
-    }
-    if (this.mediaSource.readyState === 'open') p.sb.abort();
+    await resetFrom(
+      p.sb,
+      from,
+      () => this.destroyed,
+      () => this.mediaSource.readyState === 'open',
+    );
   }
 
   /**
@@ -717,15 +715,13 @@ export class MsePlayer {
       );
     }
     p.conversion = conversion;
-    if (p.sbMime !== p.mime) {
-      await settled(p.sb);
-      if (gen !== p.gen || this.destroyed) return void conversion.cancel().catch(() => {});
-      // Another audio codec (e.g. AAC → Opus): the SourceBuffer must expect the new init segment.
-      p.sb.changeType(p.mime);
-      p.sbMime = p.mime;
-    }
+    // Another audio codec (e.g. AAC → Opus): the SourceBuffer must expect the new init segment.
     // Conversion output starts at 0 for trim.start = k; place it on the 0-based element timeline.
-    p.sb.timestampOffset = offset;
+    const mime = p.sbMime !== p.mime ? p.mime : undefined;
+    if (!(await startAt(p.sb, offset, () => gen !== p.gen || this.destroyed, mime))) {
+      return void conversion.cancel().catch(() => {});
+    }
+    if (mime !== undefined) p.sbMime = mime;
     conversion.execute().then(
       () => {
         if (gen !== p.gen) return;
@@ -763,10 +759,10 @@ export class MsePlayer {
     setTimeout(() => {
       if (gen === p.gen && !this.video.paused) this.checkTranscodeSpeed();
     }, REMOTE_WARMUP_MS + 100);
-    await settled(p.sb);
-    if (gen !== p.gen || this.destroyed) return void abort.abort();
     // The relay's output starts at 0 for `start` = offset.
-    p.sb.timestampOffset = offset;
+    if (!(await startAt(p.sb, offset, () => gen !== p.gen || this.destroyed))) {
+      return void abort.abort();
+    }
     void this.pumpRemote(p, gen, body);
   }
 

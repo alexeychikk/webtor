@@ -9,10 +9,13 @@ import {
   MIN_APPEND_BYTES,
   newQuotaState,
   PRE_INIT_QUOTA_SHARE,
+  resetFrom,
   simulateQuota,
+  startAt,
   STARVED_TIMEOUT_MS,
-  type AppendBuffer,
+  whenIdle,
   type AppendHost,
+  type RestartBuffer,
 } from './append';
 import { aheadOf, bufferedAhead, gapJumpTarget, toRanges, type Ranges } from './buffer';
 import { PlaybackError } from './errors';
@@ -71,8 +74,11 @@ interface Coded {
  * was parsed. Bytes arrive in any split; a fragment counts once its `mdat` is complete. `remove`
  * drops each fragment that starts in [start, end) (MSE removes up to the next keyframe).
  */
-class FakeSourceBuffer extends EventTarget implements AppendBuffer {
+class FakeSourceBuffer extends EventTarget implements RestartBuffer {
   updating = false;
+  /** `changeType` calls and `abort` calls (named `abort`). */
+  configured: string[] = [];
+  private offset = 0;
   frames: Coded[] = [];
   initialized = false;
   /** Every accepted `appendBuffer` size, and every `remove`. */
@@ -114,6 +120,27 @@ class FakeSourceBuffer extends EventTarget implements AppendBuffer {
     this.update(() => {
       this.frames = this.frames.filter((c) => !(c.start >= start && c.start < end));
     });
+  }
+  // Like MSE: these three throw InvalidStateError while an append or a remove is running.
+  get timestampOffset(): number {
+    return this.offset;
+  }
+  set timestampOffset(v: number) {
+    this.idle();
+    this.offset = v;
+  }
+  changeType(type: string): void {
+    this.idle();
+    this.configured.push(type);
+  }
+  abort(): void {
+    this.idle();
+    this.configured.push('abort');
+  }
+  private idle() {
+    if (this.updating) {
+      throw new DOMException('still processing an appendBuffer or remove', 'InvalidStateError');
+    }
   }
   private parse(data: Uint8Array) {
     const buf = concat(this.pending, data);
@@ -420,6 +447,92 @@ describe('appendChunk under a WebKit-like quota', () => {
       `video: ${init.byteLength} B append refused`,
     );
     expect(sb.appends).toEqual([]);
+  });
+});
+
+describe('restarting a SourceBuffer while another pipeline frees room in it', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  /** A buffer holding 0–10 s with `relieve()`'s remove() of 0–4 s in flight. */
+  function removing() {
+    const sb = new FakeSourceBuffer(Infinity);
+    sb.frames = Array.from({ length: 10 }, (_, i) => ({ start: i, end: i + 1, bytes: 1 }));
+    sb.initialized = true;
+    sb.remove(0, 4);
+    return sb;
+  }
+
+  it('root cause: setting timestampOffset during a remove() throws InvalidStateError', () => {
+    const sb = removing();
+    expect(() => (sb.timestampOffset = 5)).toThrow(/still processing/);
+  });
+
+  it('startAt waits for the remove, then sets the offset (and the MIME type)', async () => {
+    const sb = removing();
+    const started = startAt(sb, 5, () => false, 'audio/mp4; codecs="opus"');
+    await expect(started).resolves.toBe(true);
+    expect(sb.timestampOffset).toBe(5);
+    expect(sb.configured).toEqual(['audio/mp4; codecs="opus"']);
+    expect(formatRanges(sb.buffered)).toBe('4.0–10.0 s');
+  });
+
+  it('startAt writes nothing when its run went stale during the wait', async () => {
+    const sb = removing();
+    let gen = 1;
+    const started = startAt(sb, 5, () => gen !== 1, 'audio/mp4');
+    gen++;
+    await expect(started).resolves.toBe(false);
+    expect(sb.timestampOffset).toBe(0);
+    expect(sb.configured).toEqual([]);
+  });
+
+  it('startAt waits again when another waiter starts a remove on the same updateend', async () => {
+    const sb = removing();
+    const relieve = whenIdle(sb, () => sb.remove(8, 10));
+    const started = startAt(sb, 5, () => false);
+    await Promise.all([relieve, started]);
+    expect(sb.timestampOffset).toBe(5);
+    expect(formatRanges(sb.buffered)).toBe('4.0–8.0 s');
+  });
+
+  it('resetFrom removes and aborts only once a competing remove is done', async () => {
+    const sb = removing();
+    const relieve = whenIdle(sb, () => sb.remove(0, 6));
+    const reset = resetFrom(
+      sb,
+      8,
+      () => false,
+      () => true,
+    );
+    await Promise.all([relieve, reset]);
+    expect(sb.removals).toEqual([
+      [0, 4],
+      [0, 6],
+      [8, Infinity],
+    ]);
+    expect(sb.configured).toEqual(['abort']);
+    expect(formatRanges(sb.buffered)).toBe('6.0–8.0 s');
+  });
+
+  it('resetFrom skips abort() when the MediaSource is not open, and everything once stale', async () => {
+    const sb = removing();
+    await resetFrom(
+      sb,
+      8,
+      () => false,
+      () => false,
+    );
+    expect(sb.configured).toEqual([]);
+    expect(formatRanges(sb.buffered)).toBe('4.0–8.0 s');
+    const removals = sb.removals.length;
+    await resetFrom(
+      sb,
+      0,
+      () => true,
+      () => true,
+    );
+    await settle();
+    expect(sb.removals.length).toBe(removals);
+    expect(sb.configured).toEqual([]);
   });
 });
 
