@@ -126,8 +126,8 @@ test('the fullscreen icon fullscreens the player container, and the overlay stay
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
   await expect(canvas(page)).toBeVisible();
 
-  // A double-click on the video does the same.
-  await video(page).dblclick();
+  // A double-click on the picture does the same (away from the centre play button).
+  await video(page).dblclick({ position: { x: 80, y: 120 } });
   await expect
     .poll(() => page.evaluate(() => document.fullscreenElement?.getAttribute('data-testid')))
     .toBe('screen');
@@ -170,7 +170,7 @@ test('an uploaded .ass file is drawn styled too', async ({ page }) => {
   expect(await shownCues(page)).toEqual([]);
 });
 
-test('without container fullscreen (iOS), ASS is shown as plain text and the native controls stay', async ({
+test('without container fullscreen (iOS), ASS is shown as plain text under our controls', async ({
   page,
 }) => {
   // Like iPhone Safari: no element fullscreen, only the video's own (`webkitEnterFullscreen`).
@@ -184,10 +184,10 @@ test('without container fullscreen (iOS), ASS is shown as plain text and the nat
     }
   });
   await playSample(page);
-  // The native controls' fullscreen is the video's own there: the one fullscreen control.
-  await expect(video(page)).toHaveAttribute('controls');
-  await expect(page.getByTestId('fullscreen')).toHaveCount(0);
-  await expect(page.getByTestId('controls')).toHaveCount(0);
+  // Our controls there too; their fullscreen icon is the video's own fullscreen.
+  await expect(video(page)).not.toHaveAttribute('controls');
+  await expect(page.getByTestId('controls')).toHaveCount(1);
+  await expect(page.getByTestId('fullscreen')).toHaveCount(1);
   // `f` enters the video's own fullscreen.
   await video(page).evaluate((v) => {
     Object.defineProperty(v, 'webkitEnterFullscreen', {

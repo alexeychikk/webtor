@@ -5,15 +5,19 @@ export type ShortcutAction =
   | { type: 'seek'; by: number }
   | { type: 'fullscreen' }
   | { type: 'mute' }
+  | { type: 'volume'; by: number }
   | { type: 'cycle-subtitles' };
 
 /** Seconds ←/→ jump. */
 export const SEEK_STEP_S = 5;
+/** Volume ↑/↓ step (volume is 0–1). */
+export const VOLUME_STEP = 0.1;
 
 /** For the help tooltip, in display order. */
 export const SHORTCUTS: readonly { keys: string; action: string }[] = [
   { keys: 'Space', action: 'Play / pause' },
   { keys: '← / →', action: `Back / forward ${SEEK_STEP_S} s` },
+  { keys: '↑ / ↓', action: 'Volume up / down' },
   { keys: 'F', action: 'Fullscreen' },
   { keys: 'M', action: 'Mute' },
   { keys: 'C', action: 'Next subtitle track (or off)' },
@@ -60,6 +64,10 @@ function keyAction(key: string): ShortcutAction | null {
       return { type: 'seek', by: -SEEK_STEP_S };
     case 'ArrowRight':
       return { type: 'seek', by: SEEK_STEP_S };
+    case 'ArrowUp':
+      return { type: 'volume', by: VOLUME_STEP };
+    case 'ArrowDown':
+      return { type: 'volume', by: -VOLUME_STEP };
     case 'f':
     case 'F':
       return { type: 'fullscreen' };
@@ -74,9 +82,14 @@ function keyAction(key: string): ShortcutAction | null {
   }
 }
 
-/** Whether a held key's auto-repeat runs the action again: seeking, yes; toggles, never. */
+/** Whether a held key's auto-repeat runs the action again: seeking and volume, yes; toggles, never. */
 export function repeats(action: ShortcutAction): boolean {
-  return action.type === 'seek';
+  return action.type === 'seek' || action.type === 'volume';
+}
+
+/** New volume after a ↑/↓ step, clamped to [0, 1] and rounded to the step (no 0.30000000000000004). */
+export function volumeTarget(current: number, by: number): number {
+  return Math.round(Math.min(1, Math.max(0, current + by)) * 100) / 100;
 }
 
 /** Seek target clamped to the media: never before 0 or past the end (an unknown end is no limit). */

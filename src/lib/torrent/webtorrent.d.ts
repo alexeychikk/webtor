@@ -54,6 +54,8 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     readonly downloaded: number;
     readonly progress: number;
     readonly pieceLength: number;
+    /** Verified pieces (`get(i)`); null until the torrent's info is known. */
+    readonly bitfield: { get(index: number): boolean } | null;
     /** Lowest priority selection; `deselect(0, pieces.length - 1)` stops the default "download everything". */
     select(start: number, end: number, priority?: number): void;
     deselect(start: number, end: number): void;

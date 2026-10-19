@@ -1,7 +1,46 @@
+/* Global dark base (docs/decisions/0008); tokens come from styles/tokens.css. */
 :root {
-  color-scheme: dark light;
-  font-family: system-ui, sans-serif;
+  color-scheme: dark;
+  font-family: var(--font-sans);
+  font-size: 100%;
+  line-height: var(--leading-normal);
+  background: var(--bg);
+  color: var(--text);
 }
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+}
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+/* 16 px text in fields: iOS zooms into anything smaller on focus. */
+input,
+select,
+textarea {
+  font-size: var(--text-md);
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+a {
+  color: var(--accent-fg);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
