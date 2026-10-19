@@ -30,3 +30,9 @@ export function formatTime(seconds: number): string {
   const h = Math.floor(s / 3600);
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
 }
+
+/** Buffer lengths for the stats panel: `4.2 s`, `16 s`. */
+export function formatSeconds(seconds: number): string {
+  const s = Math.max(0, seconds);
+  return s < 10 ? `${s.toFixed(1)} s` : `${Math.round(s)} s`;
+}

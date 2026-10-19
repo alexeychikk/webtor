@@ -5,6 +5,13 @@ export interface Ranges {
   end(i: number): number;
 }
 
+/** Element-time duration of everything in `ranges`. */
+export function totalBuffered(ranges: Ranges): number {
+  let s = 0;
+  for (let i = 0; i < ranges.length; i++) s += ranges.end(i) - ranges.start(i);
+  return s;
+}
+
 /** Keep about this much media appended ahead of the playhead (back-pressure threshold). */
 export const BUFFER_AHEAD_S = 60;
 /** Evict media further than this behind the playhead. */
@@ -22,6 +29,22 @@ export function bufferedAhead(ranges: Ranges, t: number): number {
     else if (end >= 0 && s <= end + GAP_TOLERANCE_S) end = Math.max(end, e);
   }
   return end < 0 ? 0 : end - t;
+}
+
+/**
+ * Seconds from `t` to the end of the media at the playhead, also when the playhead sits in a small
+ * hole just before it (up to `gap`: the player jumps those, see `gapJumpTarget`). E.g. a first frame
+ * at 0.6 s, or audio that starts a few frames after the video. `bufferedAhead` reads 0 there.
+ */
+export function aheadOf(ranges: Ranges, t: number, gap = MAX_GAP_JUMP_S): number {
+  for (let i = 0; i < ranges.length; i++) {
+    const s = ranges.start(i);
+    if (ranges.end(i) <= t) continue;
+    if (s > t + gap) return 0;
+    const from = Math.max(s, t);
+    return from - t + bufferedAhead(ranges, from);
+  }
+  return 0;
 }
 
 /** True if `t` lies inside a buffered range (with a little slack at the start). */
@@ -45,7 +68,7 @@ export function evictionRange(
 export const QUOTA_KEEP_BEHIND_S = 1;
 
 /**
- * The range to `remove()` when the SourceBuffer is full: all but `QUOTA_KEEP_BEHIND_S` behind the
+ * The range to `remove()` when the SourceBuffer is full: all but `keepBehind` s behind the
  * playhead. `safeCut` moves the end back to a random-access point: MSE removes up to the next one
  * after `end`, which must not be past the playhead (that would empty the GOP being played).
  */
@@ -53,11 +76,39 @@ export function quotaEvictionRange(
   ranges: Ranges,
   t: number,
   safeCut: (cut: number) => number = (cut) => cut,
+  keepBehind = QUOTA_KEEP_BEHIND_S,
 ): [number, number] | null {
   if (ranges.length === 0) return null;
   const first = ranges.start(0);
-  const cut = Math.min(safeCut(t - QUOTA_KEEP_BEHIND_S), t - QUOTA_KEEP_BEHIND_S);
+  const cut = Math.min(safeCut(t - keepBehind), t - keepBehind);
   return cut > first + 0.1 ? [first, cut] : null;
+}
+
+/**
+ * Under quota, everything that can go: `quotaEvictionRange` behind the playhead, plus any range
+ * that starts past the media at the playhead (`aheadOf`): what an earlier seek, a UA eviction or a
+ * hole left there. The running pipeline appends in order from the playhead, so it would append that
+ * media again anyway. Until then it only takes up quota. A starved pipeline passes a negative
+ * `keepBehind`: when the quota is smaller than about two fragments, the one just played must go too.
+ */
+export function quotaEvictionRanges(
+  ranges: Ranges,
+  t: number,
+  safeCut: (cut: number) => number = (cut) => cut,
+  keepBehind = QUOTA_KEEP_BEHIND_S,
+): [number, number][] {
+  const out: [number, number][] = [];
+  const behind = quotaEvictionRange(ranges, t, safeCut, keepBehind);
+  if (behind) out.push(behind);
+  const end = t + aheadOf(ranges, t);
+  for (let i = 0; i < ranges.length; i++) {
+    const s = ranges.start(i);
+    if (s > end + GAP_TOLERANCE_S && s > t + MAX_GAP_JUMP_S) {
+      out.push([s, Infinity]);
+      break;
+    }
+  }
+  return out;
 }
 
 /** The last of the ascending `points` at or before `t`, or -Infinity. */

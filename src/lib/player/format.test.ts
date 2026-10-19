@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatPercent, formatSpeed, formatTime } from './format';
+import { formatBytes, formatPercent, formatSeconds, formatSpeed, formatTime } from './format';
 
 describe('format', () => {
   it('formats speeds', () => {
@@ -26,5 +26,10 @@ describe('format', () => {
     expect(formatTime(NaN)).toBe('0:00');
     expect(formatTime(Infinity)).toBe('0:00');
     expect(formatTime(-1)).toBe('0:00');
+  });
+  it('formats buffer lengths', () => {
+    expect(formatSeconds(4.24)).toBe('4.2 s');
+    expect(formatSeconds(16.4)).toBe('16 s');
+    expect(formatSeconds(-1)).toBe('0.0 s');
   });
 });
