@@ -90,12 +90,12 @@ describe('fullscreen control', () => {
     expect(fullscreenMethod(caps({ containerFullscreen: false }))).toBe('none');
   });
 
-  it('is our control bar where the container can go fullscreen, else the native controls', () => {
+  it('is always our own control layer, iOS and pages without fullscreen included', () => {
     expect(controlsFor(fullscreenMethod(detectDisplayCapabilities(desktop())))).toBe('own');
-    expect(controlsFor(fullscreenMethod(detectDisplayCapabilities(iphone)))).toBe('native');
+    expect(controlsFor(fullscreenMethod(detectDisplayCapabilities(iphone)))).toBe('own');
     expect(controlsFor('container')).toBe('own');
-    expect(controlsFor('video')).toBe('native');
-    expect(controlsFor('none')).toBe('native');
+    expect(controlsFor('video')).toBe('own');
+    expect(controlsFor('none')).toBe('own');
   });
 });
 

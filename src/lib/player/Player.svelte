@@ -2,8 +2,12 @@
   import { relaySettings } from '../torrent/relay-settings.svelte';
   import { channelsLabel, codecLabel } from './codecs';
   import { PLAYBACK_ERROR_MESSAGES, type PlaybackErrorCode } from './errors';
+  import { untrack } from 'svelte';
+  import { provideControlsShown } from '../ui/tooltip-context';
+  import type { Flash } from './centre';
+  import { MediaState } from './media-state.svelte';
+  import PlayerCentre from './PlayerCentre.svelte';
   import {
-    controlsFor,
     detectDisplayCapabilities,
     enterFullscreen,
     enterVideoFullscreen,
@@ -14,7 +18,14 @@
   import type { PlayerController, Phase } from './controller.svelte';
   import PlayerControls from './PlayerControls.svelte';
   import ShareButton from './ShareButton.svelte';
-  import { repeats, seekTarget, shortcutFor, SHORTCUTS, type ShortcutAction } from './shortcuts';
+  import {
+    repeats,
+    seekTarget,
+    shortcutFor,
+    SHORTCUTS,
+    volumeTarget,
+    type ShortcutAction,
+  } from './shortcuts';
   import StatsPanel from './StatsPanel.svelte';
   import type { AudioTrackInfo } from './types';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
@@ -59,16 +70,21 @@
       ? 'Relay is finding peers…'
       : PHASE_TEXT[controller.phase],
   );
-  const busy = $derived(['connecting', 'metadata', 'buffering'].includes(controller.phase));
+  /** Screen readers hear "<phase> · <file name>" (the picture shows the spinner and title). */
+  const statusText = $derived([phaseText, controller.fileName].filter((part) => part).join(' · '));
   let dragging = $state(false);
 
-  // Where the container can go fullscreen, our control bar replaces the native one: its fullscreen
-  // button fullscreens the container, so the ASS overlay canvas stays over the picture. A native
-  // control would fullscreen the bare video (docs/decisions/0004). iOS keeps the native controls.
+  // Our control layer everywhere (docs/decisions/0008). Its fullscreen icon fullscreens the
+  // container where it can, so the ASS overlay canvas stays over the picture (0004); on iPhone the
+  // bare video (`webkitEnterFullscreen`); where neither exists there is no fullscreen icon.
   const fsMethod = fullscreenMethod(detectDisplayCapabilities());
-  const ownControls = controlsFor(fsMethod) === 'own';
   let screen = $state<HTMLDivElement>();
   let fullscreen = $state(false);
+  const media = new MediaState();
+
+  $effect(() => {
+    if (video) return media.attach(video);
+  });
 
   $effect(() => {
     const update = () => (fullscreen = !!screen && fullscreenElement() === screen);
@@ -79,7 +95,7 @@
     };
   });
 
-  /** The fullscreen button, the `f` shortcut and a double-click on the video. */
+  /** The fullscreen button, the `f` shortcut and a double-click on the picture. */
   function toggleFullscreen() {
     if (fsMethod === 'none') return;
     if (fsMethod === 'video') {
@@ -95,62 +111,125 @@
     done?.catch((err: unknown) => console.warn('fullscreen:', err));
   }
 
-  // While the video plays, our control bar and the cursor hide 1 s after the pointer stops (3 s
-  // after a touch), or at once when the pointer leaves the player or the window. A pointer move,
-  // touch or key press shows them again; they stay while paused or while the pointer is on the bar.
+  // Visibility of the control layer (docs/decisions/0008 §3.1):
+  // shown = !playing || menuOpen || pointerOnControls || activity. A mouse move is activity for 1 s,
+  // a key press too; the pointer leaving the player or the window ends it at once. On touch a tap
+  // on the picture toggles the controls (never play/pause), and they hide 3 s after the last touch.
+  // Focus doesn't keep them.
   const IDLE_MS = 1000;
   const IDLE_TOUCH_MS = 3000;
-  let awake = $state(false);
+  let activity = $state(false);
+  let pointerOnControls = $state(false);
+  /** A menu of the control bar is open (redesign ticket 2): keeps the controls. */
+  let menuOpen = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  /** The mouse is on the control bar. */
-  let overControls = false;
-  const controlsShown = $derived(awake || controller.phase !== 'playing');
-  /** A touch on the video while the bar is hidden only reveals it (no play/pause). */
-  let tapReveals = false;
+  const playing = $derived(!media.paused && !media.ended);
+  const controlsShown = $derived(!playing || menuOpen || pointerOnControls || activity);
+  provideControlsShown(() => controlsShown);
+
+  /** Touch input: decided by the last pointer, starting from the primary pointer's kind. */
+  let touch = $state(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
+  /** Kind of the last pointerdown on the screen: a touch's click must not play/pause. */
+  let lastPointerType = 'mouse';
+  /** The last play/pause toggle, flashed in the centre once: cleared when its animation ends. */
+  let flash = $state<Flash | null>(null);
+  let flashCount = 0;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Matches the `.flash` animation in PlayerCentre.svelte. */
+  const FLASH_MS = 400;
 
   const onControls = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest('[data-player-controls]');
 
   function wake(ms = IDLE_MS) {
-    awake = true;
+    activity = true;
     clearTimeout(idleTimer);
-    if (!overControls) idleTimer = setTimeout(() => (awake = false), ms);
+    idleTimer = setTimeout(() => (activity = false), ms);
   }
 
   function hideControls() {
-    overControls = false;
+    pointerOnControls = false;
     clearTimeout(idleTimer);
-    awake = false;
+    activity = false;
   }
 
-  function onScreenPointer(event: PointerEvent) {
-    const mouse = event.pointerType === 'mouse';
-    overControls = mouse && onControls(event.target);
-    if (event.type === 'pointerdown') tapReveals = !mouse && !controlsShown;
-    wake(mouse ? IDLE_MS : IDLE_TOUCH_MS);
+  function onScreenPointerMove(event: PointerEvent) {
+    if (event.pointerType === 'touch') {
+      // A drag on the seek bar keeps the controls; a finger moving over the picture doesn't.
+      if (onControls(event.target)) wake(IDLE_TOUCH_MS);
+      return;
+    }
+    touch = false;
+    pointerOnControls = onControls(event.target);
+    wake(IDLE_MS);
+  }
+
+  function onScreenPointerDown(event: PointerEvent) {
+    lastPointerType = event.pointerType;
+    if (event.pointerType !== 'touch') {
+      touch = false;
+      pointerOnControls = onControls(event.target);
+      wake(IDLE_MS);
+      return;
+    }
+    touch = true;
+    pointerOnControls = false;
+    // A tap on a control keeps them; a tap on the picture shows or hides them.
+    if (onControls(event.target)) wake(IDLE_TOUCH_MS);
+    else if (controlsShown && activity && playing && !menuOpen) hideControls();
+    else wake(IDLE_TOUCH_MS);
   }
 
   function onScreenPointerLeave(event: PointerEvent) {
     // Touch pointers "leave" after every tap.
-    if (event.pointerType === 'mouse') hideControls();
+    if (event.pointerType !== 'touch') hideControls();
   }
 
   $effect(() => {
-    if (!ownControls) return;
     // The pointer left the window.
     const root = document.documentElement;
     root.addEventListener('mouseleave', hideControls);
     return () => root.removeEventListener('mouseleave', hideControls);
   });
 
-  $effect(() => () => clearTimeout(idleTimer));
+  // A new notice or error wakes the controls, like a move does.
+  $effect(() => {
+    if (controller.notices.length || controller.error) untrack(() => wake());
+  });
 
-  function onVideoClick() {
-    if (tapReveals) return;
+  $effect(() => () => {
+    clearTimeout(idleTimer);
+    clearTimeout(flashTimer);
+  });
+
+  function togglePlay() {
     const v = video;
     if (!v) return;
-    if (v.paused) v.play().catch(() => {});
+    const willPlay = v.paused;
+    if (willPlay) v.play().catch(() => {});
     else v.pause();
+    // Cleared after the animation, so a later spinner or pause that hands the centre back to
+    // `none` doesn't remount and replay it.
+    flash = { playing: willPlay, n: ++flashCount };
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => (flash = null), FLASH_MS);
+  }
+
+  function seekBy(by: number) {
+    const v = video;
+    if (v) v.currentTime = seekTarget(v.currentTime, by, v.duration);
+  }
+
+  /** A mouse click on the picture plays/pauses; a tap only toggles the controls (pointerdown). */
+  function onVideoClick() {
+    if (lastPointerType === 'touch') return;
+    togglePlay();
+  }
+
+  /** A double-click anywhere on the picture (not on the bar) toggles fullscreen. */
+  function onScreenDblClick(event: MouseEvent) {
+    if (event.target instanceof Element && event.target.closest('[data-player-bar]')) return;
+    toggleFullscreen();
   }
 
   const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
@@ -171,7 +250,7 @@
     const v = video;
     if (!v || event.defaultPrevented || controller.phase === 'idle' || controller.phase === 'error')
       return;
-    if (ownControls) wake();
+    wake();
     // A key typed in a dialog (relay settings, help) is not meant for the player.
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (target?.closest('dialog')) return;
@@ -205,11 +284,14 @@
   function run(action: ShortcutAction, v: HTMLVideoElement) {
     switch (action.type) {
       case 'toggle-play':
-        if (v.paused) v.play().catch(() => {});
-        else v.pause();
+        togglePlay();
         break;
       case 'seek':
         v.currentTime = seekTarget(v.currentTime, action.by, v.duration);
+        break;
+      case 'volume':
+        v.volume = volumeTarget(v.muted ? 0 : v.volume, action.by);
+        v.muted = v.volume === 0;
         break;
       case 'mute':
         v.muted = !v.muted;
@@ -248,36 +330,51 @@
   <div
     class="screen"
     class:fullscreen
-    class:idle={ownControls && !controlsShown}
-    class:lift={ownControls && fullscreen && controlsShown}
+    class:idle={!controlsShown}
+    class:lift={controlsShown}
     bind:this={screen}
     data-testid="screen"
-    onpointermove={ownControls ? onScreenPointer : undefined}
-    onpointerdown={ownControls ? onScreenPointer : undefined}
-    onpointerleave={ownControls ? onScreenPointerLeave : undefined}
+    data-tooltip-bounds
+    onpointermove={onScreenPointerMove}
+    onpointerdown={onScreenPointerDown}
+    onpointerleave={onScreenPointerLeave}
+    ondblclick={onScreenDblClick}
     role="presentation"
   >
     <!-- The ASS overlay canvas is inserted right after the video (subtitles/ass-overlay.ts). -->
-    <!-- Click = play/pause and double-click = fullscreen, as with native controls; keys: shortcuts.ts. -->
+    <!-- Click = play/pause and double-click = fullscreen; keys: shortcuts.ts. -->
     <!-- svelte-ignore a11y_media_has_caption, a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <video
       bind:this={video}
+      class:placeholder={!media.hasMetadata}
       data-testid="video"
       data-audio-codec={controller.audioCodec ?? ''}
       data-audio-track={controller.audioTrackId ?? ''}
-      controls={!ownControls}
       playsinline
-      onclick={ownControls ? onVideoClick : undefined}
-      ondblclick={ownControls ? toggleFullscreen : undefined}
+      onclick={onVideoClick}
     ></video>
-    {#if ownControls}
-      <PlayerControls
-        {video}
-        {fullscreen}
-        shown={controlsShown}
-        ontogglefullscreen={toggleFullscreen}
-      />
-    {/if}
+    <PlayerControls
+      {video}
+      {media}
+      {fullscreen}
+      {touch}
+      title={controller.fileName}
+      downloaded={controller.downloaded}
+      canFullscreen={fsMethod !== 'none'}
+      shown={controlsShown}
+      ontoggleplay={togglePlay}
+      ontogglefullscreen={toggleFullscreen}
+    />
+    <PlayerCentre
+      {media}
+      {touch}
+      {flash}
+      phase={controller.phase}
+      viaRelay={controller.viaRelay}
+      shown={controlsShown}
+      ontoggleplay={togglePlay}
+      onseek={seekBy}
+    />
   </div>
 
   {#if controller.audioTracks.length > 0}
@@ -304,12 +401,8 @@
     </p>
   {/if}
 
-  <p class="status" data-testid="status" data-phase={controller.phase} aria-live="polite">
-    {#if busy}<span class="spinner" aria-hidden="true"></span>{/if}
-    <span>{phaseText}</span>
-    {#if controller.fileName}<span class="file" title={controller.fileName}
-        >{controller.fileName}</span
-      >{/if}
+  <p class="sr-only" data-testid="status" data-phase={controller.phase} aria-live="polite">
+    {statusText}
   </p>
 
   {#if controller.phase !== 'error'}
@@ -372,19 +465,33 @@
   .player {
     margin-top: 1rem;
   }
+  /*
+   * The screen is the fullscreen element and holds everything about playback: video, ASS canvas,
+   * scrims, centre state and controls (docs/decisions/0008). Windowed: rounded, a black 16:9 box
+   * until the picture's size is known.
+   */
   .screen {
     position: relative;
+    container: screen / inline-size;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    background: #000;
+    -webkit-tap-highlight-color: transparent;
   }
   video {
     display: block;
     width: 100%;
-    max-height: 70vh;
+    max-height: min(75vh, calc(100vh - 96px));
     background: #000;
+    object-fit: contain;
+  }
+  video.placeholder {
+    aspect-ratio: 16 / 9;
   }
   .screen.fullscreen {
     display: flex;
     align-items: center;
-    background: #000;
+    border-radius: 0;
   }
   .screen.fullscreen video {
     height: 100%;
@@ -392,14 +499,20 @@
   }
   .screen :global(.ass-overlay) {
     position: absolute;
+    z-index: var(--z-ass);
     pointer-events: none;
   }
   .screen.idle {
     cursor: none;
   }
-  /* Text cues above the control bar while it overlays the picture (Chromium, WebKit). */
+  /* Text cues above the control bar while it shows (Chromium, WebKit; Firefox can't move them). */
   .screen.lift video::-webkit-media-text-track-container {
     transform: translateY(-3.5rem);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    video::-webkit-media-text-track-container {
+      transition: transform var(--dur-base) var(--ease-out);
+    }
   }
   .tracks {
     display: flex;
@@ -407,24 +520,12 @@
     align-items: center;
   }
   .tracks select {
+    min-width: 0;
     max-width: 100%;
   }
   .dragging .screen {
-    outline: 3px dashed currentColor;
-    outline-offset: -3px;
-  }
-  .status {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    align-items: center;
-  }
-  .file {
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: min(30rem, 100%);
+    outline: 2px dashed var(--accent-fg);
+    outline-offset: -12px;
   }
   .actions {
     display: flex;
@@ -479,10 +580,12 @@
   .notice button {
     margin-left: 0.5rem;
   }
-  @media (max-width: 40rem) {
+  @media (max-width: 40rem) and (orientation: portrait) {
     video {
-      max-height: 50vh;
+      max-height: none;
     }
+  }
+  @media (max-width: 40rem) {
     .error button,
     .notice button {
       margin: 0.5rem 0.5rem 0 0;
@@ -494,18 +597,5 @@
   }
   .notice {
     background: color-mix(in srgb, orange 18%, transparent);
-  }
-  .spinner {
-    width: 1em;
-    height: 1em;
-    border: 2px solid currentColor;
-    border-right-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>
