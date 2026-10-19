@@ -21,7 +21,8 @@ Vite 8 · Svelte 5 (runes) · TypeScript 6 (not 7: svelte-check) · pnpm 12 · V
 Playwright 1.64 (Chromium). SPA without SvelteKit. Relay: Go (version in `mise.toml`) +
 anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torrent engine, 0003
 media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay, 0007 AVI
-playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg).
+playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg, 0008 UI
+design system: dark, Lucide icons, every player control inside the player).
 
 ## Commands
 
@@ -100,6 +101,7 @@ relay-v<version> --cleanup-tag` first.
 
 ```
 src/App.svelte                 shell: input → player
+src/styles/tokens.css          design tokens (colour, type, space, radius, motion, player z-layers), ADR 0008
 src/lib/torrent/               WebTorrent client, trackers, file classification; memory-store.ts (when OPFS can't write)
   files.ts FileList.svelte     video file list (playable / greyed-out unsupported), pick, picker UI
   webtorrent.d.ts              typings for the WebTorrent API subset we use; extend as needed
@@ -134,6 +136,10 @@ docs/decisions/                ADRs
 
 ## Conventions
 
+- **UI (ADR 0008).** Dark only; style with the `src/styles/tokens.css` custom properties, never
+  literal colours. Icons are Lucide, one module per icon (`@lucide/svelte/icons/<name>`). Every
+  icon-only button has an `aria-label` and our tooltip (label + shortcut), no `title`. Player
+  controls, menus and states live inside the screen container, so they also work in fullscreen.
 - Svelte 5 runes only (`$state`, `$derived`, `$effect`, `$props`); shared reactive state in
   `*.svelte.ts` modules, no Svelte 4 stores. Components in PascalCase, modules in kebab-case.
 - Import WebTorrent as `import WebTorrent from 'webtorrent/dist/webtorrent.min.js'` (prebuilt browser
