@@ -10,6 +10,7 @@ export type PlaybackErrorCode =
   | 'no-playable-file'
   | 'unsupported-container'
   | 'unsupported-video-codec'
+  | 'video-needs-relay'
   | 'unsupported-audio-codec'
   | 'no-mse'
   | 'no-playable-audio'
@@ -34,10 +35,13 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   stalled: 'Download stalled: peers disconnected or stopped sending data. Still trying…',
   'no-playable-file': 'This torrent contains no video file that can be played in the browser.',
   'unsupported-container':
-    'This video format cannot be opened in the browser (supported: MKV, MP4, MOV, WebM, MPEG-TS).',
+    'This video format cannot be opened in the browser (supported: MKV, MP4, MOV, WebM, MPEG-TS, AVI).',
   'unsupported-video-codec':
     'This video uses a codec your browser cannot decode (often HEVC/H.265 or 10-bit H.264). ' +
     'Try Safari, or Chrome/Edge on a device with hardware HEVC support.',
+  'video-needs-relay':
+    'This video uses an old format that browsers can’t play. Converting it needs a relay you run ' +
+    'yourself (webtor-relay).',
   'unsupported-audio-codec':
     'This audio track cannot be played or converted in the browser. Pick another audio track.',
   'no-mse': 'This browser cannot stream video (Media Source Extensions missing; iOS needs 17.1+).',
@@ -65,7 +69,18 @@ export class PlaybackError extends Error {
     readonly code: PlaybackErrorCode,
     readonly detail?: string,
   ) {
-    super(PLAYBACK_ERROR_MESSAGES[code] + (detail ? ` (${detail})` : ''));
+    super(playbackErrorMessage(code, detail));
     this.name = 'PlaybackError';
   }
+}
+
+/** The user-facing message; `video-needs-relay` names the format (`detail`) in the sentence. */
+export function playbackErrorMessage(code: PlaybackErrorCode, detail?: string): string {
+  if (code === 'video-needs-relay' && detail) {
+    return (
+      `This video uses an old ${detail} format that browsers can’t play. Converting it needs a ` +
+      'relay you run yourself (webtor-relay).'
+    );
+  }
+  return PLAYBACK_ERROR_MESSAGES[code] + (detail ? ` (${detail})` : '');
 }

@@ -208,7 +208,7 @@ docs/decisions/                ADRs
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the
   server root). `with-sidecar/` = `sample.mkv` + `sidecar.en.srt` (symlinks to the top-level files).
 - `multi-file/` = `episode-1.ts` (→ offset.ts, file 0) + `episode-2.mkv` (→ sample.mkv, file 1,
-  largest) + `extras.avi` (fake, unsupported) + `readme.txt`. `<FIXTURE_BASE>/<name>.torrent` is the
+  largest) + `extras.wmv` (fake, unsupported) + `readme.txt`. `<FIXTURE_BASE>/<name>.torrent` is the
   .torrent for any fixture (for upload tests).
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
