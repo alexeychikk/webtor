@@ -99,7 +99,7 @@
   const IDLE_MS = 2500;
   let pointerActive = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  const controlsShown = $derived(pointerActive || controller.phase !== 'playing');
+  const controlsShown = $derived(!fullscreen || pointerActive || controller.phase !== 'playing');
   /** A touch on the video while the bar is hidden only reveals it (no play/pause). */
   let tapReveals = false;
 
@@ -213,7 +213,7 @@
   <div
     class="screen"
     class:fullscreen
-    class:idle={ownControls && fullscreen && !controlsShown}
+    class:idle={ownControls && !controlsShown}
     class:lift={ownControls && fullscreen && controlsShown}
     bind:this={screen}
     data-testid="screen"

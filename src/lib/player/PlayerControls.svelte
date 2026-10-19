@@ -16,7 +16,7 @@
     video: HTMLVideoElement | undefined;
     /** The player container is fullscreen. */
     fullscreen: boolean;
-    /** Visible; only applies in fullscreen, where the bar overlays the picture. */
+    /** Visible (always outside fullscreen; there it fades out while playing). */
     shown: boolean;
     ontogglefullscreen: () => void;
   } = $props();
@@ -100,7 +100,7 @@
 <div
   class="controls"
   class:overlay={fullscreen}
-  class:shown={!fullscreen || shown}
+  class:shown
   data-testid="controls"
   data-player-controls
   role="group"
