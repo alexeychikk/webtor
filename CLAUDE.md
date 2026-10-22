@@ -319,13 +319,24 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
   playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
-- **A seek at or past the last frame never restarts** (`MsePlayer.seekNeedsRestart`, `bufferedToEnd`).
-  A pipeline that appended through the end (`done`), with its last range reaching the duration,
-  has nothing left to append there, and the element ends by itself. Restarting there (remove +
-  re-append the last GOP into an `ended` MediaSource whose playhead hit EOS) is fatal on
-  WebKit/GStreamer ("Failed to push buffer"). The debounced restart re-checks: the seek wakes the
-  appends, and they can reach the end within `SEEK_DEBOUNCE_MS`. Covered by `e2e/seek-end.spec.ts`
-  (Chromium + WebKit).
+- **The end of the media (WebKit/GStreamer, `e2e/seek-end.spec.ts` on Chromium + WebKit).** GStreamer
+  (Playwright WebKit; iPad Safari uses AVFoundation, unverified) fails seeks near an EOS, so:
+  - A seek at or past the last frame never restarts (`MsePlayer.seekNeedsRestart`, `bufferedToEnd`):
+    a pipeline that appended through the end (`done`), its last range reaching the duration, has
+    nothing left to append. A restart (remove + re-append the last GOP into an `ended`
+    MediaSource) is fatal there ("Failed to push buffer"). The debounced restart re-checks: the
+    seek wakes the appends, and they can reach the end within `SEEK_DEBOUNCE_MS`.
+  - `endOfStream()` waits for the playhead (`maybeEndOfStream`, `atBufferedEnd`): appends done
+    and the playhead at the end of the buffered media (`waiting`, `timeupdate` within 50 ms, or
+    a seek there). Called as soon as the appends were done, GStreamer drained the EOS through its
+    decoder in the last ~0.3 s, and any seek after that failed ("No valid frames decoded before end
+    of stream") or froze.
+  - A seek into the last `END_SNAP_S` (0.25 s, counted from where the video ends if that is
+    earlier) goes to `duration` (`endSnap`): GStreamer drops every frame of such a segment as
+    before its start, then errors at the EOS. A seek to exactly `duration` just ends the video.
+  - Our controls (keys, double-tap, centre ±5 s, seek bar) go through `seekVideo`, which skips a
+    seek to the end while the video is there already (`endSeekRedundant`: ended, last moment,
+    seeking there). A script setting `currentTime` to the end again and again can still hit it.
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

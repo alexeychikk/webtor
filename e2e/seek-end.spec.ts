@@ -1,9 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 import { fixtureMagnet } from './support/fixtures';
 
-// A seek to exactly `duration` (or past the last frame) ends the video (mse-player.ts
-// `seekNeedsRestart`). It used to restart the pipelines at the last keyframe, which WebKit's
-// GStreamer backend refused with a fatal "Failed to push buffer" (the tail was appended by then).
+// Seeks to and at the end of the media (CLAUDE.md "The end of the media"): a seek to exactly
+// `duration` ends the video without restarting the pipelines, and seeks made in the last moment
+// (before or after `ended`) never fail. WebKit's GStreamer backend failed both with fatal errors
+// ("Failed to push buffer", "No valid frames decoded before end of stream").
 // Runs on Chromium and WebKit (playwright.config.ts). e2e/fixtures/resume/movie.mkv: 40 s.
 
 const video = (page: Page) => page.getByTestId('video');
@@ -73,10 +74,6 @@ test.describe('touch', () => {
     await expectEnded(page);
   });
 });
-
-// Seeks made while the playhead is in the last moment of an ended MediaSource. WebKit's GStreamer
-// backend failed them ("No valid frames decoded before end of stream", "Failed to push buffer") or
-// froze, until `MsePlayer` re-opened the MediaSource for them (`reopenForSeek`).
 
 /** Plays from 37 s and waits until the playhead is in the last 0.3 s, not ended yet. */
 async function nearEnd(page: Page) {
