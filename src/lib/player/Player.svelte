@@ -408,8 +408,11 @@
     touch = true;
     pointerOnControls = false;
     // A tap on a control keeps them; a tap on the picture shows or hides them, or seeks.
+    if (seekTapTarget(event.target)) return onPictureTap(event);
+    // Anything else ends a waiting first tap (it must not hide the controls after this one).
+    clearTimeout(tapTimer);
+    taps = NO_TAPS;
     if (onControls(event.target)) wake(true);
-    else if (seekTapTarget(event.target)) onPictureTap(event);
     else tapPicture();
   }
 
