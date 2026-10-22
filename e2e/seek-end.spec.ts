@@ -73,3 +73,70 @@ test.describe('touch', () => {
     await expectEnded(page);
   });
 });
+
+// Seeks made while the playhead is in the last moment of an ended MediaSource. WebKit's GStreamer
+// backend failed them ("No valid frames decoded before end of stream", "Failed to push buffer") or
+// froze, until `MsePlayer` re-opened the MediaSource for them (`reopenForSeek`).
+
+/** Plays from 37 s and waits until the playhead is in the last 0.3 s, not ended yet. */
+async function nearEnd(page: Page) {
+  await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = 37));
+  await video(page).evaluate(
+    (v: HTMLVideoElement) =>
+      new Promise<void>((resolve, reject) => {
+        const tick = () => {
+          if (v.ended) reject(new Error('ended before the last moment was seen'));
+          else if (!v.seeking && v.currentTime > v.duration - 0.3) resolve();
+          else requestAnimationFrame(tick);
+        };
+        tick();
+      }),
+  );
+}
+
+/** Plays a paused (not ended) video, then expects it to end. */
+async function playToEnd(page: Page) {
+  await video(page).evaluate((v: HTMLVideoElement) => {
+    if (!v.ended) void v.play();
+  });
+  await expectEnded(page);
+}
+
+test('→ pressed repeatedly after a seek near the end ends the video', async ({ page }) => {
+  await open(page);
+  await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = 37));
+  await page.waitForTimeout(500);
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press('ArrowRight');
+    await page.waitForTimeout(100);
+  }
+  await expectEnded(page);
+  // At the end, → again.
+  await page.keyboard.press('ArrowRight');
+  await playToEnd(page);
+});
+
+for (const back of [0, 0.05, 0.2]) {
+  test(`a seek to duration − ${back} s from the last moment ends the video`, async ({ page }) => {
+    await open(page);
+    await nearEnd(page);
+    await video(page).evaluate(
+      (v: HTMLVideoElement, back) => (v.currentTime = v.duration - back),
+      back,
+    );
+    await playToEnd(page);
+    // Once ended, the same seek again.
+    await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = v.duration));
+    await page.waitForTimeout(300);
+    await playToEnd(page);
+  });
+}
+
+test('← from the last moment seeks back and plays on', async ({ page }) => {
+  await open(page);
+  await nearEnd(page);
+  await page.keyboard.press('ArrowLeft');
+  await expect.poll(() => prop(page, 'currentTime')).toBeLessThan(36);
+  await expect.poll(() => prop(page, 'currentTime'), { timeout: 10_000 }).toBeGreaterThan(36.5);
+  await expectEnded(page);
+});

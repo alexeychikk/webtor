@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   aheadOf,
+  atBufferedEnd,
   bufferedAhead,
   bufferedToEnd,
+  endSnap,
   evictionRange,
   gapJumpTarget,
   isBuffered,
@@ -161,5 +163,49 @@ describe('lastAtOrBefore', () => {
     expect(lastAtOrBefore([1, 3, 5], 3)).toBe(3);
     expect(lastAtOrBefore([1, 3, 5], 4.9)).toBe(3);
     expect(lastAtOrBefore([1, 3, 5], 0)).toBe(-Infinity);
+  });
+});
+
+describe('atBufferedEnd', () => {
+  const video = toRanges([[0, 40.04]]);
+  const audio = toRanges([
+    [0, 10],
+    [12, 40.08],
+  ]);
+
+  it('is true once the playhead is within the lead of the earliest last range end', () => {
+    expect(atBufferedEnd([video, audio], 39.8)).toBe(true); // lead 0.3
+    expect(atBufferedEnd([video, audio], 39.7)).toBe(false);
+    expect(atBufferedEnd([video, audio], 40.0, 0.05)).toBe(true);
+    expect(atBufferedEnd([video, audio], 39.95, 0.05)).toBe(false);
+    expect(atBufferedEnd([video, audio], 40.08, 0)).toBe(true);
+  });
+
+  it('is false with an empty SourceBuffer', () => {
+    expect(atBufferedEnd([video, toRanges([])], 40)).toBe(false);
+    expect(atBufferedEnd([], 40)).toBe(false);
+  });
+});
+
+describe('endSnap', () => {
+  it('sends a target in the last moment to the duration', () => {
+    expect(endSnap(39.9, 40.08)).toBe(40.08);
+    expect(endSnap(40.03, 40.08)).toBe(40.08);
+    expect(endSnap(39.8, 40.08)).toBeNull();
+  });
+
+  it('measures the last moment from where the video ends, when it ends first', () => {
+    expect(endSnap(39.8, 40.08, 40.0)).toBe(40.08);
+    expect(endSnap(39.7, 40.08, 40.0)).toBeNull();
+    // A video end past the duration doesn't move the edge.
+    expect(endSnap(39.8, 40.08, 41)).toBeNull();
+    expect(endSnap(39.9, 40.08, NaN)).toBe(40.08);
+  });
+
+  it('leaves a seek to the duration, past it, or with an unknown duration alone', () => {
+    expect(endSnap(40.08, 40.08)).toBeNull();
+    expect(endSnap(45, 40.08)).toBeNull();
+    expect(endSnap(39.9, NaN)).toBeNull();
+    expect(endSnap(39.9, Infinity)).toBeNull();
   });
 });

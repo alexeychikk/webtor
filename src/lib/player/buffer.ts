@@ -72,6 +72,49 @@ export function bufferedToEnd(
   return ranges.end(n - 1) >= end - slack && t >= ranges.start(n - 1) - GAP_TOLERANCE_S;
 }
 
+/** A seek target this close (s) to the end of the media goes to the end itself (`endSnap`). */
+export const END_SNAP_S = 0.25;
+
+/**
+ * `duration` when `t` lies in the last `margin` before the end of the media (but isn't at
+ * `duration` already), else null. The end of the media is `mediaEnd` (where the last video frame
+ * ends, once known) or `duration`, whichever is first. WebKit's GStreamer backend fails a seek
+ * there, past the last video frame's start but before the duration, on an ended MediaSource:
+ * it drops every frame as outside the new segment, then errors at the EOS ("No valid frames decoded
+ * before end of stream"). A seek to exactly `duration` just ends the video.
+ */
+export function endSnap(
+  t: number,
+  duration: number,
+  mediaEnd = duration,
+  margin = END_SNAP_S,
+): number | null {
+  if (!Number.isFinite(duration)) return null;
+  const end = Math.min(duration, Number.isFinite(mediaEnd) ? mediaEnd : duration);
+  return t > end - margin && t < duration - 0.001 ? duration : null;
+}
+
+/**
+ * How close (s) the playhead must be to the end of the buffered media before a MediaSource whose
+ * appends are all done gets `endOfStream()` (`atBufferedEnd`). Kept tight on `timeupdate`
+ * (`EOS_PLAYING_LEAD_S`): WebKit's GStreamer backend can't seek once its decoder drained the EOS.
+ */
+export const EOS_LEAD_S = GAP_TOLERANCE_S;
+export const EOS_PLAYING_LEAD_S = 0.05;
+
+/**
+ * True once `t` is within `lead` of the end of what every SourceBuffer holds (the earliest of their
+ * last range ends): playback can't go further, so the MediaSource may end now.
+ */
+export function atBufferedEnd(all: readonly Ranges[], t: number, lead = EOS_LEAD_S): boolean {
+  let end = Infinity;
+  for (const r of all) {
+    if (r.length === 0) return false;
+    end = Math.min(end, r.end(r.length - 1));
+  }
+  return Number.isFinite(end) && t >= end - lead;
+}
+
 /** The range to `remove()` to drop media far behind the playhead, or null if there is none. */
 export function evictionRange(
   ranges: Ranges,

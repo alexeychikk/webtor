@@ -17,7 +17,10 @@ import {
 } from './append';
 import {
   aheadOf,
+  atBufferedEnd,
   BUFFER_AHEAD_S,
+  endSnap,
+  EOS_PLAYING_LEAD_S,
   bufferedToEnd,
   gapJumpTarget,
   isBuffered,
@@ -533,12 +536,16 @@ export class MsePlayer {
     this.video.addEventListener(
       'waiting',
       () => {
+        this.maybeEndOfStream();
         this.jumpGap();
         this.recoverHole();
         this.checkTranscodeSpeed();
       },
       { signal },
     );
+    this.video.addEventListener('timeupdate', () => this.maybeEndOfStream(EOS_PLAYING_LEAD_S), {
+      signal,
+    });
     this.video.addEventListener(
       'error',
       () => {
@@ -610,13 +617,28 @@ export class MsePlayer {
         return;
       }
     }
-    if (!this.seekNeedsRestart(t)) return;
+    // (Not with a seek limit: it would clamp the snapped seek back, and so on.)
+    const snap = limit == null ? endSnap(t, this.video.duration, this.videoEnd()) : null;
+    if (snap !== null) {
+      // This fires `seeking` again, at the end.
+      this.video.currentTime = snap;
+      return;
+    }
+    if (!this.seekNeedsRestart(t)) return void this.maybeEndOfStream();
     clearTimeout(this.seekTimer);
     this.seekTimer = setTimeout(() => {
       // The appends this seek woke may have reached the end meanwhile (see `seekNeedsRestart`).
       const now = this.video.currentTime;
       if (!this.appendedToEnd(now)) void this.restartAt(now);
+      else this.maybeEndOfStream();
     }, SEEK_DEBOUNCE_MS);
+  }
+
+  /** Where the video's last frame ends, once its pipeline appended through the end; else NaN. */
+  private videoEnd(): number {
+    const p = this.pipelines.find((x) => x.kind === 'video');
+    const n = p?.done ? p.sb.buffered.length : 0;
+    return n > 0 ? p!.sb.buffered.end(n - 1) : NaN;
   }
 
   /** Every pipeline appended through the end and holds the media from `t` on (`bufferedToEnd`). */
@@ -983,10 +1005,19 @@ export class MsePlayer {
     };
   }
 
-  private maybeEndOfStream() {
+  /**
+   * Ends the MediaSource once every pipeline appended through the end and the playhead reached the
+   * end of the buffered media (within `lead`): playing into it (`waiting`, `timeupdate`), or a seek
+   * there. Not as soon as the appends are done: WebKit's GStreamer backend then drains the EOS
+   * through its decoder in the last moment before the end, and any seek made after that fails
+   * ("No valid frames decoded before end of stream") or freezes. See CLAUDE.md.
+   */
+  private maybeEndOfStream(lead?: number) {
     if (this.destroyed || !this.pipelines.every((p) => p.done)) return;
     if (this.mediaSource.readyState !== 'open') return;
     if (this.pipelines.some((p) => p.sb.updating)) return;
+    const ranges = this.pipelines.map((p) => p.sb.buffered);
+    if (!atBufferedEnd(ranges, this.video.currentTime, lead)) return;
     this.mediaSource.endOfStream();
   }
 }

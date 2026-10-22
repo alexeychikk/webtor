@@ -1,5 +1,5 @@
 /** Seek bar data (pure, see seek.test.ts): which parts of the file are downloaded and buffered. */
-import type { Ranges } from './buffer';
+import { END_SNAP_S, type Ranges } from './buffer';
 
 /** Parts of a file as fractions of its length (or duration), `[start, end)`, sorted, merged. */
 export type FractionRanges = readonly (readonly [number, number])[];
@@ -57,4 +57,25 @@ export function sameRanges(a: FractionRanges, b: FractionRanges): boolean {
 export function pointerFraction(clientX: number, left: number, width: number): number {
   if (!(width > 0)) return 0;
   return Math.min(1, Math.max(0, (clientX - left) / width));
+}
+
+/**
+ * A seek to the end (its last `END_SNAP_S`) while the video is there already: ended, in its last
+ * moment, or seeking there. Our controls skip it (`seekVideo`): there is nothing to show, and
+ * WebKit's GStreamer backend fails a seek made at the end of an ended MediaSource (CLAUDE.md).
+ */
+export function endSeekRedundant(
+  current: number,
+  target: number,
+  duration: number,
+  ended: boolean,
+): boolean {
+  if (!Number.isFinite(duration) || duration <= 0) return false;
+  const edge = duration - END_SNAP_S;
+  return target >= edge && (ended || current >= edge);
+}
+
+/** Seeks `video` to `t` for our controls (seek bar, keys, double-tap), unless `endSeekRedundant`. */
+export function seekVideo(video: HTMLVideoElement, t: number): void {
+  if (!endSeekRedundant(video.currentTime, t, video.duration, video.ended)) video.currentTime = t;
 }
