@@ -4,6 +4,8 @@
   import Captions from '@lucide/svelte/icons/captions';
   import CaptionsOff from '@lucide/svelte/icons/captions-off';
   import Check from '@lucide/svelte/icons/check';
+  import ChevronsLeft from '@lucide/svelte/icons/chevrons-left';
+  import ChevronsRight from '@lucide/svelte/icons/chevrons-right';
   import Copy from '@lucide/svelte/icons/copy';
   import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
   import Link from '@lucide/svelte/icons/link';
@@ -23,6 +25,18 @@
   import { SUBTITLE_EXTENSIONS } from '../subtitles/parse';
   import { subtitleTrackText } from '../subtitles/tracks';
   import { tick, untrack } from 'svelte';
+  import { fade } from 'svelte/transition';
+  import { hideDelay, remainingDelay } from './auto-hide';
+  import {
+    DOUBLE_TAP_MS,
+    formatStreak,
+    NO_TAPS,
+    onTap,
+    SEEK_COALESCE_MS,
+    SEEK_STREAK_MS,
+    tapZone,
+    type SeekSide,
+  } from './touch-seek';
   import { provideControlsShown } from '../ui/tooltip-context';
   import type { Flash } from './centre';
   import { MediaState } from './media-state.svelte';
@@ -120,13 +134,15 @@
   }
 
   // Visibility of the control layer (docs/decisions/0008 §3.1):
-  // shown = !playing || menuOpen || pointerOnControls || activity. A mouse move is activity for 1 s,
-  // a key press too; the pointer leaving the player or the window ends it at once. On touch a tap
-  // on the picture toggles the controls (never play/pause), and they hide 3 s after the last touch.
-  // Focus doesn't keep them.
-  const IDLE_MS = 1000;
-  const IDLE_TOUCH_MS = 3000;
+  // shown = !playing || menuOpen || pointerOnControls || activity. A mouse move, a key press or a
+  // touch is activity for `hideDelay` (auto-hide.ts: 5 s windowed; 1 s in fullscreen, 3 s after a
+  // touch); the pointer leaving the player or the window ends it at once. On touch a tap on the
+  // picture toggles the controls (never play/pause); a double-tap on its sides seeks
+  // (touch-seek.ts). Focus doesn't keep them.
   let activity = $state(false);
+  /** The last activity (for a fullscreen change while it runs): when, and whether a touch. */
+  let wokeAt = 0;
+  let wokeByTouch = false;
   let pointerOnControls = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const playing = $derived(!media.paused && !media.ended);
@@ -262,6 +278,8 @@
   let touch = $state(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
   /** Kind of the last pointerdown on the screen: a touch's click must not play/pause. */
   let lastPointerType = 'mouse';
+  /** Touch and pen: taps (pointerdown) toggle the controls and double-taps seek; no click play/pause. */
+  const touchLike = (pointerType: string) => pointerType === 'touch' || pointerType === 'pen';
   /** The last play/pause toggle, flashed in the centre once: cleared when its animation ends. */
   let flash = $state<Flash | null>(null);
   let flashCount = 0;
@@ -274,11 +292,27 @@
   const inMenu = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest('[data-player-menu]');
 
-  function wake(ms = IDLE_MS) {
+  function wake(byTouch = false) {
     activity = true;
+    wokeAt = performance.now();
+    wokeByTouch = byTouch;
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => (activity = false), ms);
+    idleTimer = setTimeout(() => (activity = false), hideDelay({ fullscreen, touch: byTouch }));
   }
+
+  // Entering or leaving fullscreen: the running timer gets that mode's delay, from the activity.
+  $effect(() => {
+    const fs = fullscreen;
+    untrack(() => {
+      if (!activity) return;
+      const delay = hideDelay({ fullscreen: fs, touch: wokeByTouch });
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => (activity = false),
+        remainingDelay(delay, performance.now() - wokeAt),
+      );
+    });
+  });
 
   function hideControls() {
     pointerOnControls = false;
@@ -287,35 +321,101 @@
   }
 
   function onScreenPointerMove(event: PointerEvent) {
-    if (event.pointerType === 'touch') {
+    if (touchLike(event.pointerType)) {
       // A drag on the seek bar keeps the controls; a finger moving over the picture doesn't.
-      if (onControls(event.target)) wake(IDLE_TOUCH_MS);
+      if (onControls(event.target)) wake(true);
       return;
     }
     touch = false;
     pointerOnControls = onControls(event.target);
-    wake(IDLE_MS);
+    wake();
+  }
+
+  // Double-tap seeking (touch-seek.ts): a first tap on a side waits `DOUBLE_TAP_MS` before it acts
+  // as a plain tap, so a double-tap never flickers the controls. Seeks are summed and sent to the
+  // player `SEEK_COALESCE_MS` after the last tap (one seek, not one per tap); the overlay shows the
+  // streak until it ends.
+  let taps = NO_TAPS;
+  let tapTimer: ReturnType<typeof setTimeout> | undefined;
+  let streakTimer: ReturnType<typeof setTimeout> | undefined;
+  let seekTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingSeek = 0;
+  /** The running streak, for the overlay (`n` restarts its pulse on every tap). */
+  let streak = $state<{ side: SeekSide; total: number; n: number } | null>(null);
+
+  /** A tap that may be a seek tap: on the picture (no control, menu, card or toast), file open. */
+  function seekTapTarget(target: EventTarget | null) {
+    if (!(target instanceof Element) || !media.hasMetadata || states.card !== null) return false;
+    if (performance.now() - menuClosedAt < 500) return false;
+    return !target.closest(
+      'button, a, input, select, textarea, [role="alert"], [role="status"], [data-player-controls], [data-player-menu]',
+    );
+  }
+
+  /** A plain tap on the picture shows or hides the controls. */
+  function tapPicture() {
+    if (controlsShown && activity && playing && !menuOpen) hideControls();
+    else wake(true);
+  }
+
+  function queueSeek(by: number) {
+    pendingSeek += by;
+    clearTimeout(seekTimer);
+    seekTimer = setTimeout(() => {
+      const total = pendingSeek;
+      pendingSeek = 0;
+      if (total) seekBy(total);
+    }, SEEK_COALESCE_MS);
+  }
+
+  function onPictureTap(event: PointerEvent) {
+    const rect =
+      event.currentTarget instanceof Element ? event.currentTarget.getBoundingClientRect() : null;
+    const zone = rect ? tapZone(event.clientX - rect.left, rect.width) : 'middle';
+    const next = onTap(taps, zone, performance.now());
+    taps = next.state;
+    clearTimeout(tapTimer);
+    const action = next.action;
+    if (action.type === 'tap') {
+      clearTimeout(streakTimer);
+      streak = null;
+      tapPicture();
+    } else if (action.type === 'wait') {
+      tapTimer = setTimeout(() => {
+        // No second tap: a plain one.
+        taps = NO_TAPS;
+        tapPicture();
+      }, DOUBLE_TAP_MS);
+    } else {
+      queueSeek(action.by);
+      streak = { side: action.side, total: action.total, n: (streak?.n ?? 0) + 1 };
+      clearTimeout(streakTimer);
+      streakTimer = setTimeout(() => {
+        taps = NO_TAPS;
+        streak = null;
+      }, SEEK_STREAK_MS);
+    }
   }
 
   function onScreenPointerDown(event: PointerEvent) {
     lastPointerType = event.pointerType;
-    if (event.pointerType !== 'touch') {
+    if (!touchLike(event.pointerType)) {
       touch = false;
       pointerOnControls = onControls(event.target);
-      wake(IDLE_MS);
+      wake();
       return;
     }
     touch = true;
     pointerOnControls = false;
-    // A tap on a control keeps them; a tap on the picture shows or hides them.
-    if (onControls(event.target)) wake(IDLE_TOUCH_MS);
-    else if (controlsShown && activity && playing && !menuOpen) hideControls();
-    else wake(IDLE_TOUCH_MS);
+    // A tap on a control keeps them; a tap on the picture shows or hides them, or seeks.
+    if (onControls(event.target)) wake(true);
+    else if (seekTapTarget(event.target)) onPictureTap(event);
+    else tapPicture();
   }
 
   function onScreenPointerLeave(event: PointerEvent) {
     // Touch pointers "leave" after every tap.
-    if (event.pointerType !== 'touch') hideControls();
+    if (!touchLike(event.pointerType)) hideControls();
   }
 
   $effect(() => {
@@ -356,6 +456,9 @@
   $effect(() => () => {
     clearTimeout(idleTimer);
     clearTimeout(flashTimer);
+    clearTimeout(tapTimer);
+    clearTimeout(streakTimer);
+    clearTimeout(seekTimer);
   });
 
   function togglePlay() {
@@ -378,12 +481,14 @@
 
   /** A mouse click on the picture plays/pauses; a tap only toggles the controls (pointerdown). */
   function onVideoClick() {
-    if (lastPointerType === 'touch' || performance.now() - menuClosedAt < 500) return;
+    if (touchLike(lastPointerType) || performance.now() - menuClosedAt < 500) return;
     togglePlay();
   }
 
   /** A double-click anywhere on the picture (not on the bar) toggles fullscreen. */
   function onScreenDblClick(event: MouseEvent) {
+    // A double-tap on a side seeks (a touch double-tap can fire `dblclick` too).
+    if (touchLike(lastPointerType) && taps.side !== null) return;
     if (
       event.target instanceof Element &&
       event.target.closest('[data-player-bar], [data-player-menu]')
@@ -654,6 +759,25 @@
       onstartover={() => controller.startOver()}
       ondismissresume={() => controller.dismissResume()}
     />
+    {#if streak}
+      {@const s = streak}
+      <div
+        class="seek-streak {s.side}"
+        data-testid="seek-streak"
+        data-side={s.side}
+        data-total={s.total}
+        aria-hidden="true"
+        out:fade={{ duration: 300 }}
+      >
+        {#key s.n}
+          <span class="seek-streak-label">
+            {#if s.side === 'back'}<ChevronsLeft size={28} aria-hidden="true" />{/if}
+            <span>{formatStreak(s.total)}</span>
+            {#if s.side === 'forward'}<ChevronsRight size={28} aria-hidden="true" />{/if}
+          </span>
+        {/key}
+      </div>
+    {/if}
     {#if dragging}
       <div class="drop-overlay" data-testid="drop-overlay" aria-hidden="true">
         <div class="drop-label">
@@ -772,6 +896,8 @@
     border-radius: var(--radius-lg);
     background: #000;
     -webkit-tap-highlight-color: transparent;
+    /* No double-tap zoom (iPad Safari): a double-tap on the picture seeks. */
+    touch-action: manipulation;
   }
   video {
     display: block;
@@ -904,6 +1030,45 @@
     display: flex;
     align-items: center;
     min-height: min(30rem, 90vh);
+  }
+  /* Double-tap seek streak: a soft half-disc on that side with the amount (YouTube-like). */
+  .seek-streak {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: var(--z-state);
+    display: grid;
+    place-items: center;
+    width: 36%;
+    background: rgb(255 255 255 / 0.12);
+    color: var(--text);
+    pointer-events: none;
+  }
+  .seek-streak.back {
+    left: 0;
+    border-radius: 0 50% 50% 0 / 0 50% 50% 0;
+  }
+  .seek-streak.forward {
+    right: 0;
+    border-radius: 50% 0 0 50% / 50% 0 0 50%;
+  }
+  .seek-streak-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-weight: var(--weight-medium);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .seek-streak-label {
+      animation: streak-pulse var(--dur-base) var(--ease-out);
+    }
+  }
+  @keyframes streak-pulse {
+    from {
+      transform: scale(0.85);
+    }
   }
   .drop-overlay {
     position: absolute;

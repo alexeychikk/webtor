@@ -223,8 +223,8 @@ docs/decisions/                ADRs
   chip), `time`, `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label`
   "Fullscreen" / "Exit fullscreen"; absent without any fullscreen), `tooltip` (inside an icon button
   while shown), `centre` (`data-state` `loading|buffering|play|pause|replay|none`) with
-  `centre-button` and, on touch, `seek-back` / `seek-forward`, and `ass-canvas` (the JASSUB overlay;
-  exists only while an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas
+  `centre-button` and, on touch, `seek-back` / `seek-forward`, `seek-streak` (double-tap overlay),
+  and `ass-canvas` (the JASSUB overlay; exists only while an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas
   after a paused seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`,
   `opus`…; empty when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish
   hooks: `why-button` (header), `why-link` (in no-peers/stalled notices), `why-dialog`, `why-relay`;
@@ -285,10 +285,18 @@ docs/decisions/                ADRs
 - **Player controls (ADR 0004, 0008).** The `<video>` never has `controls`: `PlayerControls.svelte`
   overlays the picture, windowed and fullscreen (text cues are lifted above it via
   `::-webkit-media-text-track-container`). `shown = !playing || menuOpen || pointerOnControls ||
-activity`: a mouse move shows them for 1 s, a key for 1 s, leaving the player or window hides them
-  at once; focus does not keep them. Touch: a tap on the picture toggles them (never play/pause;
-  play/pause and ±5 s sit in the centre), they hide 3 s after the last touch. Hidden = opacity 0,
-  then `visibility: hidden` (Playwright `toBeHidden`), no pointer events, `cursor: none`. No "Exit
+activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `HIDE_DELAY_MS` 5 s
+  windowed; in fullscreen 1 s, 3 s after a touch; a fullscreen change re-times the running timer),
+  leaving the player or window hides them at once; focus does not keep them. Touch (and pen): a tap
+  on the picture toggles them (never play/pause; play/pause and ±5 s sit in the centre).
+  **Double-tap seek** (`touch-seek.ts`, pure `onTap`): a double-tap (2nd tap ≤ `DOUBLE_TAP_MS` 300 ms)
+  on the left/right third seeks −/+5 s; each further same-side tap ≤ `SEEK_STREAK_MS` 700 ms after
+  the last doubles the step (10, 20, 40 s…, ≤ 5 min); the other side mid-streak starts a new 5 s
+  streak there. A first side tap waits 300 ms before acting as a plain tap (no flicker); seek taps
+  are summed and sent as one `currentTime` write `SEEK_COALESCE_MS` after the last; a side
+  double-tap's `dblclick` is ignored (the middle's still fullscreens). Overlay `seek-streak`
+  (`data-side` `back|forward`, `data-total` s). The screen has `touch-action: manipulation`.
+  Hidden = opacity 0, then `visibility: hidden` (Playwright `toBeHidden`), no pointer events, `cursor: none`. No "Exit
   fullscreen" text anywhere (aria-label/tooltip only). Click on the picture = play/pause,
   double-click = fullscreen; while paused the centre button covers the middle, so e2e clicks the
   picture at an offset (`{ position: { x: 80, y: 120 } }`). iPhone (video-only fullscreen): the same
