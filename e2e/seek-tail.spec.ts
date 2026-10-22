@@ -8,6 +8,11 @@ import { selectAudio } from './support/player';
 // its track's end: the browser rejected its output and emptied the element (paused at 0, no error
 // card). Now the video plays on to the end. Runs on Chromium and WebKit (playwright.config.ts).
 
+// Playwright's WebKit (GStreamer) sometimes never completes the start-up seek over the 0.084 s
+// hole in front of this fixture's first video frame (`jumpGap`): `seeking` stays true at 0.084,
+// before any seek of these tests. It happens without this ticket's change too (~1 run in 12).
+test.describe.configure({ retries: 1 });
+
 const video = (page: Page) => page.getByTestId('video');
 const prop = <K extends keyof HTMLVideoElement>(page: Page, k: K) =>
   video(page).evaluate((v: HTMLVideoElement, k) => v[k], k) as Promise<HTMLVideoElement[K]>;
@@ -76,7 +81,8 @@ for (const restart of [false, true]) {
     await expect.poll(() => prop(page, 'seeking'), { timeout: 10_000 }).toBe(false);
     await page.waitForTimeout(1000);
     expect(await prop(page, 'paused')).toBe(true);
-    expect(await prop(page, 'currentTime')).toBeCloseTo(10, 1);
+    // GStreamer may land on the next frame (10.084).
+    expect(Math.abs((await prop(page, 'currentTime')) - 10)).toBeLessThan(0.2);
     await expect(page.getByTestId('error')).toHaveCount(0);
     await video(page).evaluate((v: HTMLVideoElement) => void v.play());
     await expectEnded(page);
