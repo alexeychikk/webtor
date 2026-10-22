@@ -98,23 +98,59 @@ export function endSnap(
 
 /**
  * How close (s) the playhead must be to the end of the buffered media before a MediaSource whose
- * appends are all done gets `endOfStream()` (`atBufferedEnd`). Kept tight on `timeupdate`
- * (`EOS_PLAYING_LEAD_S`): WebKit's GStreamer backend can't seek once its decoder drained the EOS.
+ * appends are all done gets `endOfStream()` on a stall or a seek there (`atBufferedEnd`).
  */
 export const EOS_LEAD_S = GAP_TOLERANCE_S;
-export const EOS_PLAYING_LEAD_S = 0.05;
+
+/**
+ * While playing, `endOfStream()` comes this much media (s) before the end of the buffered media
+ * (`endOfStreamIn`), so the element never stalls there first. Ended on that stall, WebKit's
+ * GStreamer backend resumes its pipeline asynchronously; a short tail (e.g. 76 ms of audio past the
+ * last video frame) can end the element before the pipeline reports "playing", and WebKit then
+ * replays from 0 (`mediaPlayerPlaybackStateChanged` → `playInternal` on an ended element).
+ * Not earlier: a seek after the EOS reached GStreamer's decoder fails (see CLAUDE.md).
+ */
+export const EOS_AHEAD_S = 0.1;
+
+/** Within this much media (s) of the end, `timeupdate` (~250 ms apart) arms the end-of-stream timer. */
+export const EOS_ARM_S = 0.6;
+
+/** The end of what every SourceBuffer holds (the earliest of their last range ends); NaN if one is empty. */
+function commonEnd(all: readonly Ranges[]): number {
+  let end = Infinity;
+  for (const r of all) {
+    if (r.length === 0) return NaN;
+    end = Math.min(end, r.end(r.length - 1));
+  }
+  return Number.isFinite(end) ? end : NaN;
+}
 
 /**
  * True once `t` is within `lead` of the end of what every SourceBuffer holds (the earliest of their
  * last range ends): playback can't go further, so the MediaSource may end now.
  */
 export function atBufferedEnd(all: readonly Ranges[], t: number, lead = EOS_LEAD_S): boolean {
-  let end = Infinity;
-  for (const r of all) {
-    if (r.length === 0) return false;
-    end = Math.min(end, r.end(r.length - 1));
-  }
+  const end = commonEnd(all);
   return Number.isFinite(end) && t >= end - lead;
+}
+
+/**
+ * Wall-clock seconds until `endOfStream()` while playing at `rate` from `t`: 0 once within `ahead`
+ * of the end of the buffered media (`commonEnd`), null while it is further than `arm` away (or
+ * nothing is buffered, or the rate isn't forwards).
+ */
+export function endOfStreamIn(
+  all: readonly Ranges[],
+  t: number,
+  rate: number,
+  ahead = EOS_AHEAD_S,
+  arm = EOS_ARM_S,
+): number | null {
+  const end = commonEnd(all);
+  if (!Number.isFinite(end) || !(rate > 0)) return null;
+  const left = end - t;
+  if (left > arm) return null;
+  return Math.max(0, (left - ahead) / rate);
 }
 
 /** The range to `remove()` to drop media far behind the playhead, or null if there is none. */

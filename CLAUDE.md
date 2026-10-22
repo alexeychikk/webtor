@@ -326,11 +326,14 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     nothing left to append. A restart (remove + re-append the last GOP into an `ended`
     MediaSource) is fatal there ("Failed to push buffer"). The debounced restart re-checks: the
     seek wakes the appends, and they can reach the end within `SEEK_DEBOUNCE_MS`.
-  - `endOfStream()` waits for the playhead (`maybeEndOfStream`, `atBufferedEnd`): appends done
-    and the playhead at the end of the buffered media (`waiting`, `timeupdate` within 50 ms, or
-    a seek there). Called as soon as the appends were done, GStreamer drained the EOS through its
-    decoder in the last ~0.3 s, and any seek after that failed ("No valid frames decoded before end
-    of stream") or froze.
+  - `endOfStream()` waits for the playhead: appends done and, while playing, `EOS_AHEAD_S` (0.1 s)
+    before the end of the buffered media, on a timer armed by `timeupdate` (`armEndOfStream`,
+    `endOfStreamIn`); else at a stall or a seek there (`maybeEndOfStream`, `atBufferedEnd`).
+    Called as soon as the appends were done, GStreamer drained the EOS through its decoder in the
+    last ~0.3 s, and any seek after that failed ("No valid frames decoded before end of stream") or
+    froze. Called only at the stall, GStreamer resumes its paused pipeline asynchronously; a short
+    tail (audio past the last video frame) can end the element first, and WebKit then replays from 0
+    (`mediaPlayerPlaybackStateChanged` → `playInternal` on an ended element; ~1 run in 12).
   - A seek into the last `END_SNAP_S` (0.25 s, counted from where the video ends if that is
     earlier), short of `duration`, goes back to its start (`endSnap`): GStreamer drops every frame
     of a segment past the last frame's start, then errors at the EOS. A seek to `duration` (or

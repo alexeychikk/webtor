@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   aheadOf,
   atBufferedEnd,
+  endOfStreamIn,
   bufferedAhead,
   bufferedToEnd,
   endSnap,
@@ -184,6 +185,30 @@ describe('atBufferedEnd', () => {
   it('is false with an empty SourceBuffer', () => {
     expect(atBufferedEnd([video, toRanges([])], 40)).toBe(false);
     expect(atBufferedEnd([], 40)).toBe(false);
+  });
+});
+
+describe('endOfStreamIn', () => {
+  const video = toRanges([[0, 40.008]]);
+  const audio = toRanges([[0, 40.084]]);
+
+  it('waits until EOS_AHEAD_S before the earliest last range end, at the playback rate', () => {
+    expect(endOfStreamIn([video, audio], 39.5, 1)).toBeCloseTo(0.408);
+    expect(endOfStreamIn([video, audio], 39.5, 2)).toBeCloseTo(0.204);
+    expect(endOfStreamIn([video, audio], 39.95, 1)).toBe(0);
+    expect(endOfStreamIn([video, audio], 40.05, 1)).toBe(0);
+  });
+
+  it('is null while the end is further than EOS_ARM_S away', () => {
+    expect(endOfStreamIn([video, audio], 39.3, 1)).toBeNull();
+    expect(endOfStreamIn([video, audio], 30, 1)).toBeNull();
+  });
+
+  it('is null without media or a forward rate', () => {
+    expect(endOfStreamIn([video, toRanges([])], 39.9, 1)).toBeNull();
+    expect(endOfStreamIn([], 39.9, 1)).toBeNull();
+    expect(endOfStreamIn([video, audio], 39.9, 0)).toBeNull();
+    expect(endOfStreamIn([video, audio], 39.9, -1)).toBeNull();
   });
 });
 

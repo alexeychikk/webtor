@@ -4,7 +4,8 @@ import { fixtureMagnet } from './support/fixtures';
 // Seeks to and at the end of the media (CLAUDE.md "The end of the media"): a seek to exactly
 // `duration` ends the video without restarting the pipelines, and seeks made in the last moment
 // (before or after `ended`) never fail. WebKit's GStreamer backend failed both with fatal errors
-// ("Failed to push buffer", "No valid frames decoded before end of stream").
+// ("Failed to push buffer", "No valid frames decoded before end of stream"), and now and then
+// replayed from 0 after playing into the end (`EOS_AHEAD_S` in src/lib/player/buffer.ts).
 // Runs on Chromium and WebKit (playwright.config.ts). e2e/fixtures/resume/movie.mkv: 40 s.
 
 const video = (page: Page) => page.getByTestId('video');
@@ -136,4 +137,24 @@ test('← from the last moment seeks back and plays on', async ({ page }) => {
   await expect.poll(() => prop(page, 'currentTime')).toBeLessThan(36);
   await expect.poll(() => prop(page, 'currentTime'), { timeout: 10_000 }).toBeGreaterThan(36.5);
   await expectEnded(page);
+});
+
+test('plays through the end and stays ended (no replay from 0)', async ({ page }) => {
+  await open(page);
+  await video(page).evaluate((v: HTMLVideoElement) => {
+    v.currentTime = 34;
+    // Seeks back from there (the player's own keyframe seek after a restart stays at 34 s).
+    const back: number[] = [];
+    (window as unknown as { __back: number[] }).__back = back;
+    v.addEventListener('seeking', () => {
+      if (v.currentTime < 30) back.push(v.currentTime);
+    });
+  });
+  await expect.poll(() => prop(page, 'ended'), { timeout: 20_000 }).toBe(true);
+  // WebKit replayed from 0 a moment after the end when the MediaSource ended on the stall there.
+  await page.waitForTimeout(1500);
+  expect(await prop(page, 'ended')).toBe(true);
+  expect(await page.evaluate(() => (window as unknown as { __back: number[] }).__back)).toEqual([]);
+  await expect(page.getByTestId('centre')).toHaveAttribute('data-state', 'replay');
+  await expect(page.getByTestId('error')).toHaveCount(0);
 });

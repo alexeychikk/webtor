@@ -20,7 +20,7 @@ import {
   atBufferedEnd,
   BUFFER_AHEAD_S,
   endSnap,
-  EOS_PLAYING_LEAD_S,
+  endOfStreamIn,
   bufferedToEnd,
   gapJumpTarget,
   isBuffered,
@@ -177,6 +177,7 @@ export class MsePlayer {
   private readonly pipelines: Pipeline[] = [];
   private destroyed = false;
   private seekTimer: ReturnType<typeof setTimeout> | undefined;
+  private eosTimer: ReturnType<typeof setTimeout> | undefined;
   private seekGen = 0;
   private readonly abort = new AbortController();
   private readonly bufferAhead = bufferAheadSeconds();
@@ -478,6 +479,7 @@ export class MsePlayer {
     if (this.destroyed) return;
     this.destroyed = true;
     clearTimeout(this.seekTimer);
+    clearTimeout(this.eosTimer);
     this.abort.abort();
     for (const p of this.pipelines) void this.stopPipeline(p);
     if (!this.input.disposed) this.input.dispose();
@@ -543,9 +545,10 @@ export class MsePlayer {
       },
       { signal },
     );
-    this.video.addEventListener('timeupdate', () => this.maybeEndOfStream(EOS_PLAYING_LEAD_S), {
-      signal,
-    });
+    for (const ev of ['timeupdate', 'playing', 'ratechange'])
+      this.video.addEventListener(ev, () => this.armEndOfStream(), { signal });
+    for (const ev of ['pause', 'seeking', 'waiting'])
+      this.video.addEventListener(ev, () => clearTimeout(this.eosTimer), { signal });
     this.video.addEventListener(
       'error',
       () => {
@@ -1007,18 +1010,41 @@ export class MsePlayer {
 
   /**
    * Ends the MediaSource once every pipeline appended through the end and the playhead reached the
-   * end of the buffered media (within `lead`): playing into it (`waiting`, `timeupdate`), or a seek
-   * there. Not as soon as the appends are done: WebKit's GStreamer backend then drains the EOS
-   * through its decoder in the last moment before the end, and any seek made after that fails
-   * ("No valid frames decoded before end of stream") or freezes. See CLAUDE.md.
+   * end of the buffered media (within `lead`): a stall there (`waiting`) or a seek there. While
+   * playing, `armEndOfStream` ends it a moment before instead. Not as soon as the appends are done:
+   * WebKit's GStreamer backend then drains the EOS through its decoder before the end, and any seek
+   * made after that fails ("No valid frames decoded before end of stream") or freezes. See CLAUDE.md.
    */
   private maybeEndOfStream(lead?: number) {
-    if (this.destroyed || !this.pipelines.every((p) => p.done)) return;
-    if (this.mediaSource.readyState !== 'open') return;
-    if (this.pipelines.some((p) => p.sb.updating)) return;
+    if (!this.canEndStream()) return;
     const ranges = this.pipelines.map((p) => p.sb.buffered);
     if (!atBufferedEnd(ranges, this.video.currentTime, lead)) return;
     this.mediaSource.endOfStream();
+  }
+
+  private canEndStream(): boolean {
+    return (
+      !this.destroyed &&
+      this.pipelines.every((p) => p.done && !p.sb.updating) &&
+      this.mediaSource.readyState === 'open'
+    );
+  }
+
+  /**
+   * While playing into the end of the buffered media with every append done: `endOfStream()`
+   * `EOS_AHEAD_S` before it (`endOfStreamIn`), on a timer re-checked when it fires, so the element
+   * plays into an ended MediaSource rather than stalling at the end first (see `EOS_AHEAD_S`).
+   * Called on `timeupdate`, `playing` and `ratechange`; a pause, a seek or a stall cancels it.
+   */
+  private armEndOfStream() {
+    clearTimeout(this.eosTimer);
+    if (!this.canEndStream() || this.video.paused || this.video.seeking) return;
+    const v = this.video;
+    const ranges = this.pipelines.map((p) => p.sb.buffered);
+    const wait = endOfStreamIn(ranges, v.currentTime, v.playbackRate);
+    if (wait === null) return;
+    if (wait === 0) return void this.mediaSource.endOfStream();
+    this.eosTimer = setTimeout(() => this.armEndOfStream(), wait * 1000);
   }
 }
 
