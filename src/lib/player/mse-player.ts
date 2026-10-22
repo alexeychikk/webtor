@@ -613,10 +613,16 @@ export class MsePlayer {
     if (!this.seekNeedsRestart(t)) return;
     clearTimeout(this.seekTimer);
     this.seekTimer = setTimeout(() => {
-      // The pipelines may have reached the end meanwhile (see `seekNeedsRestart`).
+      // The appends this seek woke may have reached the end meanwhile (see `seekNeedsRestart`).
       const now = this.video.currentTime;
-      if (this.seekNeedsRestart(now)) void this.restartAt(now);
+      if (!this.appendedToEnd(now)) void this.restartAt(now);
     }, SEEK_DEBOUNCE_MS);
+  }
+
+  /** Every pipeline appended through the end and holds the media from `t` on (`bufferedToEnd`). */
+  private appendedToEnd(t: number): boolean {
+    const end = this.mediaSource.duration;
+    return this.pipelines.every((p) => p.done && bufferedToEnd(p.sb.buffered, t, end));
   }
 
   /**
