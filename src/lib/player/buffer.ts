@@ -52,6 +52,26 @@ export function isBuffered(ranges: Ranges, t: number): boolean {
   return bufferedAhead(ranges, t) > GAP_TOLERANCE_S;
 }
 
+/** A SourceBuffer's last frame may end this far before the element's duration (audio vs video). */
+export const END_SLACK_S = 0.5;
+
+/**
+ * True if `ranges` holds the media from `t` to the end at `end` (the element's duration): `t` lies in
+ * the last range, at its very end or past it, and that range reaches the end. Whether a seek there
+ * needs a restart, when the pipeline already appended through the end of the file (`isBuffered`
+ * reads false in the last `GAP_TOLERANCE_S` of the media).
+ */
+export function bufferedToEnd(
+  ranges: Ranges,
+  t: number,
+  end: number,
+  slack = END_SLACK_S,
+): boolean {
+  const n = ranges.length;
+  if (n === 0 || !Number.isFinite(end)) return false;
+  return ranges.end(n - 1) >= end - slack && t >= ranges.start(n - 1) - GAP_TOLERANCE_S;
+}
+
 /** The range to `remove()` to drop media far behind the playhead, or null if there is none. */
 export function evictionRange(
   ranges: Ranges,

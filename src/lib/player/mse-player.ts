@@ -18,6 +18,7 @@ import {
 import {
   aheadOf,
   BUFFER_AHEAD_S,
+  bufferedToEnd,
   gapJumpTarget,
   isBuffered,
   lastAtOrBefore,
@@ -609,11 +610,26 @@ export class MsePlayer {
         return;
       }
     }
-    if (this.pipelines.every((p) => isBuffered(p.sb.buffered, t))) return;
+    if (!this.seekNeedsRestart(t)) return;
     clearTimeout(this.seekTimer);
-    this.seekTimer = setTimeout(
-      () => void this.restartAt(this.video.currentTime),
-      SEEK_DEBOUNCE_MS,
+    this.seekTimer = setTimeout(() => {
+      // The pipelines may have reached the end meanwhile (see `seekNeedsRestart`).
+      const now = this.video.currentTime;
+      if (this.seekNeedsRestart(now)) void this.restartAt(now);
+    }, SEEK_DEBOUNCE_MS);
+  }
+
+  /**
+   * False when every pipeline has media at `t`, or appended through the end of the file and `t` is
+   * at or past its last frame (a seek to `duration`, a long forward streak): nothing is left to
+   * append there, and the element ends on its own. A restart there removes and re-appends the tail
+   * after the element reached the end of an `ended` MediaSource, which WebKit's GStreamer backend
+   * refuses with a fatal "Failed to push buffer".
+   */
+  private seekNeedsRestart(t: number): boolean {
+    const end = this.mediaSource.duration;
+    return this.pipelines.some(
+      (p) => !isBuffered(p.sb.buffered, t) && !(p.done && bufferedToEnd(p.sb.buffered, t, end)),
     );
   }
 

@@ -34,7 +34,7 @@ pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
-                    #   Projects: chromium runs every spec; firefox + webkit run smoke.spec.ts only
+                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -319,6 +319,13 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
   playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
+- **A seek at or past the last frame never restarts** (`MsePlayer.seekNeedsRestart`, `bufferedToEnd`).
+  A pipeline that appended through the end (`done`), with its last range reaching the duration,
+  has nothing left to append there, and the element ends by itself. Restarting there (remove +
+  re-append the last GOP into an `ended` MediaSource whose playhead hit EOS) is fatal on
+  WebKit/GStreamer ("Failed to push buffer"). The debounced restart re-checks: the seek wakes the
+  appends, and they can reach the end within `SEEK_DEBOUNCE_MS`. Covered by `e2e/seek-end.spec.ts`
+  (Chromium + WebKit).
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

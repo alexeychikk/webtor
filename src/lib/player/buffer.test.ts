@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   aheadOf,
   bufferedAhead,
+  bufferedToEnd,
   evictionRange,
   gapJumpTarget,
   isBuffered,
@@ -44,6 +45,28 @@ describe('isBuffered', () => {
     expect(isBuffered(r, 2)).toBe(true);
     expect(isBuffered(r, 6)).toBe(false);
     expect(isBuffered(r, 9)).toBe(true);
+  });
+});
+
+describe('bufferedToEnd', () => {
+  const r = toRanges([
+    [0, 4],
+    [8, 40.08],
+  ]);
+
+  it('is true at, in the last moment of, and past the end of a last range that reaches the end', () => {
+    expect(bufferedToEnd(r, 40.08, 40.08)).toBe(true);
+    expect(bufferedToEnd(r, 40.06, 40.08)).toBe(true);
+    expect(bufferedToEnd(r, 41, 40.08)).toBe(true);
+    // Audio ending a frame before the video (the element's duration).
+    expect(bufferedToEnd(toRanges([[8, 40.06]]), 40.08, 40.08)).toBe(true);
+  });
+
+  it('is false in a hole, before the last range, or when the tail is missing', () => {
+    expect(bufferedToEnd(r, 6, 40.08)).toBe(false);
+    expect(bufferedToEnd(toRanges([[0, 30]]), 40, 40.08)).toBe(false);
+    expect(bufferedToEnd(toRanges([]), 40, 40.08)).toBe(false);
+    expect(bufferedToEnd(r, 40, NaN)).toBe(false);
   });
 });
 

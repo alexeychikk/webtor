@@ -36,7 +36,7 @@ export default defineConfig({
     },
     {
       name: 'webkit',
-      testMatch: 'smoke.spec.ts',
+      testMatch: ['smoke.spec.ts', 'seek-end.spec.ts'],
       use: { ...devices['Desktop Safari'] },
     },
   ],
