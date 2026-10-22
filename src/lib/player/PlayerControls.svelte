@@ -16,7 +16,7 @@
   import IconButton from '../ui/IconButton.svelte';
   import { formatTime } from './format';
   import type { MediaState } from './media-state.svelte';
-  import { pointerFraction, timeFractions, type FractionRanges } from './seek';
+  import { pointerFraction, seekVideo, timeFractions, type FractionRanges } from './seek';
   import { SEEK_STEP_S, seekTarget } from './shortcuts';
   import type { Snippet } from 'svelte';
 
@@ -82,8 +82,7 @@
   const pct = (f: number) => `${f * 100}%`;
 
   function seekTo(t: number) {
-    scrubbing = t;
-    if (video) video.currentTime = t;
+    scrubbing = video && seekVideo(video, t) ? t : null;
   }
 
   function onSeekInput(event: Event) {

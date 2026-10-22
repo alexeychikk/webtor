@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   aheadOf,
+  atBufferedEnd,
+  endOfStreamIn,
   bufferedAhead,
+  bufferedToEnd,
+  endSnap,
   evictionRange,
   gapJumpTarget,
   isBuffered,
@@ -44,6 +48,28 @@ describe('isBuffered', () => {
     expect(isBuffered(r, 2)).toBe(true);
     expect(isBuffered(r, 6)).toBe(false);
     expect(isBuffered(r, 9)).toBe(true);
+  });
+});
+
+describe('bufferedToEnd', () => {
+  const r = toRanges([
+    [0, 4],
+    [8, 40.08],
+  ]);
+
+  it('is true at, in the last moment of, and past the end of a last range that reaches the end', () => {
+    expect(bufferedToEnd(r, 40.08, 40.08)).toBe(true);
+    expect(bufferedToEnd(r, 40.06, 40.08)).toBe(true);
+    expect(bufferedToEnd(r, 41, 40.08)).toBe(true);
+    // Audio ending a frame before the video (the element's duration).
+    expect(bufferedToEnd(toRanges([[8, 40.06]]), 40.08, 40.08)).toBe(true);
+  });
+
+  it('is false in a hole, before the last range, or when the tail is missing', () => {
+    expect(bufferedToEnd(r, 6, 40.08)).toBe(false);
+    expect(bufferedToEnd(toRanges([[0, 30]]), 40, 40.08)).toBe(false);
+    expect(bufferedToEnd(toRanges([]), 40, 40.08)).toBe(false);
+    expect(bufferedToEnd(r, 40, NaN)).toBe(false);
   });
 });
 
@@ -138,5 +164,75 @@ describe('lastAtOrBefore', () => {
     expect(lastAtOrBefore([1, 3, 5], 3)).toBe(3);
     expect(lastAtOrBefore([1, 3, 5], 4.9)).toBe(3);
     expect(lastAtOrBefore([1, 3, 5], 0)).toBe(-Infinity);
+  });
+});
+
+describe('atBufferedEnd', () => {
+  const video = toRanges([[0, 40.04]]);
+  const audio = toRanges([
+    [0, 10],
+    [12, 40.08],
+  ]);
+
+  it('is true once the playhead is within the lead of the earliest last range end', () => {
+    expect(atBufferedEnd([video, audio], 39.8)).toBe(true); // lead 0.3
+    expect(atBufferedEnd([video, audio], 39.7)).toBe(false);
+    expect(atBufferedEnd([video, audio], 40.0, 0.05)).toBe(true);
+    expect(atBufferedEnd([video, audio], 39.95, 0.05)).toBe(false);
+    expect(atBufferedEnd([video, audio], 40.08, 0)).toBe(true);
+  });
+
+  it('is false with an empty SourceBuffer', () => {
+    expect(atBufferedEnd([video, toRanges([])], 40)).toBe(false);
+    expect(atBufferedEnd([], 40)).toBe(false);
+  });
+});
+
+describe('endOfStreamIn', () => {
+  const video = toRanges([[0, 40.008]]);
+  const audio = toRanges([[0, 40.084]]);
+
+  it('waits until EOS_AHEAD_S before the earliest last range end, at the playback rate', () => {
+    expect(endOfStreamIn([video, audio], 39.5, 1)).toBeCloseTo(0.408);
+    expect(endOfStreamIn([video, audio], 39.5, 2)).toBeCloseTo(0.204);
+    expect(endOfStreamIn([video, audio], 39.95, 1)).toBe(0);
+    expect(endOfStreamIn([video, audio], 40.05, 1)).toBe(0);
+  });
+
+  it('is null while the end is further than EOS_ARM_S away', () => {
+    expect(endOfStreamIn([video, audio], 39.3, 1)).toBeNull();
+    expect(endOfStreamIn([video, audio], 30, 1)).toBeNull();
+  });
+
+  it('is null without media or a forward rate', () => {
+    expect(endOfStreamIn([video, toRanges([])], 39.9, 1)).toBeNull();
+    expect(endOfStreamIn([], 39.9, 1)).toBeNull();
+    expect(endOfStreamIn([video, audio], 39.9, 0)).toBeNull();
+    expect(endOfStreamIn([video, audio], 39.9, -1)).toBeNull();
+  });
+});
+
+describe('endSnap', () => {
+  it('moves a target in the last moment back to its start', () => {
+    expect(endSnap(39.9, 40.08)).toBeCloseTo(39.83, 6);
+    expect(endSnap(40.03, 40.08)).toBeCloseTo(39.83, 6);
+    expect(endSnap(39.83, 40.08)).toBeNull(); // the snapped seek itself
+    expect(endSnap(39.8, 40.08)).toBeNull();
+  });
+
+  it('measures the last moment from where the video ends, when it ends first', () => {
+    expect(endSnap(39.8, 40.08, 40.0)).toBeCloseTo(39.75, 6);
+    expect(endSnap(39.7, 40.08, 40.0)).toBeNull();
+    // A video end past the duration doesn't move the edge.
+    expect(endSnap(39.8, 40.08, 41)).toBeNull();
+    expect(endSnap(39.9, 40.08, NaN)).toBeCloseTo(39.83, 6);
+  });
+
+  it('leaves a seek to the duration, past it, or with an unknown duration alone', () => {
+    expect(endSnap(40.08, 40.08)).toBeNull();
+    expect(endSnap(45, 40.08)).toBeNull();
+    expect(endSnap(39.9, NaN)).toBeNull();
+    expect(endSnap(39.9, Infinity)).toBeNull();
+    expect(endSnap(0.1, 0.2)).toBeNull();
   });
 });

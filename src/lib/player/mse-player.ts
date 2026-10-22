@@ -17,7 +17,11 @@ import {
 } from './append';
 import {
   aheadOf,
+  atBufferedEnd,
   BUFFER_AHEAD_S,
+  endSnap,
+  endOfStreamIn,
+  bufferedToEnd,
   gapJumpTarget,
   isBuffered,
   lastAtOrBefore,
@@ -74,6 +78,8 @@ export function mediaSourceClass(): { MS: typeof MediaSource; managed: boolean }
 class StalePipeline extends Error {}
 
 const SEEK_DEBOUNCE_MS = 150;
+/** The longest a seek waits for the element to end (`holdSeek`); the rest is at most `EOS_AHEAD_S`. */
+const HELD_SEEK_MAX_MS = 1000;
 
 /** e2e uses a few seconds so the 12 s fixture exercises back-pressure and seek restarts. */
 function bufferAheadSeconds(): number {
@@ -173,6 +179,7 @@ export class MsePlayer {
   private readonly pipelines: Pipeline[] = [];
   private destroyed = false;
   private seekTimer: ReturnType<typeof setTimeout> | undefined;
+  private eosTimer: ReturnType<typeof setTimeout> | undefined;
   private seekGen = 0;
   private readonly abort = new AbortController();
   private readonly bufferAhead = bufferAheadSeconds();
@@ -474,7 +481,10 @@ export class MsePlayer {
     if (this.destroyed) return;
     this.destroyed = true;
     clearTimeout(this.seekTimer);
+    clearTimeout(this.eosTimer);
+    clearTimeout(this.heldSeekTimer);
     this.abort.abort();
+    this.releaseSeeks?.();
     for (const p of this.pipelines) void this.stopPipeline(p);
     if (!this.input.disposed) this.input.dispose();
     // Leave the element alone if a newer player already attached its own MediaSource.
@@ -526,18 +536,108 @@ export class MsePlayer {
     }
   }
 
+  private releaseSeeks: (() => void) | null = null;
+  /** The element's own `currentTime` setter (`interceptSeeks`). */
+  private seekTo: (t: number) => void = (t) => void (this.video.currentTime = t);
+  /** `endOfStream()` went out and the element hasn't ended since (`holdSeek`). */
+  private ending = false;
+  /** A seek held until the element ends (`holdSeek`): its target, and whether to play on. */
+  private heldSeek: { t: number; play: boolean } | null = null;
+  private heldSeekTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Every `currentTime` write (ours, the app's, any script's) goes through `holdSeek` and
+   * `reopen` before the element queues the seek: WebKit decides what to re-enqueue when it runs
+   * the seek, so `seeking` is too late. An own accessor on this element over the prototype's;
+   * removed on `destroy` unless a newer player replaced it.
+   */
+  private interceptSeeks() {
+    const native = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+    if (!native?.get || !native.set) return;
+    const { get, set } = native;
+    const video = this.video;
+    this.seekTo = (t) => set.call(video, t);
+    const own: PropertyDescriptor = {
+      configurable: true,
+      enumerable: true,
+      get: () => get.call(video) as number,
+      set: (t: number) => {
+        if (this.holdSeek(t)) return;
+        this.reopen();
+        this.seekTo(t);
+      },
+    };
+    Object.defineProperty(video, 'currentTime', own);
+    this.releaseSeeks = () => {
+      if (Object.getOwnPropertyDescriptor(video, 'currentTime')?.set === own.set) {
+        delete (video as unknown as { currentTime?: number }).currentTime;
+      }
+    };
+  }
+
+  /**
+   * Holds a seek made after `endOfStream()` but before the element ended (at most `EOS_AHEAD_S`
+   * of media while playing) until `ended`. WebKit's GStreamer backend can't seek in that window:
+   * its decoder drained the EOS, so a seek errors ("No valid frames decoded before end of stream")
+   * or never completes, whether or not the MediaSource is reopened first. After `ended` seeks work.
+   * A paused element plays the rest to get there; a seek that was playing plays on. See CLAUDE.md.
+   */
+  private holdSeek(t: number): boolean {
+    const v = this.video;
+    if (this.destroyed || !this.ending || v.ended || this.mediaSource.readyState !== 'ended') {
+      return false;
+    }
+    const first = this.heldSeek === null;
+    this.heldSeek = { t, play: first ? !v.paused : this.heldSeek!.play };
+    if (first) {
+      if (v.paused) void v.play().catch(() => {});
+      this.heldSeekTimer = setTimeout(() => this.releaseSeek(), HELD_SEEK_MAX_MS);
+    }
+    return true;
+  }
+
+  /** Runs the held seek (`holdSeek`) once the element ended, or after `HELD_SEEK_MAX_MS`. */
+  private releaseSeek() {
+    clearTimeout(this.heldSeekTimer);
+    const held = this.heldSeek;
+    this.heldSeek = null;
+    if (!held || this.destroyed) return;
+    const v = this.video;
+    const toEnd = held.t >= v.duration - 0.001;
+    // Ended there already: a seek to the end has nothing left to do.
+    if (toEnd && v.ended) return;
+    this.reopen();
+    this.seekTo(held.t);
+    if (held.play && !toEnd) void v.play().catch(() => {});
+    else if (!held.play && !v.paused) v.pause();
+  }
+
   private listen() {
+    this.interceptSeeks();
     const { signal } = this.abort;
     this.video.addEventListener('seeking', () => this.onSeeking(), { signal });
     this.video.addEventListener(
       'waiting',
       () => {
+        this.maybeEndOfStream();
         this.jumpGap();
         this.recoverHole();
         this.checkTranscodeSpeed();
       },
       { signal },
     );
+    for (const ev of ['timeupdate', 'playing', 'ratechange'])
+      this.video.addEventListener(ev, () => this.armEndOfStream(), { signal });
+    this.video.addEventListener(
+      'ended',
+      () => {
+        this.ending = false;
+        this.releaseSeek();
+      },
+      { signal },
+    );
+    for (const ev of ['pause', 'seeking', 'waiting'])
+      this.video.addEventListener(ev, () => clearTimeout(this.eosTimer), { signal });
     this.video.addEventListener(
       'error',
       () => {
@@ -596,6 +696,7 @@ export class MsePlayer {
 
   /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
   private onSeeking() {
+    this.reopen();
     const t = this.video.currentTime;
     const initial = this.initialSeek;
     this.initialSeek = null;
@@ -609,11 +710,47 @@ export class MsePlayer {
         return;
       }
     }
-    if (this.pipelines.every((p) => isBuffered(p.sb.buffered, t))) return;
+    // (Not with a seek limit: it would clamp the snapped seek back, and so on.)
+    const snap = limit == null ? endSnap(t, this.video.duration, this.videoEnd()) : null;
+    if (snap !== null) {
+      // This fires `seeking` again, a moment before the end.
+      this.video.currentTime = snap;
+      return;
+    }
+    if (!this.seekNeedsRestart(t)) return void this.maybeEndOfStream();
     clearTimeout(this.seekTimer);
-    this.seekTimer = setTimeout(
-      () => void this.restartAt(this.video.currentTime),
-      SEEK_DEBOUNCE_MS,
+    this.seekTimer = setTimeout(() => {
+      // The appends this seek woke may have reached the end meanwhile (see `seekNeedsRestart`).
+      const now = this.video.currentTime;
+      if (!this.appendedToEnd(now)) void this.restartAt(now);
+      else this.maybeEndOfStream();
+    }, SEEK_DEBOUNCE_MS);
+  }
+
+  /** Where the video's last frame ends, once its pipeline appended through the end; else NaN. */
+  private videoEnd(): number {
+    const p = this.pipelines.find((x) => x.kind === 'video');
+    const n = p?.done ? p.sb.buffered.length : 0;
+    return n > 0 ? p!.sb.buffered.end(n - 1) : NaN;
+  }
+
+  /** Every pipeline appended through the end and holds the media from `t` on (`bufferedToEnd`). */
+  private appendedToEnd(t: number): boolean {
+    const end = this.mediaSource.duration;
+    return this.pipelines.every((p) => p.done && bufferedToEnd(p.sb.buffered, t, end));
+  }
+
+  /**
+   * False when every pipeline has media at `t`, or appended through the end of the file and `t` is
+   * at or past its last frame (a seek to `duration`, a long forward streak): nothing is left to
+   * append there, and the element ends on its own. A restart there removes and re-appends the tail
+   * after the element reached the end of an `ended` MediaSource, which WebKit's GStreamer backend
+   * refuses with a fatal "Failed to push buffer".
+   */
+  private seekNeedsRestart(t: number): boolean {
+    const end = this.mediaSource.duration;
+    return this.pipelines.some(
+      (p) => !isBuffered(p.sb.buffered, t) && !(p.done && bufferedToEnd(p.sb.buffered, t, end)),
     );
   }
 
@@ -961,11 +1098,73 @@ export class MsePlayer {
     };
   }
 
-  private maybeEndOfStream() {
-    if (this.destroyed || !this.pipelines.every((p) => p.done)) return;
-    if (this.mediaSource.readyState !== 'open') return;
-    if (this.pipelines.some((p) => p.sb.updating)) return;
+  /**
+   * Ends the MediaSource once every pipeline appended through the end and the playhead reached the
+   * end of the buffered media (within `lead`): a stall there (`waiting`) or a seek there. While
+   * playing, `armEndOfStream` ends it a moment before instead. Not as soon as the appends are done:
+   * WebKit's GStreamer backend then drains the EOS through its decoder before the end, and any seek
+   * made after that fails ("No valid frames decoded before end of stream") or freezes. See CLAUDE.md.
+   */
+  private maybeEndOfStream(lead?: number) {
+    if (!this.canEndStream()) return;
+    const ranges = this.pipelines.map((p) => p.sb.buffered);
+    if (!atBufferedEnd(ranges, this.video.currentTime, lead)) return;
+    this.endStream();
+  }
+
+  private endStream() {
     this.mediaSource.endOfStream();
+    this.ending = true;
+  }
+
+  /**
+   * Reopens an ended MediaSource (a `remove()` of nothing past its end does that): a seek after
+   * `endOfStream()` then plays on like one before it, and the stream ends again at the end.
+   */
+  private reopen() {
+    if (this.destroyed || this.mediaSource.readyState !== 'ended') return;
+    const sb = this.pipelines[0]?.sb;
+    if (!sb || sb.updating) return;
+    try {
+      sb.remove(this.mediaSource.duration, Infinity);
+    } catch (err) {
+      console.warn('reopen failed', err);
+      return;
+    }
+    this.ending = false;
+    sb.addEventListener(
+      'updateend',
+      () => {
+        this.maybeEndOfStream();
+        this.armEndOfStream();
+      },
+      { once: true },
+    );
+  }
+
+  private canEndStream(): boolean {
+    return (
+      !this.destroyed &&
+      this.pipelines.every((p) => p.done && !p.sb.updating) &&
+      this.mediaSource.readyState === 'open'
+    );
+  }
+
+  /**
+   * While playing into the end of the buffered media with every append done: `endOfStream()`
+   * `EOS_AHEAD_S` before it (`endOfStreamIn`), on a timer re-checked when it fires, so the element
+   * plays into an ended MediaSource rather than stalling at the end first (see `EOS_AHEAD_S`).
+   * Called on `timeupdate`, `playing` and `ratechange`; a pause, a seek or a stall cancels it.
+   */
+  private armEndOfStream() {
+    clearTimeout(this.eosTimer);
+    if (!this.canEndStream() || this.video.paused || this.video.seeking) return;
+    const v = this.video;
+    const ranges = this.pipelines.map((p) => p.sb.buffered);
+    const wait = endOfStreamIn(ranges, v.currentTime, v.playbackRate);
+    if (wait === null) return;
+    if (wait === 0) return void this.endStream();
+    this.eosTimer = setTimeout(() => this.armEndOfStream(), wait * 1000);
   }
 }
 

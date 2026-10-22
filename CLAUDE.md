@@ -34,7 +34,7 @@ pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
-                    #   Projects: chromium runs every spec; firefox + webkit run smoke.spec.ts only
+                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -319,6 +319,37 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
   playhead are skipped (`gapJumpTarget`), because the browser waits on any gap forever.
+- **The end of the media (WebKit/GStreamer, `e2e/seek-end.spec.ts` on Chromium + WebKit).** GStreamer
+  (Playwright WebKit; iPad Safari uses AVFoundation, unverified) fails seeks near an EOS, so:
+  - A seek at or past the last frame never restarts (`MsePlayer.seekNeedsRestart`, `bufferedToEnd`):
+    a pipeline that appended through the end (`done`), its last range reaching the duration, has
+    nothing left to append. A restart (remove + re-append the last GOP into an `ended`
+    MediaSource) is fatal there ("Failed to push buffer"). The debounced restart re-checks: the
+    seek wakes the appends, and they can reach the end within `SEEK_DEBOUNCE_MS`.
+  - `endOfStream()` waits for the playhead: appends done and, while playing, `EOS_AHEAD_S` (0.1 s)
+    before the end of the buffered media, on a timer armed by `timeupdate` (`armEndOfStream`,
+    `endOfStreamIn`); else at a stall or a seek there (`maybeEndOfStream`, `atBufferedEnd`).
+    Called as soon as the appends were done, GStreamer drained the EOS through its decoder in the
+    last ~0.3 s, and any seek after that failed ("No valid frames decoded before end of stream") or
+    froze. Called only at the stall, GStreamer resumes its paused pipeline asynchronously; a short
+    tail (audio past the last video frame) can end the element first, and WebKit then replays from 0
+    (`mediaPlayerPlaybackStateChanged` → `playInternal` on an ended element; ~1 run in 12).
+  - A seek into the last `END_SNAP_S` (0.25 s, counted from where the video ends if that is
+    earlier), short of `duration`, goes back to its start (`endSnap`): GStreamer drops every frame
+    of a segment past the last frame's start, then errors at the EOS. A seek to `duration` (or
+    past it) stays and just ends the video.
+  - Our controls (keys, double-tap, centre ±5 s, seek bar) go through `seekVideo`, which skips a
+    seek to the end while the video is there already (`endSeekRedundant`: ended, last moment,
+    seeking there). A script setting `currentTime` to the end again and again can still hit it.
+  - Between `endOfStream()` and `ended` (≤ `EOS_AHEAD_S` of media while playing) GStreamer can't
+    seek at all: its decoder drained the EOS, so any seek errors ("No valid frames decoded before
+    end of stream") or never completes, reopened MediaSource or not. `MsePlayer` puts an own
+    `currentTime` accessor on the element (`interceptSeeks`; every write, ours or a script's, passes
+    it before the element queues the seek, and `seeking` comes too late). It holds a seek made in
+    that window until `ended` (`holdSeek`; a paused element plays the rest to get there, at most
+    `HELD_SEEK_MAX_MS`), then runs it and plays on if it was playing (`releaseSeek`). Any other
+    seek on an ended MediaSource reopens it first (`reopen`: `remove()` of nothing past the end);
+    the stream ends again at the end.
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

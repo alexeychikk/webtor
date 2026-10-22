@@ -52,6 +52,107 @@ export function isBuffered(ranges: Ranges, t: number): boolean {
   return bufferedAhead(ranges, t) > GAP_TOLERANCE_S;
 }
 
+/** A SourceBuffer's last frame may end this far before the element's duration (audio vs video). */
+export const END_SLACK_S = 0.5;
+
+/**
+ * True if `ranges` holds the media from `t` to the end at `end` (the element's duration): `t` lies in
+ * the last range, at its very end or past it, and that range reaches the end. Whether a seek there
+ * needs a restart, when the pipeline already appended through the end of the file (`isBuffered`
+ * reads false in the last `GAP_TOLERANCE_S` of the media).
+ */
+export function bufferedToEnd(
+  ranges: Ranges,
+  t: number,
+  end: number,
+  slack = END_SLACK_S,
+): boolean {
+  const n = ranges.length;
+  if (n === 0 || !Number.isFinite(end)) return false;
+  return ranges.end(n - 1) >= end - slack && t >= ranges.start(n - 1) - GAP_TOLERANCE_S;
+}
+
+/** How close (s) to the end of the media a seek target goes back a little (`endSnap`). */
+export const END_SNAP_S = 0.25;
+
+/**
+ * Where a seek to `t` goes instead when it lies in the last `margin` before the end of the media
+ * but before `duration` (`end − margin`: the last moment plays, then the video ends), else null.
+ * The end of the media is `mediaEnd` (where the last video frame ends, once known) or `duration`,
+ * whichever is first. WebKit's GStreamer backend fails a seek past the last video frame's start
+ * on an ended MediaSource: it drops every frame as before the new segment, then errors at the EOS
+ * ("No valid frames decoded before end of stream"). A seek to `duration` (or past it) just ends
+ * the video, so it stays.
+ */
+export function endSnap(
+  t: number,
+  duration: number,
+  mediaEnd = duration,
+  margin = END_SNAP_S,
+): number | null {
+  if (!Number.isFinite(duration)) return null;
+  const end = Math.min(duration, Number.isFinite(mediaEnd) ? mediaEnd : duration);
+  const edge = end - margin;
+  return edge > 0 && t > edge + 0.001 && t < duration - 0.001 ? edge : null;
+}
+
+/**
+ * How close (s) the playhead must be to the end of the buffered media before a MediaSource whose
+ * appends are all done gets `endOfStream()` on a stall or a seek there (`atBufferedEnd`).
+ */
+export const EOS_LEAD_S = GAP_TOLERANCE_S;
+
+/**
+ * While playing, `endOfStream()` comes this much media (s) before the end of the buffered media
+ * (`endOfStreamIn`), so the element never stalls there first. Ended on that stall, WebKit's
+ * GStreamer backend resumes its pipeline asynchronously; a short tail (e.g. 76 ms of audio past the
+ * last video frame) can end the element before the pipeline reports "playing", and WebKit then
+ * replays from 0 (`mediaPlayerPlaybackStateChanged` → `playInternal` on an ended element).
+ * Not earlier: a seek after the EOS reached GStreamer's decoder fails (see CLAUDE.md).
+ */
+export const EOS_AHEAD_S = 0.1;
+
+/** Within this much media (s) of the end, `timeupdate` (~250 ms apart) arms the end-of-stream timer. */
+export const EOS_ARM_S = 0.6;
+
+/** The end of what every SourceBuffer holds (the earliest of their last range ends); NaN if one is empty. */
+function commonEnd(all: readonly Ranges[]): number {
+  let end = Infinity;
+  for (const r of all) {
+    if (r.length === 0) return NaN;
+    end = Math.min(end, r.end(r.length - 1));
+  }
+  return Number.isFinite(end) ? end : NaN;
+}
+
+/**
+ * True once `t` is within `lead` of the end of what every SourceBuffer holds (the earliest of their
+ * last range ends): playback can't go further, so the MediaSource may end now.
+ */
+export function atBufferedEnd(all: readonly Ranges[], t: number, lead = EOS_LEAD_S): boolean {
+  const end = commonEnd(all);
+  return Number.isFinite(end) && t >= end - lead;
+}
+
+/**
+ * Wall-clock seconds until `endOfStream()` while playing at `rate` from `t`: 0 once within `ahead`
+ * of the end of the buffered media (`commonEnd`), null while it is further than `arm` away (or
+ * nothing is buffered, or the rate isn't forwards).
+ */
+export function endOfStreamIn(
+  all: readonly Ranges[],
+  t: number,
+  rate: number,
+  ahead = EOS_AHEAD_S,
+  arm = EOS_ARM_S,
+): number | null {
+  const end = commonEnd(all);
+  if (!Number.isFinite(end) || !(rate > 0)) return null;
+  const left = end - t;
+  if (left > arm) return null;
+  return Math.max(0, (left - ahead) / rate);
+}
+
 /** The range to `remove()` to drop media far behind the playhead, or null if there is none. */
 export function evictionRange(
   ranges: Ranges,

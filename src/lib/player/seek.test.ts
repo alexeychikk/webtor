@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { downloadedRanges, pointerFraction, sameRanges, timeFractions } from './seek';
+import {
+  downloadedRanges,
+  endSeekRedundant,
+  pointerFraction,
+  sameRanges,
+  timeFractions,
+} from './seek';
 
 const bits = (...have: number[]) => ({ get: (i: number) => have.includes(i) });
 const ranges = (...r: [number, number][]) => ({
@@ -66,5 +72,22 @@ describe('helpers', () => {
     expect(pointerFraction(50, 100, 200)).toBe(0);
     expect(pointerFraction(400, 100, 200)).toBe(1);
     expect(pointerFraction(10, 0, 0)).toBe(0);
+  });
+});
+
+describe('endSeekRedundant', () => {
+  it('skips a seek to the end once the video is there', () => {
+    expect(endSeekRedundant(40.08, 40.08, 40.08, true)).toBe(true); // ended
+    expect(endSeekRedundant(39.9, 40.08, 40.08, false)).toBe(true); // last moment
+    expect(endSeekRedundant(40.08, 40.08, 40.08, false)).toBe(true); // seeking there
+    expect(endSeekRedundant(39.85, 39.9, 40.08, false)).toBe(true);
+  });
+
+  it('lets every other seek through', () => {
+    expect(endSeekRedundant(37.5, 40.08, 40.08, false)).toBe(false);
+    expect(endSeekRedundant(40.08, 35.08, 40.08, true)).toBe(false);
+    expect(endSeekRedundant(39.9, 34.9, 40.08, false)).toBe(false);
+    expect(endSeekRedundant(10, 40.08, NaN, false)).toBe(false);
+    expect(endSeekRedundant(10, 40.08, Infinity, false)).toBe(false);
   });
 });

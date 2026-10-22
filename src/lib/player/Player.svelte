@@ -52,6 +52,7 @@
   import type { PlayerController, Phase } from './controller.svelte';
   import PlayerControls from './PlayerControls.svelte';
   import { repeats, seekTarget, shortcutFor, volumeTarget, type ShortcutAction } from './shortcuts';
+  import { seekVideo } from './seek';
   import StatsPanel from './StatsPanel.svelte';
   import SubtitleMenu from '../subtitles/SubtitleMenu.svelte';
   import FileList from '../torrent/FileList.svelte';
@@ -479,7 +480,7 @@
 
   function seekBy(by: number) {
     const v = video;
-    if (v) v.currentTime = seekTarget(v.currentTime, by, v.duration);
+    if (v) seekVideo(v, seekTarget(v.currentTime, by, v.duration));
   }
 
   /** A mouse click on the picture plays/pauses; a tap only toggles the controls (pointerdown). */
@@ -569,7 +570,7 @@
         togglePlay();
         break;
       case 'seek':
-        v.currentTime = seekTarget(v.currentTime, action.by, v.duration);
+        seekVideo(v, seekTarget(v.currentTime, action.by, v.duration));
         break;
       case 'volume':
         v.volume = volumeTarget(v.muted ? 0 : v.volume, action.by);
