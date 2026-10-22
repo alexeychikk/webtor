@@ -620,7 +620,7 @@ export class MsePlayer {
     // (Not with a seek limit: it would clamp the snapped seek back, and so on.)
     const snap = limit == null ? endSnap(t, this.video.duration, this.videoEnd()) : null;
     if (snap !== null) {
-      // This fires `seeking` again, at the end.
+      // This fires `seeking` again, a moment before the end.
       this.video.currentTime = snap;
       return;
     }

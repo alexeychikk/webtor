@@ -72,16 +72,17 @@ export function bufferedToEnd(
   return ranges.end(n - 1) >= end - slack && t >= ranges.start(n - 1) - GAP_TOLERANCE_S;
 }
 
-/** A seek target this close (s) to the end of the media goes to the end itself (`endSnap`). */
+/** How close (s) to the end of the media a seek target goes back a little (`endSnap`). */
 export const END_SNAP_S = 0.25;
 
 /**
- * `duration` when `t` lies in the last `margin` before the end of the media (but isn't at
- * `duration` already), else null. The end of the media is `mediaEnd` (where the last video frame
- * ends, once known) or `duration`, whichever is first. WebKit's GStreamer backend fails a seek
- * there, past the last video frame's start but before the duration, on an ended MediaSource:
- * it drops every frame as outside the new segment, then errors at the EOS ("No valid frames decoded
- * before end of stream"). A seek to exactly `duration` just ends the video.
+ * Where a seek to `t` goes instead when it lies in the last `margin` before the end of the media
+ * but before `duration` (`end − margin`: the last moment plays, then the video ends), else null.
+ * The end of the media is `mediaEnd` (where the last video frame ends, once known) or `duration`,
+ * whichever is first. WebKit's GStreamer backend fails a seek past the last video frame's start
+ * on an ended MediaSource: it drops every frame as before the new segment, then errors at the EOS
+ * ("No valid frames decoded before end of stream"). A seek to `duration` (or past it) just ends
+ * the video, so it stays.
  */
 export function endSnap(
   t: number,
@@ -91,7 +92,8 @@ export function endSnap(
 ): number | null {
   if (!Number.isFinite(duration)) return null;
   const end = Math.min(duration, Number.isFinite(mediaEnd) ? mediaEnd : duration);
-  return t > end - margin && t < duration - 0.001 ? duration : null;
+  const edge = end - margin;
+  return edge > 0 && t > edge + 0.001 && t < duration - 0.001 ? edge : null;
 }
 
 /**

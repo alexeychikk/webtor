@@ -332,8 +332,9 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     decoder in the last ~0.3 s, and any seek after that failed ("No valid frames decoded before end
     of stream") or froze.
   - A seek into the last `END_SNAP_S` (0.25 s, counted from where the video ends if that is
-    earlier) goes to `duration` (`endSnap`): GStreamer drops every frame of such a segment as
-    before its start, then errors at the EOS. A seek to exactly `duration` just ends the video.
+    earlier), short of `duration`, goes back to its start (`endSnap`): GStreamer drops every frame
+    of a segment past the last frame's start, then errors at the EOS. A seek to `duration` (or
+    past it) stays and just ends the video.
   - Our controls (keys, double-tap, centre ±5 s, seek bar) go through `seekVideo`, which skips a
     seek to the end while the video is there already (`endSeekRedundant`: ended, last moment,
     seeking there). A script setting `currentTime` to the end again and again can still hit it.

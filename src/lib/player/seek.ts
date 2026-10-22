@@ -75,7 +75,12 @@ export function endSeekRedundant(
   return target >= edge && (ended || current >= edge);
 }
 
-/** Seeks `video` to `t` for our controls (seek bar, keys, double-tap), unless `endSeekRedundant`. */
-export function seekVideo(video: HTMLVideoElement, t: number): void {
-  if (!endSeekRedundant(video.currentTime, t, video.duration, video.ended)) video.currentTime = t;
+/**
+ * Seeks `video` to `t` for our controls (seek bar, keys, double-tap), unless `endSeekRedundant`.
+ * False when it skipped the seek (no `seeked` follows).
+ */
+export function seekVideo(video: HTMLVideoElement, t: number): boolean {
+  if (endSeekRedundant(video.currentTime, t, video.duration, video.ended)) return false;
+  video.currentTime = t;
+  return true;
 }

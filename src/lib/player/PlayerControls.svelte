@@ -82,8 +82,7 @@
   const pct = (f: number) => `${f * 100}%`;
 
   function seekTo(t: number) {
-    scrubbing = t;
-    if (video) seekVideo(video, t);
+    scrubbing = video && seekVideo(video, t) ? t : null;
   }
 
   function onSeekInput(event: Event) {

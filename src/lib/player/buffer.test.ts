@@ -188,18 +188,19 @@ describe('atBufferedEnd', () => {
 });
 
 describe('endSnap', () => {
-  it('sends a target in the last moment to the duration', () => {
-    expect(endSnap(39.9, 40.08)).toBe(40.08);
-    expect(endSnap(40.03, 40.08)).toBe(40.08);
+  it('moves a target in the last moment back to its start', () => {
+    expect(endSnap(39.9, 40.08)).toBeCloseTo(39.83, 6);
+    expect(endSnap(40.03, 40.08)).toBeCloseTo(39.83, 6);
+    expect(endSnap(39.83, 40.08)).toBeNull(); // the snapped seek itself
     expect(endSnap(39.8, 40.08)).toBeNull();
   });
 
   it('measures the last moment from where the video ends, when it ends first', () => {
-    expect(endSnap(39.8, 40.08, 40.0)).toBe(40.08);
+    expect(endSnap(39.8, 40.08, 40.0)).toBeCloseTo(39.75, 6);
     expect(endSnap(39.7, 40.08, 40.0)).toBeNull();
     // A video end past the duration doesn't move the edge.
     expect(endSnap(39.8, 40.08, 41)).toBeNull();
-    expect(endSnap(39.9, 40.08, NaN)).toBe(40.08);
+    expect(endSnap(39.9, 40.08, NaN)).toBeCloseTo(39.83, 6);
   });
 
   it('leaves a seek to the duration, past it, or with an unknown duration alone', () => {
@@ -207,5 +208,6 @@ describe('endSnap', () => {
     expect(endSnap(45, 40.08)).toBeNull();
     expect(endSnap(39.9, NaN)).toBeNull();
     expect(endSnap(39.9, Infinity)).toBeNull();
+    expect(endSnap(0.1, 0.2)).toBeNull();
   });
 });
