@@ -17,7 +17,7 @@ async function setRange(page: Page, testId: string, value: number) {
 }
 
 let jitter = 0;
-/** Moves the pointer over the player, which shows the (auto-hiding) control layer for 1 s. */
+/** Moves the pointer over the player, which shows the (auto-hiding) control layer (5 s; 1 s in fullscreen). */
 async function wake(page: Page) {
   const box = (await page.getByTestId('screen').boundingBox())!;
   jitter = (jitter + 1) % 20;
@@ -260,10 +260,12 @@ test('every icon button has an aria-label and our tooltip (with its key), never 
   await expect(muteTip).toHaveCount(0);
 });
 
-test('while playing, the controls and cursor hide 1 s after the pointer rests or leaves, in fullscreen too', async ({
+test('while playing, the controls and cursor hide 5 s after the pointer rests (1 s in fullscreen) or when it leaves', async ({
   page,
 }) => {
   await playSample(page);
+  // The 12 s sample would end (and show the controls) during the waits.
+  await video(page).evaluate((v: HTMLVideoElement) => (v.loop = true));
   const bar = page.getByTestId('controls');
   const title = page.getByTestId('title');
   const screen = page.getByTestId('screen');
@@ -274,7 +276,9 @@ test('while playing, the controls and cursor hide 1 s after the pointer rests or
   await wake(page);
   await expect(bar).toBeVisible();
   await expect(title).toBeVisible();
-  await page.waitForTimeout(1_200);
+  await page.waitForTimeout(3_500);
+  await expect(bar).toBeVisible();
+  await page.waitForTimeout(2_000);
   await expect(bar).toBeHidden();
   await expect(title).toBeHidden();
   await expect(screen).toHaveClass(/idle/);
@@ -293,7 +297,7 @@ test('while playing, the controls and cursor hide 1 s after the pointer rests or
   // Focus doesn't keep them: a focused control hides with the rest.
   await page.getByTestId('mute').focus();
   await wake(page);
-  await page.waitForTimeout(1_200);
+  await page.waitForTimeout(5_500);
   await expect(bar).toBeHidden();
 
   // Fullscreen: the same, and nothing but the picture stays drawn.
@@ -315,6 +319,13 @@ test('while playing, the controls and cursor hide 1 s after the pointer rests or
   // A key press shows it again.
   await page.keyboard.press('Shift');
   await expect(bar).toBeVisible();
+  // Leaving fullscreen (no input) gives the running timer the windowed delay.
+  await page.evaluate(() => document.exitFullscreen());
+  await expect.poll(() => fullscreenTestId(page)).toBeNull();
+  await page.waitForTimeout(2_000);
+  await expect(bar).toBeVisible();
+  await page.keyboard.press('f');
+  await expect.poll(() => fullscreenTestId(page)).toBe('screen');
 
   // Kept while the pointer is over the bar, and while paused.
   const box = (await bar.boundingBox())!;
@@ -335,11 +346,15 @@ test.describe('touch', () => {
     page,
   }) => {
     await playSample(page);
+    await video(page).evaluate((v: HTMLVideoElement) => (v.loop = true));
     const bar = page.getByTestId('controls');
     const centre = page.getByTestId('centre');
-    await expect(bar).toBeHidden({ timeout: 3_000 });
+    await expect(bar).toBeHidden({ timeout: 6_000 });
+    // The middle third, above the centre row (a tap on a side may be half of a double-tap).
+    const box = (await video(page).boundingBox())!;
+    const MIDDLE = { x: box.width / 2, y: box.height * 0.3 };
 
-    await video(page).tap({ position: PICTURE });
+    await video(page).tap({ position: MIDDLE });
     await expect(bar).toBeVisible();
     // Touch: play/pause sits in the centre, between the ±5 s buttons, not in the bar.
     await expect(centre).toHaveAttribute('data-state', 'pause');
@@ -348,23 +363,27 @@ test.describe('touch', () => {
     await expect(page.getByTestId('play-pause')).toHaveCount(0);
     expect(await prop(page, 'paused')).toBe(false);
 
-    await video(page).tap({ position: PICTURE });
+    await page.waitForTimeout(600); // Not a double-tap (that is fullscreen in the middle).
+    await video(page).tap({ position: MIDDLE });
     await expect(bar).toBeHidden();
     await expect(centre).toHaveAttribute('data-state', 'none');
     expect(await prop(page, 'paused')).toBe(false);
 
-    // Forward and back 5 s, then they hide by themselves 3 s after the last touch.
-    await video(page).tap({ position: PICTURE });
+    // Forward and back 5 s, then they hide by themselves 5 s after the last touch (windowed).
+    await page.waitForTimeout(600); // Not a double-tap (that is fullscreen in the middle).
+    await video(page).tap({ position: MIDDLE });
     const before = await prop(page, 'currentTime');
     await page.getByTestId('seek-forward').tap();
     await expect.poll(() => prop(page, 'currentTime')).toBeGreaterThan(before + 4);
     const ahead = await prop(page, 'currentTime');
     await page.getByTestId('seek-back').tap();
+    const tapped = Date.now();
     await expect.poll(() => prop(page, 'currentTime')).toBeLessThan(ahead - 3);
-    await page.waitForTimeout(1_500);
+    await page.waitForTimeout(3_500 - (Date.now() - tapped));
     await expect(bar).toBeVisible();
     await expect(bar).toBeHidden({ timeout: 3_000 });
     expect(await prop(page, 'paused')).toBe(false);
+    expect(await fullscreenTestId(page)).toBeNull();
   });
 });
 

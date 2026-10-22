@@ -23,8 +23,8 @@ only the link input, the relay and help remain.
   where an icon can't carry the meaning: state and error messages, track and file names, menu rows
   in the phone sheet, dialogs.
 - **Our control layer on every platform**, iOS included. It overlays the picture in windowed and in
-  fullscreen mode and hides with the cursor 1 s after the pointer stops while playing (sooner when
-  the pointer leaves). It stays while paused, loading, a menu is open or the pointer is on a control.
+  fullscreen mode and hides with the cursor after the last activity while playing: 5 s windowed,
+  1 s in fullscreen (3 s after a touch), at once when the pointer leaves (`auto-hide.ts`). It stays while paused, loading, a menu is open or the pointer is on a control.
   Fullscreen keeps the ADR 0004 split: the player container where it can go fullscreen (the ASS
   canvas stays over the picture), `webkitEnterFullscreen` on the bare `<video>` on iPhone (native
   fullscreen UI, text subtitles), no fullscreen button where neither exists.
@@ -43,4 +43,5 @@ only the link input, the relay and help remain.
 - One look for Chrome, Firefox and WebKit, but we own keyboard, focus and touch behaviour that
   native controls gave us for free. Volume can't be set from script on iOS, so phones show mute only.
 - Firefox can't move native text cues (`::-webkit-media-text-track-container`), so while the
-  control bar shows it can cover the lowest subtitle line there. It hides after 1 s of playback.
+  control bar shows it can cover the lowest subtitle line there. It hides after 5 s of playback
+  (1 s in fullscreen).
