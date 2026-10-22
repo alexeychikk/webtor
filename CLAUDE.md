@@ -341,6 +341,15 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   - Our controls (keys, double-tap, centre ±5 s, seek bar) go through `seekVideo`, which skips a
     seek to the end while the video is there already (`endSeekRedundant`: ended, last moment,
     seeking there). A script setting `currentTime` to the end again and again can still hit it.
+  - Between `endOfStream()` and `ended` (≤ `EOS_AHEAD_S` of media while playing) GStreamer can't
+    seek at all: its decoder drained the EOS, so any seek errors ("No valid frames decoded before
+    end of stream") or never completes, reopened MediaSource or not. `MsePlayer` puts an own
+    `currentTime` accessor on the element (`interceptSeeks`; every write, ours or a script's, passes
+    it before the element queues the seek, and `seeking` comes too late). It holds a seek made in
+    that window until `ended` (`holdSeek`; a paused element plays the rest to get there, at most
+    `HELD_SEEK_MAX_MS`), then runs it and plays on if it was playing (`releaseSeek`). Any other
+    seek on an ended MediaSource reopens it first (`reopen`: `remove()` of nothing past the end);
+    the stream ends again at the end.
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

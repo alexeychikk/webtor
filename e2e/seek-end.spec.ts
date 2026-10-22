@@ -158,3 +158,68 @@ test('plays through the end and stays ended (no replay from 0)', async ({ page }
   await expect(page.getByTestId('centre')).toHaveAttribute('data-state', 'replay');
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
+
+/**
+ * Plays from 37 s and waits (rAF) for the player's `endOfStream()` call, a moment before the end,
+ * with the element not ended yet. Needs `hookEndOfStream` first.
+ */
+async function afterEndOfStream(page: Page) {
+  await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = 37));
+  await video(page).evaluate(
+    (v: HTMLVideoElement) =>
+      new Promise<void>((resolve, reject) => {
+        const w = window as unknown as { __eos: number };
+        const tick = () => {
+          if (v.ended) reject(new Error('ended before endOfStream() was seen'));
+          else if (w.__eos > 0) resolve();
+          else requestAnimationFrame(tick);
+        };
+        tick();
+      }),
+  );
+}
+
+/** Counts `MediaSource.endOfStream()` calls in `window.__eos`. */
+async function hookEndOfStream(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __eos: number };
+    w.__eos = 0;
+    const end = MediaSource.prototype.endOfStream;
+    MediaSource.prototype.endOfStream = function (this: MediaSource, ...args: []) {
+      w.__eos++;
+      return end.apply(this, args);
+    };
+  });
+}
+
+// WebKit's GStreamer backend could not seek between `endOfStream()` and `ended`: a fatal "No valid
+// frames decoded before end of stream", or a seek that never completed. The player holds such a
+// seek until the element ends, then runs it.
+test.describe('a seek after endOfStream(), before ended', () => {
+  test.beforeEach(async ({ page }) => {
+    await hookEndOfStream(page);
+    await open(page);
+    await afterEndOfStream(page);
+  });
+
+  test('back to 30 s plays on from there', async ({ page }) => {
+    // The same task as the poll: no time for the element to end in between.
+    expect(
+      await video(page).evaluate((v: HTMLVideoElement) => {
+        const ended = v.ended;
+        v.currentTime = 30;
+        return ended;
+      }),
+    ).toBe(false);
+    await expect.poll(() => prop(page, 'currentTime'), { timeout: 10_000 }).toBeLessThan(36);
+    await expect.poll(() => prop(page, 'currentTime'), { timeout: 10_000 }).toBeGreaterThan(31);
+    expect(await prop(page, 'paused')).toBe(false);
+    await expect.poll(() => prop(page, 'ended'), { timeout: 20_000 }).toBe(true);
+    await expectEnded(page);
+  });
+
+  test('to duration ends the video', async ({ page }) => {
+    await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = v.duration));
+    await expectEnded(page);
+  });
+});
