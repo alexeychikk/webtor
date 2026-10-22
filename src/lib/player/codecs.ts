@@ -128,6 +128,55 @@ export const TRANSCODE_AUDIO = {
   bitrate: 128_000,
 } as const;
 
+/** An encoder setup for the silence after an audio track that ends before the video. */
+export interface SilencePlan {
+  codec: TranscodeTarget['codec'];
+  numberOfChannels: number;
+  sampleRate: number;
+  /** Load `@mediabunny/aac-encoder` first. */
+  wasmEncoder: boolean;
+  /** `changeType` the SourceBuffer to this first; absent when it keeps the codec it has. */
+  mime?: string;
+}
+
+/**
+ * Ways to encode silence that the SourceBuffer of an audio track takes, best first (`MsePlayer`
+ * tries each until the browser can encode one, `canEncodeAudio`): the codec the SourceBuffer
+ * holds, with the track's own layout (the transcode's for a transcode), so no `changeType` is
+ * needed; else, where `changeType` exists, the transcode target. Only Opus and AAC-LC can be
+ * encoded; another copied codec (MP3, FLAC, HE-AAC…) needs the `changeType`.
+ */
+export function silencePlans(
+  decision: AudioDecision,
+  track: { codec: string | null; codecString: string | null; channels: number; sampleRate: number },
+  encoder: TranscodeTarget | null,
+  canChangeType: boolean,
+): SilencePlan[] {
+  const plans: SilencePlan[] = [];
+  const { numberOfChannels, sampleRate } = TRANSCODE_AUDIO;
+  if (decision.playback === 'transcode') {
+    const { codec, wasmEncoder } = decision.target;
+    return [{ codec, numberOfChannels, sampleRate, wasmEncoder }];
+  }
+  if (decision.playback !== 'copy') return plans;
+  const own = { numberOfChannels: track.channels, sampleRate: track.sampleRate };
+  if (track.codec === 'opus') plans.push({ codec: 'opus', ...own, wasmEncoder: false });
+  if (track.codec === 'aac' && track.codecString?.toLowerCase() === 'mp4a.40.2') {
+    plans.push({ codec: 'aac', ...own, wasmEncoder: false });
+    plans.push({ codec: 'aac', ...own, wasmEncoder: true });
+  }
+  if (canChangeType && encoder) {
+    plans.push({
+      codec: encoder.codec,
+      numberOfChannels,
+      sampleRate,
+      wasmEncoder: encoder.wasmEncoder,
+      mime: audioMime(encoder.codecString),
+    });
+  }
+  return plans;
+}
+
 const CODEC_LABELS: Record<string, string> = {
   aac: 'AAC',
   opus: 'Opus',

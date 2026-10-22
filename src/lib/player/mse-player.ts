@@ -22,14 +22,17 @@ import {
   endSnap,
   endOfStreamIn,
   bufferedToEnd,
+  END_SLACK_S,
+  endedBefore,
   gapJumpTarget,
   isBuffered,
   lastAtOrBefore,
   quotaEvictionRanges,
+  trackStart,
   type Ranges,
 } from './buffer';
 import { preferredAudioLanguage } from './audio-preference';
-import { loadCodecExtensions } from './codec-extensions';
+import { loadCodecExtensions, loadEncoder } from './codec-extensions';
 import {
   decideAudio,
   decideVideo,
@@ -37,8 +40,12 @@ import {
   pickTranscodeTarget,
   TRANSCODE_AUDIO,
   type AudioDecision,
+  silencePlans,
+  type SilencePlan,
+  type TranscodeTarget,
 } from './codecs';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
+import { AAC_FRAME_SAMPLES, silentAacFrame } from './silence';
 import {
   MAX_REMOTE_RESUMES,
   REMOTE_KEYFRAME_INTERVAL_S,
@@ -78,6 +85,8 @@ export function mediaSourceClass(): { MS: typeof MediaSource; managed: boolean }
 class StalePipeline extends Error {}
 
 const SEEK_DEBOUNCE_MS = 150;
+/** Bit rate of the silence after an audio track that ends before the video (`fillSilence`). */
+const SILENCE_BITRATE = 64_000;
 /** The longest a seek waits for the element to end (`holdSeek`); the rest is at most `EOS_AHEAD_S`. */
 const HELD_SEEK_MAX_MS = 1000;
 
@@ -119,6 +128,11 @@ interface Pipeline {
   gen: number;
   conversion: Conversion | null;
   done: boolean;
+  /**
+   * Element time where the track's media ends, NaN until known: from the packet lookup of a restart
+   * past it (`startOf`), or where the SourceBuffer's media ends once a run appended through the end.
+   */
+  end: number;
   /**
    * Element time of the newest fragment the current conversion produced (Mediabunny's `onMoof`,
    * which fires before the fragment reaches `append`); -Infinity before the first one.
@@ -194,6 +208,8 @@ export class MsePlayer {
    * there, so it needs no restart.
    */
   private initialSeek: number | null = null;
+  /** The audio encoder the browser has (Opus or AAC), for transcoding and `fillSilence`. */
+  private encoder: TranscodeTarget | null = null;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -382,6 +398,7 @@ export class MsePlayer {
         remote,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
+      player.encoder = target;
       if (resumeAt !== null) {
         // Before any media: the element keeps it as its start position and seeks there once the
         // init segments are in (one `seeking`, see `onSeeking`).
@@ -400,7 +417,9 @@ export class MsePlayer {
           throw new PlaybackError('unsupported-video-codec', String(err));
         }
         player.listen();
-        for (const p of player.pipelines) await player.startPipeline(p, k, p.gen);
+        for (const p of player.pipelines) {
+          await player.startPipeline(p, await player.startOf(p, k), p.gen);
+        }
         return player;
       } catch (err) {
         player.destroy();
@@ -449,7 +468,7 @@ export class MsePlayer {
       throw new PlaybackError('audio-convert-failed', String(err));
     });
     if (sg !== this.switchGen || this.destroyed) return;
-    const prev = { trackId: p.trackId, decision: p.decision, mime: p.mime };
+    const prev = { trackId: p.trackId, decision: p.decision, mime: p.mime, end: p.end };
     const restart = async () => {
       const g = ++p.gen;
       const c = p.conversion;
@@ -462,9 +481,11 @@ export class MsePlayer {
       const t = this.video.currentTime;
       const { buffered } = p.sb;
       const keptUntil = buffered.length ? buffered.end(buffered.length - 1) : -Infinity;
-      await this.startPipeline(p, toSourceTime(this.timeline, t), g, keptUntil);
+      const k = await this.startOf(p, toSourceTime(this.timeline, t));
+      if (g !== p.gen || this.destroyed) return;
+      await this.startPipeline(p, k, g, keptUntil);
     };
-    Object.assign(p, { trackId: id, decision, mime: decision.mime });
+    Object.assign(p, { trackId: id, decision, mime: decision.mime, end: NaN });
     try {
       await restart();
     } catch (err) {
@@ -523,6 +544,7 @@ export class MsePlayer {
       gen: 0,
       conversion: null,
       done: false,
+      end: NaN,
       writtenTo: -Infinity,
       replaceUntil: -Infinity,
       quota: newQuotaState(),
@@ -734,10 +756,24 @@ export class MsePlayer {
     return n > 0 ? p!.sb.buffered.end(n - 1) : NaN;
   }
 
-  /** Every pipeline appended through the end and holds the media from `t` on (`bufferedToEnd`). */
+  /**
+   * Every pipeline appended through the end and holds the media from `t` on (`bufferedToEnd`), or
+   * its track ended before `t` (`trackEndedBefore`).
+   */
   private appendedToEnd(t: number): boolean {
     const end = this.mediaSource.duration;
-    return this.pipelines.every((p) => p.done && bufferedToEnd(p.sb.buffered, t, end));
+    return this.pipelines.every(
+      (p) => p.done && (bufferedToEnd(p.sb.buffered, t, end) || this.trackEndedBefore(p, t)),
+    );
+  }
+
+  /**
+   * `p` appended through the end of its track, which ends before `t` (audio ending before the
+   * video, `t` in the audio-less tail), and still holds its last media: once the MediaSource
+   * ends, MSE stretches that to the end of the media and the other tracks play on.
+   */
+  private trackEndedBefore(p: Pipeline, t: number): boolean {
+    return p.done && endedBefore(p.sb.buffered, t, p.end);
   }
 
   /**
@@ -745,13 +781,46 @@ export class MsePlayer {
    * at or past its last frame (a seek to `duration`, a long forward streak): nothing is left to
    * append there, and the element ends on its own. A restart there removes and re-appends the tail
    * after the element reached the end of an `ended` MediaSource, which WebKit's GStreamer backend
-   * refuses with a fatal "Failed to push buffer".
+   * refuses with a fatal "Failed to push buffer". Same for a track that ended before `t`
+   * (`trackEndedBefore`): the stream ends (`maybeEndOfStream`) and the other tracks play on.
    */
   private seekNeedsRestart(t: number): boolean {
     const end = this.mediaSource.duration;
     return this.pipelines.some(
-      (p) => !isBuffered(p.sb.buffered, t) && !(p.done && bufferedToEnd(p.sb.buffered, t, end)),
+      (p) =>
+        !isBuffered(p.sb.buffered, t) &&
+        !(p.done && bufferedToEnd(p.sb.buffered, t, end)) &&
+        !this.trackEndedBefore(p, t),
     );
+  }
+
+  /**
+   * Source time `p` (re)starts at for a (re)start at `k`: `k`, unless `p`'s track has no packet at
+   * or after it (audio ending before the video, `k` in the audio-less tail). Then a conversion
+   * trimmed to `k` would output nothing the browser accepts, and an empty SourceBuffer leaves the
+   * element nothing to play: `p` appends its track's last media instead (`trackStart`), then
+   * silence up to the end (`fillSilence`), so the other tracks play on. Notes where the track ends
+   * in `p.end`.
+   */
+  private async startOf(p: Pipeline, k: number): Promise<number> {
+    if (p.kind !== 'audio') return k;
+    try {
+      const track = (await this.input.getAudioTracks()).find((x) => x.id === p.trackId);
+      if (!track) return k;
+      const sink = new this.mb.EncodedPacketSink(track);
+      const packet = await sink.getPacket(k, { metadataOnly: true });
+      const next = packet && (await sink.getNextPacket(packet, { metadataOnly: true }));
+      const { start, end } = trackStart(
+        k,
+        packet && { timestamp: packet.timestamp, duration: packet.duration, last: !next },
+        this.timeline.startTime,
+      );
+      if (end !== null) p.end = appendOffset(this.timeline, end);
+      return start;
+    } catch (err) {
+      console.warn('audio packet lookup failed', err);
+      return k;
+    }
   }
 
   /** `t` is element time; the keyframe lookup and trim work in source time. */
@@ -774,9 +843,10 @@ export class MsePlayer {
         : restartPoint(this.timeline, key?.timestamp);
       await Promise.all(
         stopped.map(async ({ p, g, cancel }) => {
+          const start = await this.startOf(p, k);
           await cancel;
           await this.resetBuffer(p);
-          if (g === p.gen && !this.destroyed) await this.startPipeline(p, k, g);
+          if (g === p.gen && !this.destroyed) await this.startPipeline(p, start, g);
         }),
       );
     } catch (err) {
@@ -862,6 +932,13 @@ export class MsePlayer {
     conversion.execute().then(
       () => {
         if (gen !== p.gen) return;
+        const { buffered } = p.sb;
+        if (Number.isNaN(p.end) && p.writtenTo > -Infinity && buffered.length > 0) {
+          p.end = buffered.end(buffered.length - 1);
+        }
+        if (p.kind === 'audio' && p.end < this.duration - END_SLACK_S) {
+          return void this.fillSilence(p, gen);
+        }
         p.done = true;
         this.maybeEndOfStream();
       },
@@ -871,6 +948,126 @@ export class MsePlayer {
         this.fail(err);
       },
     );
+  }
+
+  /**
+   * `p`'s track ended at `p.end`, short of the end of the media (audio shorter than the video):
+   * appends encoded silence from there to the end, so every SourceBuffer covers the tail. WebKit
+   * (GStreamer) can't seek where one SourceBuffer has no samples, even after `endOfStream()`
+   * stretched its ranges. Copied AAC-LC gets silent frames under its own config (silence.ts);
+   * else the silence is encoded like the track where possible (`silencePlans`). Without an
+   * encoder, or when it fails, the pipeline ends at its track's end (`trackEndedBefore`): the
+   * stream ends and MSE stretches the track's last range, which Chromium plays.
+   */
+  private async fillSilence(p: Pipeline, gen: number) {
+    const { mb } = this;
+    const stale = () => gen !== p.gen || this.destroyed;
+    const from = p.end;
+    let output: import('mediabunny').Output | null = null;
+    try {
+      const track = (await this.input.getAudioTracks()).find((t) => t.id === p.trackId);
+      const config = p.decision?.playback === 'copy' ? await track?.getDecoderConfig() : null;
+      const desc = config?.description;
+      const frame = silentAacFrame(
+        desc &&
+          (ArrayBuffer.isView(desc)
+            ? new Uint8Array(desc.buffer, desc.byteOffset, desc.byteLength)
+            : new Uint8Array(desc)),
+      );
+      const plan = frame ? null : await this.silencePlan(p);
+      if (stale()) return;
+      if (!frame && !plan) throw new Error('no encoder for it');
+      if (!(await startAt(p.sb, from, stale, plan?.mime))) return;
+      // A restart compares `sbMime` with `mime` and switches the SourceBuffer back.
+      if (plan?.mime !== undefined) p.sbMime = plan.mime;
+      p.writtenTo = -Infinity;
+      output = new mb.Output({
+        format: new mb.Mp4OutputFormat({
+          fastStart: 'fragmented',
+          minimumFragmentDuration: 1,
+          onMoof: (_data, _pos, timestamp) => {
+            if (gen === p.gen) p.writtenTo = from + timestamp;
+          },
+        }),
+        target: new mb.AppendOnlyStreamTarget(
+          new WritableStream<Uint8Array>({ write: (data) => this.append(p, gen, data) }),
+        ),
+      });
+      const total = this.duration - from;
+      let source: import('mediabunny').AudioSource;
+      if (frame && config) {
+        // Copied AAC-LC: silent frames under the track's own config (silence.ts).
+        const packets = new mb.EncodedAudioPacketSource('aac');
+        source = packets;
+        output.addAudioTrack(packets);
+        await output.start();
+        const step = AAC_FRAME_SAMPLES / config.sampleRate;
+        for (let i = 0; i * step < total; i += 1) {
+          if (stale()) return void output.cancel().catch(() => {});
+          const packet = new mb.EncodedPacket(frame, 'key', i * step, step);
+          await packets.add(packet, i === 0 ? { decoderConfig: config } : undefined);
+        }
+      } else {
+        const { codec, numberOfChannels, sampleRate } = plan!;
+        const samples = new mb.AudioSampleSource({ codec, bitrate: SILENCE_BITRATE });
+        source = samples;
+        output.addAudioTrack(samples);
+        await output.start();
+        const zeros = new Float32Array(sampleRate * numberOfChannels);
+        for (let t = 0; t < total; t += 1) {
+          if (stale()) return void output.cancel().catch(() => {});
+          const frames = Math.ceil(Math.min(1, total - t) * sampleRate);
+          const sample = new mb.AudioSample({
+            data: zeros.subarray(0, frames * numberOfChannels),
+            format: 'f32-planar',
+            numberOfChannels,
+            sampleRate,
+            timestamp: t,
+          });
+          try {
+            await samples.add(sample);
+          } finally {
+            sample.close();
+          }
+        }
+      }
+      source.close();
+      await output.finalize();
+      if (stale()) return;
+      // The SourceBuffer now runs to the end like any other track's.
+      p.end = NaN;
+    } catch (err) {
+      void output?.cancel().catch(() => {});
+      if (stale()) return;
+      console.warn('silence after the end of the audio track failed', err);
+    }
+    if (stale()) return;
+    p.done = true;
+    this.maybeEndOfStream();
+  }
+
+  /** The first of `silencePlans` the browser can encode, its encoder loaded; null if none. */
+  private async silencePlan(p: Pipeline): Promise<SilencePlan | null> {
+    const info = this.audioTracks.find((t) => t.id === p.trackId);
+    const track = (await this.input.getAudioTracks()).find((t) => t.id === p.trackId);
+    if (!info || !track || !p.decision) return null;
+    const plans = silencePlans(
+      p.decision,
+      { ...info, sampleRate: await track.getSampleRate() },
+      this.encoder,
+      typeof p.sb.changeType === 'function',
+    );
+    for (const plan of plans) {
+      const { codec, numberOfChannels, sampleRate, wasmEncoder } = plan;
+      try {
+        if (wasmEncoder) await loadEncoder({ codec, codecString: 'mp4a.40.2', wasmEncoder });
+        const config = { numberOfChannels, sampleRate, bitrate: SILENCE_BITRATE };
+        if (await this.mb.canEncodeAudio(codec, config)) return plan;
+      } catch (err) {
+        console.warn('audio encoder unavailable for the silence', err);
+      }
+    }
+    return null;
   }
 
   /** Starts the relay's conversion at source time `k` and pumps it into `p`'s SourceBuffer. */
@@ -1037,6 +1234,9 @@ export class MsePlayer {
         verifyKeyPackets: true,
       });
       k = restartPoint(this.timeline, key?.timestamp);
+    } else if ((await this.startOf(q, k)) !== k) {
+      // Its track ends before `until`: nothing there to trim.
+      return false;
     }
     if (stale()) return false;
     // A long GOP would cut into what is playing now.
@@ -1051,9 +1251,14 @@ export class MsePlayer {
     return true;
   }
 
-  /** Seconds of `p`'s media ahead of the playhead, for back-pressure (see `replaceUntil`). */
+  /**
+   * Seconds of `p`'s media ahead of the playhead, for back-pressure (see `replaceUntil`). 0 once
+   * another track ended before the playhead (`trackEndedBefore`): the element plays on only once the
+   * MediaSource ended, so `p` must append through the end, however long the tail.
+   */
   private appendedAhead(p: Pipeline): number {
     const t = this.video.currentTime;
+    if (this.pipelines.some((q) => q !== p && this.trackEndedBefore(q, t))) return 0;
     return p.writtenTo < p.replaceUntil ? p.writtenTo - t : aheadOf(p.sb.buffered, t);
   }
 
