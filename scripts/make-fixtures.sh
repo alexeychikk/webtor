@@ -130,4 +130,17 @@ srt 'Русский' > "$tmp/ru.srt"
   -disposition:a:0 default \
   resume/movie.mkv
 ln -sfn ../sample.mkv resume/extra.mkv
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv
+# short-audio.mkv: 12 s 320x180 H.264 whose two audio tracks ("English AAC", copied; "Russian AC3",
+# transcoded) end at 6 s, for seeks into the audio-less tail (e2e/seek-tail.spec.ts).
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i testsrc2=size=320x180:rate=24:duration=12 \
+  -f lavfi -i sine=frequency=440:duration=6 \
+  -f lavfi -i sine=frequency=660:duration=6 \
+  -map 0:v -map 1:a -map 2:a \
+  -c:v libx264 -preset veryfast -g 24 -pix_fmt yuv420p -b:v 100k \
+  -c:a:0 aac -b:a:0 48k -c:a:1 ac3 -b:a:1 96k -ac:a:1 2 \
+  -metadata:s:a:0 language=eng -metadata:s:a:0 title="English AAC" \
+  -metadata:s:a:1 language=rus -metadata:s:a:1 title="Russian AC3" \
+  -disposition:a:0 default \
+  short-audio.mkv
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv

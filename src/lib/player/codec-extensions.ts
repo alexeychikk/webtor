@@ -2,7 +2,7 @@
  * Lazy-loaded Mediabunny codec extensions (each is ~1–2 MB of wasm): imported and registered the
  * first time a track needs them, never up front (docs/decisions/0003).
  */
-import type { AudioDecision } from './codecs';
+import type { AudioDecision, TranscodeTarget } from './codecs';
 
 const loaded = new Map<string, Promise<void>>();
 
@@ -26,12 +26,14 @@ export async function loadCodecExtensions(decision: AudioDecision): Promise<void
   } else if (decision.decoder === 'dts') {
     jobs.push(once('dts', async () => (await import('@mediabunny/dts')).registerDtsDecoder()));
   }
-  if (decision.target.wasmEncoder) {
-    jobs.push(
-      once('aac-encoder', async () =>
-        (await import('@mediabunny/aac-encoder')).registerAacEncoder(),
-      ),
-    );
-  }
+  jobs.push(loadEncoder(decision.target));
   await Promise.all(jobs);
+}
+
+/** Registers the encoder `target` needs (the wasm AAC encoder), if any. */
+export function loadEncoder(target: TranscodeTarget): Promise<void> {
+  if (!target.wasmEncoder) return Promise.resolve();
+  return once('aac-encoder', async () =>
+    (await import('@mediabunny/aac-encoder')).registerAacEncoder(),
+  );
 }

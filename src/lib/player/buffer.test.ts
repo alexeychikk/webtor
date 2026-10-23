@@ -6,6 +6,7 @@ import {
   bufferedAhead,
   bufferedToEnd,
   endSnap,
+  endedBefore,
   evictionRange,
   gapJumpTarget,
   isBuffered,
@@ -14,6 +15,7 @@ import {
   quotaEvictionRanges,
   toRanges,
   totalBuffered,
+  trackStart,
 } from './buffer';
 
 describe('bufferedAhead', () => {
@@ -70,6 +72,58 @@ describe('bufferedToEnd', () => {
     expect(bufferedToEnd(toRanges([[0, 30]]), 40, 40.08)).toBe(false);
     expect(bufferedToEnd(toRanges([]), 40, 40.08)).toBe(false);
     expect(bufferedToEnd(r, 40, NaN)).toBe(false);
+  });
+});
+
+describe('endedBefore', () => {
+  // Audio ending at 6 s of a 12 s video.
+  const audio = toRanges([[0, 6.01]]);
+
+  it('is true past the track end while its SourceBuffer still holds its last media', () => {
+    expect(endedBefore(audio, 9, 6.01)).toBe(true);
+    expect(endedBefore(audio, 6, 6.01)).toBe(true);
+    expect(endedBefore(toRanges([[5, 6]]), 11.9, 6.01)).toBe(true);
+  });
+
+  it('is false before the end, without its last media, or with the end unknown', () => {
+    expect(endedBefore(audio, 3, 6.01)).toBe(false);
+    expect(endedBefore(toRanges([[0, 4]]), 9, 6.01)).toBe(false);
+    expect(endedBefore(toRanges([]), 9, 6.01)).toBe(false);
+    expect(endedBefore(audio, 9, NaN)).toBe(false);
+  });
+});
+
+describe('trackStart', () => {
+  it('starts at k while the track has a packet at or after it', () => {
+    expect(trackStart(8, { timestamp: 7.99, duration: 0.023, last: false })).toEqual({
+      start: 8,
+      end: null,
+    });
+    expect(trackStart(0, null)).toEqual({ start: 0, end: null });
+    // The last packet starts exactly at k: it is part of the conversion.
+    expect(trackStart(8, { timestamp: 8, duration: 0.5, last: true })).toEqual({
+      start: 8,
+      end: 8.5,
+    });
+  });
+
+  it('starts a track that ended before k a second before its end', () => {
+    expect(trackStart(8, { timestamp: 5.98, duration: 0.023, last: true })).toEqual({
+      start: 5.003,
+      end: 6.003,
+    });
+    // Ends inside k's packet: no packet starts at or after k.
+    expect(trackStart(8, { timestamp: 7.99, duration: 0.032, last: true }).start).toBeCloseTo(
+      7.022,
+    );
+  });
+
+  it('never starts before the floor, and keeps a long last packet whole', () => {
+    expect(trackStart(8, { timestamp: 0.3, duration: 0.2, last: true }, 0.1)).toEqual({
+      start: 0.1,
+      end: 0.5,
+    });
+    expect(trackStart(8, { timestamp: 4, duration: 2, last: true })).toEqual({ start: 4, end: 6 });
   });
 });
 

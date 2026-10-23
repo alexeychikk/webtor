@@ -34,7 +34,7 @@ pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
-                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end
+                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -306,6 +306,7 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   in the browser), `avi-h264-noidx.avi` (the same without `idx1`: the scan path), `avi-xvid-mp3.avi`
   and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay). Synthetic RIFFs (OpenDML, AVIX, `rec `,
   truncation) are built in `src/lib/player/avi/index.test.ts`.
+- `short-audio.mkv`: 12 s 320×180 H.264 whose audio tracks ("English AAC", "Russian AC3") end at 6 s.
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the
@@ -350,6 +351,17 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     `HELD_SEEK_MAX_MS`), then runs it and plays on if it was playing (`releaseSeek`). Any other
     seek on an ended MediaSource reopens it first (`reopen`: `remove()` of nothing past the end);
     the stream ends again at the end.
+  - **A track that ends early** (audio shorter than the video; `e2e/seek-tail.spec.ts`,
+    `short-audio.mkv`). A conversion trimmed past its track's last packet outputs media the browser
+    rejects, which emptied the element: a (re)start past it begins 1 s before the track's end
+    (`startOf`, `trackStart`; `Pipeline.end`). After the track's last media the pipeline appends
+    silence up to the duration (`fillSilence`), because GStreamer can't seek where one
+    SourceBuffer has no samples, even after `endOfStream()` stretched its ranges. Copied AAC-LC gets
+    silent frames under its own decoder config (`silence.ts`): another init segment (e.g. from
+    an encoder) is a caps change that hangs a paused seek there. Other codecs are encoded
+    (`silencePlans`: the same codec and layout, else `changeType` to the transcode target).
+    Without either, the pipeline just ends (`trackEndedBefore`): MSE stretches its last range
+    once the stream ends, which Chromium plays.
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

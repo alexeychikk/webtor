@@ -72,6 +72,54 @@ export function bufferedToEnd(
   return ranges.end(n - 1) >= end - slack && t >= ranges.start(n - 1) - GAP_TOLERANCE_S;
 }
 
+/**
+ * True if a track whose media ends at `trackEnd` (element time) has nothing left from `t` on, and
+ * `ranges` (its SourceBuffer, all appends done) still holds its last media: e.g. audio that ends
+ * before the video, with `t` in the audio-less tail. Such a SourceBuffer needs no restart there:
+ * once the MediaSource ends, MSE stretches every SourceBuffer's last range to the end of the media,
+ * and the other tracks play on (see `ENDED_TRACK_TAIL_S`).
+ */
+export function endedBefore(ranges: Ranges, t: number, trackEnd: number): boolean {
+  const n = ranges.length;
+  if (n === 0 || !Number.isFinite(trackEnd)) return false;
+  return t >= trackEnd - GAP_TOLERANCE_S && ranges.end(n - 1) >= trackEnd - GAP_TOLERANCE_S;
+}
+
+/**
+ * A restart past the end of a track (audio ending before the video) appends this much of its last
+ * media (s) instead of nothing: an empty SourceBuffer would leave the element nothing to play even
+ * once the MediaSource ends (nothing to stretch), and a conversion trimmed past the track's end
+ * fails (the browser rejects its output and empties the element).
+ */
+export const ENDED_TRACK_TAIL_S = 1;
+
+/** The last packet of a track at or before a restart point (`trackStart`), source time. */
+export interface LastPacket {
+  timestamp: number;
+  duration: number;
+  /** Whether the track has another packet after this one. */
+  last: boolean;
+}
+
+/**
+ * Where a track's pipeline restarts (source time) for a restart at `k`, and where its media ends
+ * when its last packet is the one at or before `k` (else null). `packet` is that packet (null: none,
+ * `k` is before the track's first one). When no packet starts at or after `k`, a conversion trimmed
+ * to `k` would have nothing to output: the track restarts `ENDED_TRACK_TAIL_S` before its end
+ * instead, not before `floor` (the element timeline's start).
+ */
+export function trackStart(
+  k: number,
+  packet: LastPacket | null,
+  floor = 0,
+  tail = ENDED_TRACK_TAIL_S,
+): { start: number; end: number | null } {
+  if (!packet?.last) return { start: k, end: null };
+  const end = packet.timestamp + Math.max(0, packet.duration);
+  if (packet.timestamp >= k) return { start: k, end };
+  return { start: Math.max(floor, Math.min(packet.timestamp, end - tail)), end };
+}
+
 /** How close (s) to the end of the media a seek target goes back a little (`endSnap`). */
 export const END_SNAP_S = 0.25;
 

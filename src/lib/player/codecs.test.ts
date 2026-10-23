@@ -7,6 +7,7 @@ import {
   pickAudioTrack,
   pickLoadableAudioTrack,
   pickTranscodeTarget,
+  silencePlans,
   type TranscodeTarget,
 } from './codecs';
 import type { AudioTrackInfo } from './types';
@@ -156,6 +157,53 @@ describe('decideAudio', () => {
       reason: "this browser can't convert audio",
     });
     expect(decideAudio(src('aac', 'mp4a.40.2'), chromiumLinux, null).playback).toBe('copy');
+  });
+});
+
+describe('silencePlans', () => {
+  const opus: TranscodeTarget = { codec: 'opus', codecString: 'opus', wasmEncoder: false };
+  const track = (codec: string, codecString: string) => ({
+    codec,
+    codecString,
+    channels: 1,
+    sampleRate: 44_100,
+  });
+  const copy = (codecString: string) =>
+    ({ playback: 'copy', mime: `audio/mp4; codecs="${codecString}"`, outputCodec: 'x' }) as const;
+
+  it('encodes a transcode like the transcode', () => {
+    const decision = {
+      playback: 'transcode',
+      mime: 'audio/mp4; codecs="opus"',
+      outputCodec: 'opus',
+      decoder: 'ac3',
+      target: opus,
+    } as const;
+    expect(silencePlans(decision, track('ac3', 'ac-3'), opus, true)).toEqual([
+      { codec: 'opus', numberOfChannels: 2, sampleRate: 48_000, wasmEncoder: false },
+    ]);
+  });
+
+  it('keeps a copied Opus or AAC-LC track in its codec and layout, else switches the codec', () => {
+    const own = { numberOfChannels: 1, sampleRate: 44_100 };
+    expect(silencePlans(copy('mp4a.40.2'), track('aac', 'mp4a.40.2'), opus, true)).toEqual([
+      { codec: 'aac', ...own, wasmEncoder: false },
+      { codec: 'aac', ...own, wasmEncoder: true },
+      {
+        codec: 'opus',
+        numberOfChannels: 2,
+        sampleRate: 48_000,
+        wasmEncoder: false,
+        mime: 'audio/mp4; codecs="opus"',
+      },
+    ]);
+    expect(silencePlans(copy('opus'), track('opus', 'opus'), null, false)).toEqual([
+      { codec: 'opus', ...own, wasmEncoder: false },
+    ]);
+    // MP3 can't be encoded: only a codec switch, where the browser has `changeType`.
+    expect(silencePlans(copy('mp4a.6b'), track('mp3', 'mp3'), opus, false)).toEqual([]);
+    expect(silencePlans(copy('mp4a.6b'), track('mp3', 'mp3'), opus, true)).toHaveLength(1);
+    expect(silencePlans(copy('mp4a.40.5'), track('aac', 'mp4a.40.5'), null, true)).toEqual([]);
   });
 });
 
