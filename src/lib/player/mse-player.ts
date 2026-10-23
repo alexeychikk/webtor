@@ -6,6 +6,7 @@
 import type { Conversion, Input, InputVideoTrack } from 'mediabunny';
 import {
   appendChunk,
+  initSegmentLength,
   MIN_AHEAD_S,
   newQuotaState,
   resetFrom,
@@ -87,6 +88,10 @@ class StalePipeline extends Error {}
 const SEEK_DEBOUNCE_MS = 150;
 /** Bit rate of the silence after an audio track that ends before the video (`fillSilence`). */
 const SILENCE_BITRATE = 64_000;
+/** A seek with its target buffered in every SourceBuffer is stuck after this long (`onStuckSeek`). */
+const STUCK_SEEK_MS = 4000;
+/** The longest the other pipelines wait for the video's first media (`startGate`). */
+const START_GATE_MAX_MS = 5000;
 /** The longest a seek waits for the element to end (`holdSeek`); the rest is at most `EOS_AHEAD_S`. */
 const HELD_SEEK_MAX_MS = 1000;
 
@@ -184,6 +189,12 @@ export interface MsePlayerOptions {
    * unknown); null = from the start. Not asked for an AVI without an index (seeks can't reach far).
    */
   startAt?(duration: number): number | null;
+  /**
+   * A seek has not completed `STUCK_SEEK_MS` after every SourceBuffer held its target (WebKit's
+   * GStreamer backend can lose one, CLAUDE.md "The start"): the element never recovers, so the
+   * owner opens the file again at `t` in a new MsePlayer. Asked at most once per player.
+   */
+  onStuckSeek?(t: number): void;
 }
 
 export class MsePlayer {
@@ -194,6 +205,8 @@ export class MsePlayer {
   private destroyed = false;
   private seekTimer: ReturnType<typeof setTimeout> | undefined;
   private eosTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Runs `checkStuckSeek` while the element is seeking; null once `onStuckSeek` was asked. */
+  private stuckSeekTimer: ReturnType<typeof setTimeout> | undefined | null;
   private seekGen = 0;
   private readonly abort = new AbortController();
   private readonly bufferAhead = bufferAheadSeconds();
@@ -210,6 +223,14 @@ export class MsePlayer {
   private initialSeek: number | null = null;
   /** The audio encoder the browser has (Opus or AAC), for transcoding and `fillSilence`. */
   private encoder: TranscodeTarget | null = null;
+  /**
+   * Holds the other pipelines' media (not their init segments) until the video's first media is in
+   * and the gap in front of it, if any, is being jumped (`openStartGate`). WebKit places a B-frame
+   * video ~2 frames late while the audio starts at 0, and its GStreamer backend prerolls as soon as
+   * media at the playhead is enqueued: a gap-jump seek during that preroll could fail the element or
+   * block its main thread (CLAUDE.md "The start"). Null once open, or with one pipeline.
+   */
+  private startGate: { promise: Promise<void>; open: () => void } | null = null;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -417,6 +438,7 @@ export class MsePlayer {
           throw new PlaybackError('unsupported-video-codec', String(err));
         }
         player.listen();
+        if (player.pipelines.length > 1) player.closeStartGate();
         for (const p of player.pipelines) {
           await player.startPipeline(p, await player.startOf(p, k), p.gen);
         }
@@ -501,8 +523,10 @@ export class MsePlayer {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.startGate?.open();
     clearTimeout(this.seekTimer);
     clearTimeout(this.eosTimer);
+    this.disarmStuckSeek();
     clearTimeout(this.heldSeekTimer);
     this.abort.abort();
     this.releaseSeeks?.();
@@ -638,6 +662,8 @@ export class MsePlayer {
     this.interceptSeeks();
     const { signal } = this.abort;
     this.video.addEventListener('seeking', () => this.onSeeking(), { signal });
+    this.video.addEventListener('seeking', () => this.armStuckSeek(), { signal });
+    this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
     this.video.addEventListener(
       'waiting',
       () => {
@@ -676,6 +702,63 @@ export class MsePlayer {
     this.opts.onError(
       err instanceof PlaybackError ? err : new PlaybackError('playback-failed', String(err)),
     );
+  }
+
+  private armStuckSeek() {
+    if (this.stuckSeekTimer === null || !this.opts.onStuckSeek) return;
+    clearTimeout(this.stuckSeekTimer);
+    this.stuckSeekTimer = setTimeout(() => this.checkStuckSeek(), STUCK_SEEK_MS);
+  }
+
+  private disarmStuckSeek() {
+    if (this.stuckSeekTimer !== null) clearTimeout(this.stuckSeekTimer);
+  }
+
+  /**
+   * Still seeking `STUCK_SEEK_MS` later: stuck if every SourceBuffer holds the target (the
+   * element's own `buffered` can read empty while WebKit seeks), else the data is still on its way,
+   * so look again later. A seek held for the end (`holdSeek`) waits for `ended` instead.
+   */
+  private checkStuckSeek() {
+    const v = this.video;
+    if (this.destroyed || !v.seeking) return;
+    const t = v.currentTime;
+    if (this.heldSeek || !this.pipelines.every((p) => isBuffered(p.sb.buffered, t))) {
+      return this.armStuckSeek();
+    }
+    this.stuckSeekTimer = null;
+    this.opts.onStuckSeek?.(t);
+  }
+
+  private closeStartGate() {
+    let open = () => {};
+    const promise = new Promise<void>((resolve) => (open = resolve));
+    const timer = setTimeout(() => this.startGate?.open(), START_GATE_MAX_MS);
+    this.startGate = {
+      promise,
+      open: () => {
+        clearTimeout(timer);
+        this.startGate = null;
+        open();
+      },
+    };
+  }
+
+  /**
+   * The video's first media is in: jump the gap in front of it, if any, while nothing else is
+   * buffered, then let the other pipelines append (`startGate`). The gate opens once the element
+   * started the seek (`seeking`), so the seek reaches the backend before any other media does.
+   */
+  private openStartGate(video: Pipeline) {
+    const gate = this.startGate;
+    if (!gate || video.sb.buffered.length === 0) return;
+    const target = gapJumpTarget(video.sb.buffered, this.video.currentTime);
+    if (target === null || this.video.seeking) return gate.open();
+    this.video.addEventListener('seeking', () => gate.open(), { once: true });
+    // Only the video holds the target yet: without this, `onSeeking` would restart every pipeline
+    // during the very preroll the gate protects.
+    this.initialSeek = target;
+    this.video.currentTime = target;
   }
 
   /** Moves a playhead stuck just before buffered media (see `gapJumpTarget`). */
@@ -1171,7 +1254,18 @@ export class MsePlayer {
       },
       relieve: () => this.relieve(p, () => gen !== p.gen),
     };
+    if (this.startGate && p.kind !== 'video') {
+      // The init segment may go in (the element needs every one for its metadata), media waits.
+      const init = initSegmentLength(data);
+      if (init > 0) {
+        await appendChunk(p.sb, data.subarray(0, init) as Uint8Array<ArrayBuffer>, host, p.quota);
+        data = data.subarray(init);
+      }
+      await this.startGate?.promise;
+      host.check();
+    }
     await appendChunk(p.sb, data as Uint8Array<ArrayBuffer>, host, p.quota);
+    if (p.kind === 'video') this.openStartGate(p);
     this.jumpGap();
   }
 

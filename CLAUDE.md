@@ -34,7 +34,7 @@ pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
-                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail
+                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail + start-stress
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -362,6 +362,18 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     (`silencePlans`: the same codec and layout, else `changeType` to the transcode target).
     Without either, the pipeline just ends (`trackEndedBefore`): MSE stretches its last range
     once the stream ends, which Chromium plays.
+- **The start (WebKit/GStreamer, `e2e/start-stress.spec.ts`).** WebKit places a B-frame H.264
+  video's fMP4 (Mediabunny writes trun v1 with negative composition offsets) ~2 frames (0.084 s)
+  after its `timestampOffset`; Chromium places it at 0. The audio starts at 0, so the start needs a
+  gap-jump seek, and made during GStreamer's preroll, ~1 open in 25 never got `seeked` (re-seeking,
+  nudging, pause/play don't help), errored, or blocked the page's main thread. So the other
+  pipelines append only their init segments until the video's first media is in and the jump is
+  issued (`startGate`, ≤ 5 s), and a seek still pending `STUCK_SEEK_MS` after every SourceBuffer
+  holds its target makes the controller open the file again at that time in a new MsePlayer
+  (`onStuckSeek` → `reopenFile`, once per opened file). Removing the shift instead (re-append the
+  video earlier) makes the video end before the audio, and GStreamer then fails a seek to
+  `duration` ("No valid frames decoded before end of stream"); `endSnap` would have to cover that.
+  Stress check: `STRESS_OPENS=120 pnpm exec playwright test --project=webkit start-stress`.
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

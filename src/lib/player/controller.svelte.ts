@@ -254,7 +254,12 @@ export class PlayerController {
   }
 
   /** Opens file `index` of `torrent` in a new MsePlayer, with its sidecar subtitles. */
-  private async openFile(run: number, torrent: Torrent, index: number): Promise<void> {
+  private async openFile(
+    run: number,
+    torrent: Torrent,
+    index: number,
+    reopen?: { at: number | null; play: boolean },
+  ): Promise<void> {
     const video = this.video!;
     const file = torrent.files[index]!;
     this.fileIndex = index;
@@ -291,7 +296,10 @@ export class PlayerController {
           }
         },
         restoreAudio: (tracks) => matchAudioTrack(tracks, stored?.audio),
-        startAt: (duration) => resumePoint(stored?.position, duration),
+        startAt: (duration) => (reopen ? reopen.at : resumePoint(stored?.position, duration)),
+        onStuckSeek: (t) => {
+          if (run === this.run && !reopen) void this.reopenFile(t);
+        },
       });
     } catch (err) {
       if (run === this.run) {
@@ -305,10 +313,11 @@ export class PlayerController {
     this.audioTracks = player.audioTracks;
     this.audioTrackId = player.audioTrackId;
     this.audioCodec = player.audioCodec;
-    this.resumedAt = player.resumedAt;
+    this.resumedAt = reopen ? null : player.resumedAt;
     this.phase = 'buffering';
     this.watchVideo(video);
     void this.listEmbeddedSubtitles(run, source, video, player.startTime);
+    if (reopen && !reopen.play) return this.updatePhase();
     video.play().catch((err: unknown) => {
       // Autoplay blocked (no user gesture, e.g. #magnet= on page load): wait for the play button.
       if (run === this.run && (err as Error)?.name === 'NotAllowedError') this.updatePhase();
@@ -355,6 +364,23 @@ export class PlayerController {
       { headers, fonts: () => (fonts ??= readFontAttachments(source, header)) },
     );
     this.subtitles.listingDone();
+  }
+
+  /**
+   * A seek got stuck in the browser (`onStuckSeek`, WebKit): the same file again in a new
+   * MsePlayer, at `t`, playing if it was. Once per opened file, so a second stuck seek stays stuck.
+   */
+  private async reopenFile(t: number) {
+    const torrent = this.torrent;
+    const index = this.fileIndex;
+    const video = this.video;
+    if (!torrent || index === null || !video) return;
+    const play = !video.paused;
+    const run = ++this.run;
+    this.closeFile();
+    this.phase = 'buffering';
+    // Near the start, start over rather than seek (a seek is what got stuck).
+    await this.openFile(run, torrent, index, { at: t > 1 ? t : null, play });
   }
 
   /** Tears down the playing file (MsePlayer and its SourceBuffers, subtitle sources), keeps the torrent. */
