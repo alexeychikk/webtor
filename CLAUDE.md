@@ -34,7 +34,7 @@ pnpm check          # svelte-check (types, Svelte)
 pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
-                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail
+                    #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail + start-stress
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -362,6 +362,29 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     (`silencePlans`: the same codec and layout, else `changeType` to the transcode target).
     Without either, the pipeline just ends (`trackEndedBefore`): MSE stretches its last range
     once the stream ends, which Chromium plays.
+- **The start (WebKit/GStreamer, `e2e/start-stress.spec.ts`).** WebKit places a B-frame H.264
+  video's fMP4 (Mediabunny writes trun v1 with negative composition offsets) ~2 frames (0.084 s)
+  after its `timestampOffset`; Chromium places it at 0. The audio starts at 0, so the start needs a
+  gap-jump seek, and ~1 open in 20–50 never gets `seeked` (re-seeking, nudging, pause/play don't
+  help), errors, or blocks the page's main thread. It happens whenever the jump is made: before
+  the metadata, after it with the audio held back, or with both buffered. A new MediaSource on the
+  same element nearly always starts. So:
+  - The other pipelines append only their init segments (also when a chunk is nothing else,
+    `initSegmentBytes`) until the video's first media is in and the jump is issued (`startGate`,
+    ≤ 5 s). The jump waits for `loadedmetadata`: a `currentTime` write before it is a seek inside
+    WebKit's own load, and WebKit's `buffered` then ignores a SourceBuffer without media.
+    `jumpGap` never runs before the metadata or while the gate is closed (it would seek without
+    `initialSeek`, and `onSeeking` would restart every pipeline).
+  - A seek still pending after every SourceBuffer holds its target (`START_STUCK_SEEK_MS` 1.5 s
+    for the start's jump, else `STUCK_SEEK_MS` 4 s) makes the controller open the file again at
+    that time in a new MsePlayer (`onStuckSeek` → `reopenFile`), up to `MAX_REOPENS` (3) in a
+    row, then `playback-failed` (Retry). A reopened player that completes a seek or plays on ends
+    the row (`nextReopen`, `watchdog.ts`).
+  - Removing the shift instead (re-append the video earlier) makes the video end before the audio,
+    and GStreamer then fails a seek to `duration` ("No valid frames decoded before end of
+    stream"); `endSnap` would have to cover that.
+  - Stress check: `STRESS_OPENS=120 pnpm exec playwright test --project=webkit start-stress`
+    (prints the log of every open that needed a reopen).
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.

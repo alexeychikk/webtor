@@ -193,6 +193,15 @@ export function mayAppend(ahead: number, target: number, cap: number, streaming:
  * fragment, and the relay's first network chunk is ftyp + moov + whatever arrived with it.
  */
 export function initSegmentLength(data: Uint8Array): number {
+  const n = initSegmentBytes(data);
+  return n < data.byteLength ? n : 0;
+}
+
+/**
+ * Byte length of the whole `ftyp`/`moov` boxes at the start of `data`: all of it for a chunk that
+ * is only an init segment, 0 for one that starts with media.
+ */
+export function initSegmentBytes(data: Uint8Array): number {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let pos = 0;
   while (pos + 8 <= data.byteLength) {
@@ -206,7 +215,7 @@ export function initSegmentLength(data: Uint8Array): number {
     if ((type !== 'ftyp' && type !== 'moov') || size < 8 || pos + size > data.byteLength) break;
     pos += size;
   }
-  return pos < data.byteLength ? pos : 0;
+  return pos;
 }
 
 /**

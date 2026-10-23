@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextStarvedFor, watchdogNotice } from './watchdog';
+import { MAX_REOPENS, nextReopen, nextStarvedFor, watchdogNotice } from './watchdog';
 
 const base = { elapsed: 0, hasMetadata: false, numPeers: 0, starvedFor: 0 };
 
@@ -34,5 +34,18 @@ describe('nextStarvedFor', () => {
     let starved = 0;
     for (let i = 0; i < 30; i++) starved = nextStarvedFor(starved, wait);
     expect(watchdogNotice({ ...base, hasMetadata: true, starvedFor: starved })).toBe('stalled');
+  });
+});
+
+describe('nextReopen', () => {
+  it('counts reopens in a row, then fails', () => {
+    expect(nextReopen(0, false)).toBe(1);
+    expect(nextReopen(1, false)).toBe(2);
+    expect(nextReopen(MAX_REOPENS - 1, false)).toBe(MAX_REOPENS);
+    expect(nextReopen(MAX_REOPENS, false)).toBeNull();
+  });
+  it('starts a new row once the reopened player recovered', () => {
+    expect(nextReopen(MAX_REOPENS, true)).toBe(1);
+    expect(nextReopen(2, true)).toBe(1);
   });
 });

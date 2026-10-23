@@ -9,8 +9,8 @@ import { selectAudio } from './support/player';
 // card). Now the video plays on to the end. Runs on Chromium and WebKit (playwright.config.ts).
 
 // Playwright's WebKit (GStreamer) sometimes never completes the start-up seek over the 0.084 s
-// hole in front of this fixture's first video frame (`jumpGap`): `seeking` stays true at 0.084,
-// before any seek of these tests. It happens without this ticket's change too (~1 run in 12).
+// hole in front of this fixture's first video frame; the controller then opens the file again in
+// a new MediaSource (CLAUDE.md "The start"), which empties the element before these tests seek.
 test.describe.configure({ retries: 1 });
 
 const video = (page: Page) => page.getByTestId('video');
@@ -37,6 +37,8 @@ async function open(page: Page, { restart = false } = {}) {
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect(page.getByTestId('status')).toContainText('short-audio.mkv');
   await expect.poll(() => prop(page, 'currentTime'), { timeout: 30_000 }).toBeGreaterThan(0.5);
+  // Only what the seeks do counts, not a reopen at the start.
+  await page.evaluate(() => ((window as unknown as { __emptied: number }).__emptied = 0));
 }
 
 const emptied = (page: Page) =>
