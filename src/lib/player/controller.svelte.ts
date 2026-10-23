@@ -303,7 +303,13 @@ export class PlayerController {
           if (run !== this.run) return;
           const count = (reopen?.count ?? 0) + 1;
           if (count <= MAX_REOPENS) void this.reopenFile(t, count);
-          else this.fail(new PlaybackError('playback-failed', `seek to ${t.toFixed(3)} s stuck`));
+          else
+            this.fail(
+              new PlaybackError(
+                'playback-failed',
+                `the browser never finished a seek to ${t.toFixed(1)} s`,
+              ),
+            );
         },
       });
     } catch (err) {
