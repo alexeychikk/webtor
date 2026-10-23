@@ -108,8 +108,9 @@ test.describe('start stress', () => {
         throw err;
       }
       const opened = (await startLog()).filter((l) => l.endsWith('set src')).length;
-      if (opened > 1) console.log(`REOPEN open ${i}: ${opened} MediaSources`);
-      else {
+      if (opened > 1) {
+        console.log(`REOPEN open ${i}: ${opened} MediaSources\n` + (await startLog()).join('\n'));
+      } else {
         const log = await startLog();
         const seeks = log.filter((l) => / seeking t=/.test(l)).length;
         const removes = log.filter((l) => / remove \d/.test(l)).length;

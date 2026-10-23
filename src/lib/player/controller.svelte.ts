@@ -75,6 +75,8 @@ const HAVE_METADATA = 1;
 const SAVE_POSITION_MS = 5000;
 /** The "Resumed at" toast goes once the playhead is this far from where it resumed. */
 const RESUME_TOAST_S = 15;
+/** Reopens in a row after stuck seeks (`onStuckSeek`, WebKit) before the open fails instead. */
+const MAX_REOPENS = 3;
 /** Notices about the torrent, not the file: they survive a file switch. */
 const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
 /** Opened .torrent files that got the relay's web seed (ADR 0007 §2). */
@@ -258,7 +260,7 @@ export class PlayerController {
     run: number,
     torrent: Torrent,
     index: number,
-    reopen?: { at: number | null; play: boolean },
+    reopen?: { at: number | null; play: boolean; count: number },
   ): Promise<void> {
     const video = this.video!;
     const file = torrent.files[index]!;
@@ -298,7 +300,10 @@ export class PlayerController {
         restoreAudio: (tracks) => matchAudioTrack(tracks, stored?.audio),
         startAt: (duration) => (reopen ? reopen.at : resumePoint(stored?.position, duration)),
         onStuckSeek: (t) => {
-          if (run === this.run && !reopen) void this.reopenFile(t);
+          if (run !== this.run) return;
+          const count = (reopen?.count ?? 0) + 1;
+          if (count <= MAX_REOPENS) void this.reopenFile(t, count);
+          else this.fail(new PlaybackError('playback-failed', `seek to ${t.toFixed(3)} s stuck`));
         },
       });
     } catch (err) {
@@ -368,9 +373,10 @@ export class PlayerController {
 
   /**
    * A seek got stuck in the browser (`onStuckSeek`, WebKit): the same file again in a new
-   * MsePlayer, at `t`, playing if it was. Once per opened file, so a second stuck seek stays stuck.
+   * MsePlayer, at `t`, playing if it was. `count` reopens in a row: after `MAX_REOPENS` a stuck
+   * seek fails the open (an error with Retry, never an endless spinner).
    */
-  private async reopenFile(t: number) {
+  private async reopenFile(t: number, count: number) {
     const torrent = this.torrent;
     const index = this.fileIndex;
     const video = this.video;
@@ -380,7 +386,7 @@ export class PlayerController {
     this.closeFile();
     this.phase = 'buffering';
     // Near the start, start over rather than seek (a seek is what got stuck).
-    await this.openFile(run, torrent, index, { at: t > 1 ? t : null, play });
+    await this.openFile(run, torrent, index, { at: t > 1 ? t : null, play, count });
   }
 
   /** Tears down the playing file (MsePlayer and its SourceBuffers, subtitle sources), keeps the torrent. */

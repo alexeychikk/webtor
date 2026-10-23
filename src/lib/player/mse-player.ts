@@ -231,6 +231,8 @@ export class MsePlayer {
    * block its main thread (CLAUDE.md "The start"). Null once open, or with one pipeline.
    */
   private startGate: { promise: Promise<void>; open: () => void } | null = null;
+  /** `openStartGate` waits for `loadedmetadata` (set once it listens). */
+  private gateOnMetadata = false;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -664,6 +666,7 @@ export class MsePlayer {
     this.video.addEventListener('seeking', () => this.onSeeking(), { signal });
     this.video.addEventListener('seeking', () => this.armStuckSeek(), { signal });
     this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
+    this.video.addEventListener('loadedmetadata', () => this.jumpGap(), { signal });
     this.video.addEventListener(
       'waiting',
       () => {
@@ -751,9 +754,21 @@ export class MsePlayer {
    */
   private openStartGate(video: Pipeline) {
     const gate = this.startGate;
-    if (!gate || video.sb.buffered.length === 0) return;
+    if (!gate || this.destroyed || video.sb.buffered.length === 0) return;
     const target = gapJumpTarget(video.sb.buffered, this.video.currentTime);
     if (target === null || this.video.seeking) return gate.open();
+    if (this.video.readyState < HTMLMediaElement.HAVE_METADATA) {
+      // Before the metadata a write only sets the start position, and WebKit seeks there inside
+      // its own load, while its backend prerolls: wait until the jump is a seek of its own.
+      if (!this.gateOnMetadata) {
+        this.gateOnMetadata = true;
+        this.video.addEventListener('loadedmetadata', () => this.openStartGate(video), {
+          once: true,
+          signal: this.abort.signal,
+        });
+      }
+      return;
+    }
     this.video.addEventListener('seeking', () => gate.open(), { once: true });
     // Only the video holds the target yet: without this, `onSeeking` would restart every pipeline
     // during the very preroll the gate protects.
@@ -761,9 +776,16 @@ export class MsePlayer {
     this.video.currentTime = target;
   }
 
-  /** Moves a playhead stuck just before buffered media (see `gapJumpTarget`). */
+  /**
+   * Moves a playhead stuck just before buffered media (see `gapJumpTarget`). Not while the start
+   * gate is closed (`openStartGate` makes the first jump), nor before the metadata: WebKit's
+   * `buffered` then ignores a SourceBuffer without media, and a write there is a seek inside its
+   * own load, during the backend's preroll (CLAUDE.md "The start"); `loadedmetadata` calls again.
+   */
   private jumpGap() {
-    if (this.destroyed || this.video.seeking) return;
+    const v = this.video;
+    if (this.destroyed || v.seeking || this.startGate) return;
+    if (v.readyState < HTMLMediaElement.HAVE_METADATA) return;
     const target = gapJumpTarget(this.video.buffered, this.video.currentTime);
     if (target !== null) this.video.currentTime = target;
   }
