@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendChunk,
   formatRanges,
+  initSegmentBytes,
   initSegmentLength,
   MAX_APPEND_BYTES,
   mayAppend,
@@ -545,6 +546,14 @@ describe('initSegmentLength', () => {
     expect(initSegmentLength(INIT)).toBe(0);
     // A moov cut off by the chunk end stays with what follows; only the ftyp before it goes first.
     expect(initSegmentLength(INIT.subarray(0, 500))).toBe(16);
+  });
+
+  it('initSegmentBytes also counts a chunk that is only an init segment', () => {
+    const [first, second] = writes(2);
+    expect(initSegmentBytes(INIT)).toBe(INIT.byteLength);
+    expect(initSegmentBytes(first!)).toBe(INIT.byteLength);
+    expect(initSegmentBytes(second!)).toBe(0);
+    expect(initSegmentBytes(INIT.subarray(0, 500))).toBe(16);
   });
 });
 

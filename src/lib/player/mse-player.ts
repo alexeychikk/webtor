@@ -6,7 +6,7 @@
 import type { Conversion, Input, InputVideoTrack } from 'mediabunny';
 import {
   appendChunk,
-  initSegmentLength,
+  initSegmentBytes,
   MIN_AHEAD_S,
   newQuotaState,
   resetFrom,
@@ -1278,10 +1278,12 @@ export class MsePlayer {
     };
     if (this.startGate && p.kind !== 'video') {
       // The init segment may go in (the element needs every one for its metadata), media waits.
-      const init = initSegmentLength(data);
+      // A chunk can be the init segment alone: held back, the metadata would wait for the gate.
+      const init = initSegmentBytes(data);
       if (init > 0) {
         await appendChunk(p.sb, data.subarray(0, init) as Uint8Array<ArrayBuffer>, host, p.quota);
         data = data.subarray(init);
+        if (data.byteLength === 0) return;
       }
       await this.startGate?.promise;
       host.check();
