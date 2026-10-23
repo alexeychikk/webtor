@@ -43,3 +43,16 @@ export function nextStarvedFor(starvedFor: number, s: StarvationSample): number 
   if (!s.waiting || s.downloaded > s.lastDownloaded) return 0;
   return starvedFor + s.dt;
 }
+
+/** Reopens in a row after stuck seeks (`onStuckSeek`, WebKit) before the open fails instead. */
+export const MAX_REOPENS = 3;
+
+/**
+ * A seek got stuck (`onStuckSeek`): the number of this reopen in a row, or null when the open
+ * fails instead (`playback-failed`, with Retry). `count` = reopens in a row so far; `recovered` =
+ * the player the last reopen opened has since completed a seek or played on, which ends the row.
+ */
+export function nextReopen(count: number, recovered: boolean): number | null {
+  const n = (recovered ? 0 : count) + 1;
+  return n <= MAX_REOPENS ? n : null;
+}

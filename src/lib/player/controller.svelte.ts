@@ -43,7 +43,7 @@ import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
-import { nextStarvedFor, watchdogNotice } from './watchdog';
+import { nextReopen, nextStarvedFor, watchdogNotice } from './watchdog';
 import {
   audioRef,
   matchAudioTrack,
@@ -75,8 +75,6 @@ const HAVE_METADATA = 1;
 const SAVE_POSITION_MS = 5000;
 /** The "Resumed at" toast goes once the playhead is this far from where it resumed. */
 const RESUME_TOAST_S = 15;
-/** Reopens in a row after stuck seeks (`onStuckSeek`, WebKit) before the open fails instead. */
-const MAX_REOPENS = 3;
 /** Notices about the torrent, not the file: they survive a file switch. */
 const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
 /** Opened .torrent files that got the relay's web seed (ADR 0007 §2). */
@@ -282,6 +280,8 @@ export class PlayerController {
     });
 
     const source = torrentByteSource(file);
+    // A reopened player that completed a seek or played on ends the row of reopens (`nextReopen`).
+    let recovered = false;
     let player: MsePlayer;
     try {
       player = await MsePlayer.open(video, source, {
@@ -301,8 +301,8 @@ export class PlayerController {
         startAt: (duration) => (reopen ? reopen.at : resumePoint(stored?.position, duration)),
         onStuckSeek: (t) => {
           if (run !== this.run) return;
-          const count = (reopen?.count ?? 0) + 1;
-          if (count <= MAX_REOPENS) void this.reopenFile(t, count);
+          const count = nextReopen(reopen?.count ?? 0, recovered);
+          if (count !== null) void this.reopenFile(t, count);
           else
             this.fail(
               new PlaybackError(
@@ -327,6 +327,7 @@ export class PlayerController {
     this.resumedAt = reopen ? null : player.resumedAt;
     this.phase = 'buffering';
     this.watchVideo(video);
+    if (reopen) this.watchRecovery(video, () => (recovered = true));
     void this.listEmbeddedSubtitles(run, source, video, player.startTime);
     if (reopen && !reopen.play) return this.updatePhase();
     video.play().catch((err: unknown) => {
@@ -604,6 +605,23 @@ export class PlayerController {
     document.addEventListener(
       'visibilitychange',
       () => document.visibilityState === 'hidden' && this.savePosition(),
+      { signal },
+    );
+  }
+
+  /**
+   * A reopened player (`reopenFile`) has recovered once the element completes a seek or the
+   * playhead moves on (more than 1 s while not seeking; a stuck seek keeps `seeking` set).
+   */
+  private watchRecovery(video: HTMLVideoElement, recovered: () => void) {
+    const signal = this.videoEvents!.signal;
+    const from = video.currentTime;
+    video.addEventListener('seeked', recovered, { signal, once: true });
+    video.addEventListener(
+      'timeupdate',
+      () => {
+        if (!video.seeking && video.currentTime > from + 1) recovered();
+      },
       { signal },
     );
   }

@@ -378,7 +378,8 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   - A seek still pending after every SourceBuffer holds its target (`START_STUCK_SEEK_MS` 1.5 s
     for the start's jump, else `STUCK_SEEK_MS` 4 s) makes the controller open the file again at
     that time in a new MsePlayer (`onStuckSeek` → `reopenFile`), up to `MAX_REOPENS` (3) in a
-    row, then `playback-failed` (Retry).
+    row, then `playback-failed` (Retry). A reopened player that completes a seek or plays on ends
+    the row (`nextReopen`, `watchdog.ts`).
   - Removing the shift instead (re-append the video earlier) makes the video end before the audio,
     and GStreamer then fails a seek to `duration` ("No valid frames decoded before end of
     stream"); `endSnap` would have to cover that.
