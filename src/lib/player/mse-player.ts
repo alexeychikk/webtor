@@ -90,6 +90,11 @@ const SEEK_DEBOUNCE_MS = 150;
 const SILENCE_BITRATE = 64_000;
 /** A seek with its target buffered in every SourceBuffer is stuck after this long (`onStuckSeek`). */
 const STUCK_SEEK_MS = 4000;
+/**
+ * The same for the start's gap jump (`openStartGate`), which normally completes in ~0.2 s: a stuck
+ * one costs the user this long before the file opens again.
+ */
+const START_STUCK_SEEK_MS = 1500;
 /** The longest the other pipelines wait for the video's first media (`startGate`). */
 const START_GATE_MAX_MS = 5000;
 /** The longest a seek waits for the element to end (`holdSeek`); the rest is at most `EOS_AHEAD_S`. */
@@ -233,6 +238,8 @@ export class MsePlayer {
   private startGate: { promise: Promise<void>; open: () => void } | null = null;
   /** `openStartGate` waits for `loadedmetadata` (set once it listens). */
   private gateOnMetadata = false;
+  /** The start's gap jump is seeking (`START_STUCK_SEEK_MS` applies). */
+  private startJump = false;
 
   private constructor(
     private readonly mb: Mediabunny,
@@ -710,10 +717,12 @@ export class MsePlayer {
   private armStuckSeek() {
     if (this.stuckSeekTimer === null || !this.opts.onStuckSeek) return;
     clearTimeout(this.stuckSeekTimer);
-    this.stuckSeekTimer = setTimeout(() => this.checkStuckSeek(), STUCK_SEEK_MS);
+    const ms = this.startJump ? START_STUCK_SEEK_MS : STUCK_SEEK_MS;
+    this.stuckSeekTimer = setTimeout(() => this.checkStuckSeek(), ms);
   }
 
   private disarmStuckSeek() {
+    this.startJump = false;
     if (this.stuckSeekTimer !== null) clearTimeout(this.stuckSeekTimer);
   }
 
@@ -773,6 +782,7 @@ export class MsePlayer {
     // Only the video holds the target yet: without this, `onSeeking` would restart every pipeline
     // during the very preroll the gate protects.
     this.initialSeek = target;
+    this.startJump = true;
     this.video.currentTime = target;
   }
 
