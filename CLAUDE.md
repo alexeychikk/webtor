@@ -76,10 +76,21 @@ is named `webtor-relay` and tagged `managed-by=webtor-relay`; lookups use both, 
 `webtor-relay-setup.service`: iptables, `<ip>.sslip.io` host, Caddyfile, latest release checked
 against `SHA256SUMS`; `webtor-relay.service`). A re-run reboots the VM, which updates the relay.
 User-data can't change after launch: the `config` tag (hash of user-data + SSH key) tells a re-run
-when only destroy + deploy applies new settings. Never print `RELAY_TOKEN`: output masks it as
+when only destroy + deploy applies new settings. Shapes, fastest free first: A1.Flex
+`RELAY_OCPUS` (default 2; 1 Gbit/s per OCPU), then the 50 Mbit/s E2.1.Micro, or with
+`RELAY_ALLOW_PAID=1` the paid E4/E5.Flex (cost logged first) instead. Anything billed needs that flag.
+`--upgrade` launches a faster VM next to a slower one, moves the reserved public IP (`webtor-relay`,
+keeps the URL) to it once it answers, reboots it, then terminates the old one; any failure keeps the
+old VM. A fresh VM whose setup doesn't answer in time is kept (summary printed, exit 1) and
+tagged `reserved-ip=want`: the next run moves the free reserved IP to it (`claim_reserved_ip`). Never print `RELAY_TOKEN`: output masks it as
 `<RELAY_TOKEN>`, and URLs holding it go to curl via `-K -`, not argv. Checks without credentials:
 `shellcheck scripts/deploy-relay-oci.sh scripts/deploy-relay-oci/setup.sh`, `--dry-run` (stand-in
-responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity"), `--print-cloud-init` piped to
+responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity", `DRY_RUN_EXISTING_SHAPE`/`_OCPUS`
+an existing VM, `DRY_RUN_EXISTING_RESERVED=1` it holding the reserved IP, `DRY_RUN_NO_RESERVED_IP=1`
+no reserved IP, `DRY_RUN_FAIL_MOVE=1` a failing reserved-IP move, `DRY_RUN_FAIL_WAIT=1` a failing state read of the booting new VM: the upgrade rolls back;
+`DRY_RUN_NO_ANSWER=1` a relay that doesn't answer in time, `DRY_RUN_EXISTING_RESERVED=free` a VM still waiting for the reserved IP). An upgrade
+that fails after the launch (an EXIT trap) terminates the new VM and gives the reserved IP back;
+call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition), `--print-cloud-init` piped to
 `cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)

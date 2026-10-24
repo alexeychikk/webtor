@@ -84,8 +84,10 @@ CADDY
 
 # Video conversion (ffmpeg, ADR 0007 §3) for what this VM can do in realtime. Off below 2 GB of
 # memory: the E2.1.Micro fallback (1 GB, 1/8 OCPU baseline; it shows 2 vCPUs, so the CPU count can't
-# tell it apart from the 1-OCPU A1, which shows 1). Below 4 CPUs libx264 runs a faster preset.
-# Written on every boot, so a resized VM gets the setting that fits it.
+# tell it apart from a real 2-CPU VM). Below 4 CPUs libx264 runs a faster preset: A1.Flex shows one
+# vCPU per OCPU (the default 2 OCPUs = 2 vCPUs, 12 GB), the paid E4/E5.Flex fallback two (1 OCPU =
+# 2 vCPUs, 4 GB). A1 with 4 OCPUs gets the default preset. Written on every boot, so a resized VM
+# gets the setting that fits it.
 write_transcode_config() {
   local cpus mem_mb setting
   cpus=$(nproc)
@@ -106,7 +108,7 @@ write_transcode_config() {
 
 install_latest() {
   local arch asset base tmp want have
-  arch=$(dpkg --print-architecture) # arm64 (VM.Standard.A1.Flex) or amd64 (VM.Standard.E2.1.Micro)
+  arch=$(dpkg --print-architecture) # arm64 (A1.Flex) or amd64 (E2.1.Micro, E4/E5.Flex)
   asset=webtor-relay-linux-$arch
   base=https://github.com/$RELAY_REPO/releases/latest/download
   tmp=$WORK

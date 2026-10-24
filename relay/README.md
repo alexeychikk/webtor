@@ -72,9 +72,8 @@ Peers find you faster when port `42069` (TCP and UDP, `-peer-port`) is reachable
 
 ### Oracle Cloud in one click
 
-`scripts/deploy-relay-oci.sh` puts the relay on an
-[Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) VM with HTTPS, using only Oracle's API
-(no SSH). The repository's **Deploy relay to Oracle Cloud** workflow runs it with your repository
+`scripts/deploy-relay-oci.sh` puts the relay on an [Oracle Cloud](https://www.oracle.com/cloud/free/)
+VM with HTTPS (Always Free unless you allow a paid one), using only Oracle's API (no SSH). The repository's **Deploy relay to Oracle Cloud** workflow runs it with your repository
 secrets.
 
 1. **API key.** In the OCI Console: Profile (top right) → **My profile** → **API keys** → **Add API
@@ -105,30 +104,64 @@ and run `scripts/deploy-relay-oci.sh`. `--dry-run` prints what it would do witho
 `--print-cloud-init` the VM's setup.
 
 What it creates, all named `webtor-relay`: a VCN with a public subnet, internet gateway, route table
-and a security list that opens `80`, `443` and `42069` (TCP and UDP), and one VM: `VM.Standard.A1.Flex`
-(1 OCPU, 6 GB, ARM64) on the newest Ubuntu LTS. When Oracle has no A1 capacity in any availability
-domain ("Out of host capacity", common), it falls back to `VM.Standard.E2.1.Micro` (AMD64, 1 GB);
-when neither is free, run it again later. At boot the VM opens the same ports in its own firewall,
-installs the latest release's `webtor-relay-linux-<arch>` (checked against `SHA256SUMS`) as a
-systemd service on `127.0.0.1:7881`, and Caddy gets a Let's Encrypt certificate for
-`<ip-with-dashes>.sslip.io` (a public DNS name that resolves to the IP in it).
+and a security list that opens `80`, `443` and `42069` (TCP and UDP), a reserved public IP, and one VM
+on the newest Ubuntu LTS. At boot the VM opens the same ports in its own firewall, installs the latest
+release's `webtor-relay-linux-<arch>` (checked against `SHA256SUMS`) as a systemd service on
+`127.0.0.1:7881`, and Caddy gets a Let's Encrypt certificate for `<ip-with-dashes>.sslip.io` (a public
+DNS name that resolves to the IP in it).
 
+The VM's shape sets the relay's speed: Oracle caps each VM's internet bandwidth by shape
+([shapes](https://docs.oracle.com/iaas/Content/Compute/References/computeshapes.htm),
+[prices](https://www.oracle.com/cloud/price-list/), checked 2026-10): the script tries them in this order.
+
+| Shape                                 | Internet bandwidth  | Cost (a month of 730 h)                                                                       |
+| ------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------- |
+| `VM.Standard.A1.Flex`, ARM64          | 1 Gbit/s per OCPU   | free up to 2 OCPUs and 12 GB (the default), past it about $14 per OCPU with its 6 GB          |
+| `VM.Standard.E4.Flex`, AMD64, 1 OCPU  | 1 Gbit/s            | about $23, only with `allow_paid` when A1 has no capacity                                     |
+| `VM.Standard.E5.Flex`, AMD64, 1 OCPU  | 1 Gbit/s            | about $28, only with `allow_paid` when E4 isn't offered or has no capacity either             |
+| `VM.Standard.E2.1.Micro`, AMD64, 1 GB | 50 Mbit/s (~6 MB/s) | free; the fallback without `allow_paid`, too slow for HD video and too small to convert video |
+
+- **A1 size:** a repository _variable_ `RELAY_OCPUS` (1–4, default 2; 6 GB of memory per OCPU). Over
+  2 it is billed and needs `allow_paid`.
+- **No A1 capacity** ("Out of host capacity" in every availability domain) is common on free accounts
+  and rarer on Pay As You Go. Without `allow_paid` the script then takes the Micro, and when neither
+  is free, run it again later. With `allow_paid` it takes the paid AMD shape instead of the Micro and
+  logs its bandwidth and price before launching it.
+- **Pay As You Go:** Always Free resources stay free on a Pay As You Go account, and the first 10 TB of
+  outbound data a month is free. Only what goes past the allowances is billed: a paid shape, A1 past 2
+  OCPUs, storage past 200 GB. The script creates nothing billed without `allow_paid`.
+- **Upgrade a slow relay** (e.g. one on the Micro): Actions → **Deploy relay to Oracle Cloud** → **Run
+  workflow** with `deploy` and `upgrade` checked (`allow_paid` too only if A1 has no capacity). The
+  new VM starts next to the old one, takes over the reserved IP once it answers over HTTPS, and only
+  then is the old VM terminated (if anything fails, the old VM keeps running). The VCN is kept. A
+  plain `deploy` on a slower VM says what `upgrade` would gain and leaves it alone.
+- **Stable URL:** the reserved public IP (Oracle doesn't charge for public IPs) stays with the
+  relay through upgrades, so its URL stays the same. A relay created before the script reserved IPs
+  has an ephemeral one, which can't be kept: its first upgrade prints the new relay URL, and the app's
+  relay setting must be updated once. Without a reserved IP (the tenancy's limit is reached) every
+  upgrade does that. If a new relay's first setup takes longer than the run waits, the VM keeps
+  its launch address for now; run `deploy` again and it moves the reserved IP there (the run prints
+  the final URL).
 - **Update:** run `deploy` again. It reuses everything and reboots the VM, which installs the latest
   release. A new `RELAY_TOKEN` or SSH key applies only to a new VM: run `destroy`, then `deploy`.
-- **Video conversion:** the VM installs Ubuntu's `ffmpeg` (with libx264). On the A1 VM it is on,
-  with libx264's faster `superfast` preset below 4 CPUs (the default A1 VM has 1). On the 1 GB
-  `E2.1.Micro` fallback it is off: too little memory and CPU to convert in realtime. A VM created
-  before video conversion existed has no ffmpeg: run `destroy`, then `deploy`, to get it (`deploy`
+- **Video conversion:** the VM installs Ubuntu's `ffmpeg` (with libx264). It is on with 2 GB of memory
+  or more, with libx264's faster `superfast` preset below 4 CPUs (A1 has one CPU per OCPU, so the
+  default 2 OCPUs use it; the AMD shapes have two per OCPU). On the 1 GB `E2.1.Micro` it is off: too
+  little memory and CPU to convert in realtime. A VM created before video conversion existed has no
+  ffmpeg: run `destroy`, then `deploy`, or `deploy` with `upgrade` from a Micro, to get it (`deploy`
   alone only updates the relay, and says so).
 - **Your own domain:** add a repository _variable_ `RELAY_HOST` (e.g. `relay.example.com`) before
   the VM is created (or `destroy` first). The run prints the VM's IP: point the name's DNS A record
-  at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it.
-- **Remove:** run the workflow with `destroy`; it deletes everything it created.
-- **Cost:** it creates only Always Free resources, so that a Pay As You Go account stays within the
-  allowance. Before launching it checks that `OCI_REGION` is the home region (Always Free exists only
-  there), that the tenancy's other instances leave room (A1: 4 OCPUs and 24 GB in total; two
-  E2.1.Micro), and that its boot and block volumes leave room for the VM's 50 GB boot volume (200 GB
-  in total). It stops with a message otherwise.
+  at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it. An
+  upgrade that changes the address (the first one, or one without a reserved IP) checks the new VM
+  on its own IP, retires the old one and prints the IP the A record must move to: the relay is back
+  at the same URL once the record points there.
+- **Remove:** run the workflow with `destroy`; it deletes everything it created, the reserved IP too.
+- **Checks before launching:** that `OCI_REGION` is the home region (Always Free exists only there),
+  that the tenancy's other instances leave room in the free allowance (A1: 2 OCPUs and 12 GB in total;
+  two E2.1.Micro), and that its boot and block volumes leave room for the VM's 50 GB boot volume (200
+  GB in total, both VMs' volumes counted during an upgrade). It stops with a message otherwise, unless
+  `allow_paid` accepts the cost, which it logs.
 - Oracle's terms apply to what you download through it, and swarm peers see the VM's IP address.
 
 ### Any server with Docker
