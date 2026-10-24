@@ -37,6 +37,8 @@ import {
   readFontAttachments,
 } from '../subtitles/mkv/embedded';
 import { isTorrentId } from '../torrent/trackers';
+import { boundedMagnet } from '../history/history';
+import { saveTorrentFile } from '../history/torrent-files';
 import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
@@ -54,6 +56,7 @@ import {
   watchKey,
   writeUpload,
   writeWatch,
+  type WatchSource,
 } from './watch-state';
 
 /**
@@ -109,6 +112,8 @@ export class PlayerController {
   fileIndex = $state<number | null>(null);
   /** Magnet for the URL hash: the input, or for an opened .torrent file its magnet once known. */
   magnet = $state<string | null>(null);
+  /** Lower-case info hash of the loaded torrent, once known (the history's "Now playing"). */
+  infoHash = $state<string | null>(null);
   /** Downloaded parts of the playing file (fractions of its bytes) for the seek bar; 1 s tick. */
   downloaded = $state<FractionRanges>([]);
   /** Buffer window and quota hits of the playing file (stats panel); 1 s tick, null without a file. */
@@ -133,7 +138,14 @@ export class PlayerController {
   private relayStats: RelayStats | null = null;
   /** Watch-state key (watch-state.ts) of the file playing; null when none. */
   private watch: string | null = null;
+  /**
+   * Watch-state key the user removed from the history while it was open (`forget`): a reopen of
+   * the same file (`reopenFile`) doesn't write it again. Cleared by `load`/`selectFile`.
+   */
+  private forgotten: string | null = null;
   private positionSavedAt = 0;
+  /** The history `source` last written for the file playing (JSON), so it is written once. */
+  private sourceSaved: string | null = null;
 
   constructor() {
     // The user's subtitle choices are remembered per video (the defaults it applies are not).
@@ -173,6 +185,7 @@ export class PlayerController {
     if (index === this.fileIndex) return;
     const run = ++this.run;
     this.closeFile();
+    this.forgotten = null;
     this.phase = 'metadata';
     this.starvedFor = 0;
     this.lastDownloaded = torrent.downloaded;
@@ -187,6 +200,7 @@ export class PlayerController {
   ): Promise<void> {
     await this.stop();
     const run = ++this.run;
+    this.forgotten = null;
     this.input = input;
     this.video = video;
     this.subtitles.attach(video);
@@ -197,6 +211,7 @@ export class PlayerController {
     this.files = files;
     this.fileIndex = files.length ? fileIndex : null;
     this.magnet = typeof input === 'string' ? input.trim() : null;
+    this.infoHash = null;
     this.resetFileState();
     this.stats = NO_STATS;
     // An opened .torrent already has the info dict, so it goes straight to WebTorrent.
@@ -246,7 +261,12 @@ export class PlayerController {
     }
     this.phase = 'metadata';
     this.files = listVideoFiles(torrent.files);
-    if (typeof input !== 'string') this.magnet = torrent.magnetURI;
+    this.infoHash = torrent.infoHash.toLowerCase();
+    if (typeof input !== 'string') {
+      this.magnet = torrent.magnetURI;
+      // The history reopens it from these bytes (its magnet can't get the metadata without peers).
+      void saveTorrentFile(torrent.infoHash, input);
+    }
 
     const pick = pickVideoFile(torrent.files, fileIndex);
     if (!pick.ok) return this.fail(new PlaybackError(pick.code));
@@ -266,7 +286,8 @@ export class PlayerController {
     this.fileName = file.name;
     // What the user picked for this video last time, and where they were (watch-state.ts).
     const watch = watchKey(torrent.infoHash, file.path);
-    this.watch = watch;
+    // Removed from the history during this open: a reopen (stuck seek) keeps it forgotten.
+    this.watch = watch === this.forgotten ? null : watch;
     const stored = readWatch(watch);
     this.subtitles.restore(stored?.subtitle, stored?.delay);
     if (stored?.subtitle?.kind === 'upload') {
@@ -413,6 +434,7 @@ export class PlayerController {
 
   private resetFileState() {
     this.watch = null;
+    this.sourceSaved = null;
     this.resumedAt = null;
     this.downloaded = [];
     this.buffer = null;
@@ -546,7 +568,9 @@ export class PlayerController {
     this.phase = 'idle';
     this.files = [];
     this.fileIndex = null;
+    this.infoHash = null;
     this.watch = null;
+    this.sourceSaved = null;
     this.resumedAt = null;
     if (torrent) await destroyTorrent(torrent);
   }
@@ -569,6 +593,37 @@ export class PlayerController {
     const torrent = this.torrent;
     this.torrent = null;
     if (torrent) void destroyTorrent(torrent);
+  }
+
+  /**
+   * The user removed the file playing from the history (or cleared it): nothing about it is
+   * written for the rest of this open, so the next position save doesn't bring it back.
+   */
+  forget() {
+    // Also between the files of a reopen, where `watch` is null for a moment.
+    const key = this.watch ?? this.openKey();
+    if (key) this.forgotten = key;
+    this.watch = null;
+    this.sourceSaved = null;
+  }
+
+  /**
+   * Undo of a removal (`forget`): when `key` is the file still open, its watch state is written
+   * again from now on (position, tracks), starting with the current position.
+   */
+  remember(key: string) {
+    if (this.forgotten !== key || this.watch !== null || this.openKey() !== key) return;
+    this.forgotten = null;
+    this.watch = key;
+    this.sourceSaved = null;
+    this.savePosition();
+  }
+
+  /** Watch-state key of the file open (or being reopened); null when none. */
+  private openKey(): string | null {
+    const torrent = this.torrent;
+    const file = this.fileIndex === null ? undefined : torrent?.files?.[this.fileIndex];
+    return torrent && file ? watchKey(torrent.infoHash, file.path) : null;
   }
 
   /** "Start over" on the resume toast. */
@@ -601,6 +656,8 @@ export class PlayerController {
     for (const type of ['pause', 'seeked', 'ended']) {
       video.addEventListener(type, () => this.savePosition(), { signal });
     }
+    // Listed in the watch history as soon as it plays (docs/decisions/0011).
+    video.addEventListener('playing', () => this.savePosition(), { signal, once: true });
     window.addEventListener('pagehide', () => this.savePosition(), { signal });
     document.addEventListener(
       'visibilitychange',
@@ -636,7 +693,30 @@ export class PlayerController {
     const position = v.ended && duration !== undefined ? duration : v.currentTime;
     if (!Number.isFinite(position)) return;
     this.positionSavedAt = performance.now();
-    writeWatch(this.watch, { position, duration });
+    const source = this.historySource();
+    const json = source ? JSON.stringify(source) : null;
+    if (source && json !== this.sourceSaved) {
+      writeWatch(this.watch, { position, duration, source });
+      this.sourceSaved = json;
+    } else {
+      writeWatch(this.watch, { position, duration });
+    }
+  }
+
+  /** How the watch history names and reopens the file playing (docs/decisions/0011). */
+  private historySource(): WatchSource | null {
+    const torrent = this.torrent;
+    const index = this.fileIndex;
+    const file = index === null ? undefined : torrent?.files?.[index];
+    if (!torrent || index === null || !file || !this.magnet) return null;
+    return {
+      name: torrent.name || file.name,
+      file: file.name,
+      multi: file.path.includes('/'),
+      index,
+      magnet: boundedMagnet(this.magnet),
+      ...(typeof this.input === 'string' ? {} : { fromFile: true }),
+    };
   }
 
   private updatePhase() {

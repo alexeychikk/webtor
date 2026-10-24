@@ -11,6 +11,8 @@ describe('shortcutFor', () => {
     expect(shortcutFor({ key: 'm' })).toEqual({ type: 'mute' });
     expect(shortcutFor({ key: 'c' })).toEqual({ type: 'cycle-subtitles' });
     expect(shortcutFor({ key: '?' })).toEqual({ type: 'help' });
+    expect(shortcutFor({ key: 'h' })).toEqual({ type: 'history' });
+    expect(shortcutFor({ key: 'H' })).toEqual({ type: 'history' });
     expect(shortcutFor({ key: 'ArrowUp' })).toEqual({ type: 'volume', by: 0.1 });
     expect(shortcutFor({ key: 'ArrowDown' })).toEqual({ type: 'volume', by: -0.1 });
     expect(shortcutFor({ key: 'x' })).toBeNull();

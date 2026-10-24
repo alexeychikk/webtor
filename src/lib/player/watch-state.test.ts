@@ -8,6 +8,7 @@ import {
   UPLOAD_PREFIX,
   audioRef,
   initialSubtitleKey,
+  isWatched,
   matchAudioTrack,
   matchSubtitleTrack,
   readUpload,
@@ -292,6 +293,24 @@ describe('matchSubtitleTrack', () => {
     expect(matchSubtitleTrack(tracks, null)).toBeNull();
     expect(matchSubtitleTrack(tracks, { ...subtitleRef(tracks[0]!), label: 'Signs' })).toBeNull();
     expect(matchSubtitleTrack(tracks.slice(2), subtitleRef(tracks[0]!))).toBeNull();
+  });
+});
+
+describe('isWatched', () => {
+  it('is the tail resume skips: the last 5 %, at most 60 s', () => {
+    expect(isWatched(95, 100)).toBe(true);
+    expect(isWatched(94, 100)).toBe(false);
+    expect(resumePoint(94, 100)).toBe(94);
+    expect(resumePoint(95, 100)).toBeNull();
+    expect(isWatched(3540, 3600)).toBe(true);
+    expect(isWatched(3539, 3600)).toBe(false);
+  });
+
+  it('never for the first 10 s or an unknown duration', () => {
+    expect(isWatched(8, 8)).toBe(false);
+    expect(isWatched(500, undefined)).toBe(false);
+    expect(isWatched(500, NaN)).toBe(false);
+    expect(isWatched(undefined, 100)).toBe(false);
   });
 });
 
