@@ -12,3 +12,29 @@ export async function showPageDialog(
   if (fullscreenElement()) await exitFullscreen().catch(() => {});
   if (wanted() && !dialog.open) dialog.showModal();
 }
+
+/** The point lies outside the box: on a modal dialog's backdrop. */
+export const outsideRect = (r: DOMRectReadOnly, x: number, y: number) =>
+  x < r.left || x >= r.right || y < r.top || y >= r.bottom;
+
+/**
+ * Closes `dialog` (via `close`) on a click on its backdrop: a press and a release both outside its
+ * box, so a text selection dragged out of it doesn't close it. Clicks on the backdrop target the
+ * dialog itself. Returns the cleanup.
+ */
+export function closeOnBackdrop(dialog: HTMLDialogElement, close: () => void): () => void {
+  const outside = (e: MouseEvent) =>
+    e.target === dialog && outsideRect(dialog.getBoundingClientRect(), e.clientX, e.clientY);
+  let pressedOutside = false;
+  const down = (e: PointerEvent) => (pressedOutside = outside(e));
+  const click = (e: MouseEvent) => {
+    if (pressedOutside && outside(e)) close();
+    pressedOutside = false;
+  };
+  dialog.addEventListener('pointerdown', down);
+  dialog.addEventListener('click', click);
+  return () => {
+    dialog.removeEventListener('pointerdown', down);
+    dialog.removeEventListener('click', click);
+  };
+}

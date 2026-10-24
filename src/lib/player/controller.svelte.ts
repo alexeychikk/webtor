@@ -185,8 +185,12 @@ export class PlayerController {
     fileIndex: number | null,
     files: readonly VideoFileListEntry[],
   ): Promise<void> {
-    await this.stop();
+    // Synchronously, before any await: the old playback is gone and this one owns `run`, so a load
+    // superseded while it waits bails out, and the page never shows the idle (landing) view between
+    // two torrents. The old torrent's destroy goes on; adding the new one waits for it (bounded).
+    void this.teardown();
     const run = ++this.run;
+    const stale = () => run !== this.run;
     this.input = input;
     this.video = video;
     this.subtitles.attach(video);
@@ -212,9 +216,12 @@ export class PlayerController {
 
     let torrent: Torrent;
     try {
-      if (typeof input !== 'string') torrent = await addTorrentFile(input);
-      else if (relayBase) torrent = await this.addViaRelay(input, relayBase);
-      else torrent = await addTorrent(input);
+      let added: Torrent | null;
+      if (typeof input !== 'string') added = await addTorrentFile(input, stale);
+      else if (relayBase) added = await this.addViaRelay(run, input, relayBase);
+      else added = await addTorrent(input, stale);
+      if (!added) return;
+      torrent = added;
     } catch (err) {
       if (run === this.run) {
         this.fail(
@@ -238,6 +245,7 @@ export class PlayerController {
     torrent.on('metadata', () => {
       if (torrent === this.torrent && this.phase === 'connecting') this.phase = 'metadata';
     });
+    clearInterval(this.timer);
     this.timer = setInterval(() => this.tick(), TICK_MS);
 
     if (!torrent.ready) {
@@ -449,7 +457,7 @@ export class PlayerController {
    * gets the data through the relay's web seed, plus any WebRTC peers. The relay's swarm stats are
    * polled for the UI from the start, so "finding peers" shows how many it found.
    */
-  private async addViaRelay(input: string, base: string): Promise<Torrent> {
+  private async addViaRelay(run: number, input: string, base: string): Promise<Torrent | null> {
     const ref = relayTorrentRef(input);
     if (!ref) throw new PlaybackError('invalid-input');
     const urls = relayEndpoints(base, ref.infoHash, ref.magnetQuery);
@@ -461,14 +469,15 @@ export class PlayerController {
       polling = true;
       const stats = await fetchRelayStats(urls.stats, abort.signal);
       polling = false;
-      if (abort.signal.aborted || !stats) return;
+      if (abort.signal.aborted || run !== this.run || !stats) return;
       this.relayStats = stats;
       if (!this.torrent) this.stats = mergeRelayStats(NO_STATS, 0, stats);
     };
     this.relayTimer = setInterval(() => void poll(), RELAY_STATS_MS);
     const torrentFile = await fetchRelayMetainfo(urls.metainfo, abort.signal);
+    if (run !== this.run) return null;
     void poll();
-    return addRelayTorrent(torrentFile, input, [urls.webseed, ...ref.ws]);
+    return addRelayTorrent(torrentFile, input, [urls.webseed, ...ref.ws], () => run !== this.run);
   }
 
   /**
@@ -524,16 +533,23 @@ export class PlayerController {
 
   private stopRelay() {
     clearInterval(this.relayTimer);
+    this.relayTimer = undefined;
     this.relayAbort?.abort();
     this.relayAbort = null;
   }
 
-  /** Stops playback and drops the torrent and its stored pieces. */
-  async stop(): Promise<void> {
+  /**
+   * Ends what plays, synchronously: saves its position, invalidates its async work (`run`), and
+   * releases its player (MediaSource, conversions), subtitle sources, timers, relay polling and
+   * listeners. Starts destroying its torrent and returns that destroy (bounded: `destroyTorrent`).
+   */
+  private teardown(): Promise<void> {
     this.savePosition();
     this.run++;
     clearInterval(this.timer);
+    this.timer = undefined;
     this.stopRelay();
+    this.relayStats = null;
     this.videoEvents?.abort();
     this.videoEvents = null;
     this.player?.destroy();
@@ -541,14 +557,20 @@ export class PlayerController {
     this.embedded?.destroy();
     this.embedded = null;
     this.subtitles.reset();
+    this.watch = null;
     const torrent = this.torrent;
     this.torrent = null;
+    return torrent ? destroyTorrent(torrent) : Promise.resolve();
+  }
+
+  /** Stops playback and drops the torrent and its stored pieces. */
+  async stop(): Promise<void> {
+    const destroyed = this.teardown();
     this.phase = 'idle';
     this.files = [];
     this.fileIndex = null;
-    this.watch = null;
     this.resumedAt = null;
-    if (torrent) await destroyTorrent(torrent);
+    await destroyed;
   }
 
   private fail(err: PlaybackError) {
@@ -658,7 +680,8 @@ export class PlayerController {
 
   private tick() {
     const t = this.torrent;
-    if (!t) return;
+    // A destroyed torrent has no files and no peers: never judge the playback by it (no-peers).
+    if (!t || t.destroyed) return;
     const stats = {
       numPeers: t.numPeers,
       downloadSpeed: t.downloadSpeed,

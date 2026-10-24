@@ -21,15 +21,25 @@ function getClient(): Promise<WebTorrentType> {
   return clientPromise;
 }
 
+/**
+ * Asked right before `client.add`, after the previous torrents are gone: true when the playback
+ * that wanted this torrent was replaced meanwhile. The add is then skipped (resolves `null`), so a
+ * superseded load never adds a torrent that destroys, or duplicates, the current one.
+ */
+export type IsStale = () => boolean;
+
 /** Adds a magnet / info hash (validated with `isTorrentId`), replacing any previous torrent. */
-export async function addTorrent(input: string): Promise<Torrent> {
+export async function addTorrent(input: string, isStale?: IsStale): Promise<Torrent | null> {
   const { torrentId, announce } = prepareTorrentId(input);
-  return addTorrentId(torrentId, announce, []);
+  return addTorrentId(torrentId, announce, [], undefined, isStale);
 }
 
 /** Adds a .torrent file the user opened, with the default WebSocket trackers on top of its own. */
-export async function addTorrentFile(torrentFile: Uint8Array): Promise<Torrent> {
-  return addTorrentId(torrentFile, announceList([]), []);
+export async function addTorrentFile(
+  torrentFile: Uint8Array,
+  isStale?: IsStale,
+): Promise<Torrent | null> {
+  return addTorrentId(torrentFile, announceList([]), [], undefined, isStale);
 }
 
 /**
@@ -47,8 +57,15 @@ export async function addRelayTorrent(
   torrentFile: Uint8Array,
   input: string,
   urlList: string[],
-): Promise<Torrent> {
-  return addTorrentId(torrentFile, prepareTorrentId(input).announce, urlList, RELAY_WEB_CONNS);
+  isStale?: IsStale,
+): Promise<Torrent | null> {
+  return addTorrentId(
+    torrentFile,
+    prepareTorrentId(input).announce,
+    urlList,
+    RELAY_WEB_CONNS,
+    isStale,
+  );
 }
 
 async function addTorrentId(
@@ -56,10 +73,14 @@ async function addTorrentId(
   announce: string[],
   urlList: string[],
   maxWebConns?: number,
-): Promise<Torrent> {
+  isStale?: IsStale,
+): Promise<Torrent | null> {
   memoryOnly ??= canWriteOpfs().then((ok) => !ok);
   const [client, inMemory] = await Promise.all([getClient(), memoryOnly]);
-  await Promise.all(client.torrents.map(destroyTorrent));
+  // Also the ones a switch already destroys: re-adding the same torrent (A → B → A) must not
+  // race the deletion of its store.
+  await Promise.all([...client.torrents.map((t) => destroyTorrent(t)), ...destroying]);
+  if (isStale?.()) return null;
   return client.add(torrentId, {
     // Already in memory: no extra piece cache in front of it.
     ...(inMemory ? { store: MemoryChunkStore, storeCacheSlots: 0 } : {}),
@@ -72,7 +93,44 @@ async function addTorrentId(
   });
 }
 
-/** Stops the torrent, drops it from the client and frees its OPFS/memory store. */
-export function destroyTorrent(torrent: Torrent): Promise<void> {
-  return new Promise((resolve) => torrent.destroy({ destroyStore: true }, () => resolve()));
+/**
+ * How long a destroy may take before the next torrent goes ahead anyway. WebTorrent calls back only
+ * once its store and trackers are closed, and an OPFS store whose cleanup throws (a piece write in
+ * flight) never calls back at all; waiting for it left a switch on the landing view for good.
+ */
+export const DESTROY_TIMEOUT_MS = 3000;
+
+/** Destroys in progress (each settles at the latest after `DESTROY_TIMEOUT_MS`). */
+const destroying = new Set<Promise<void>>();
+const destroys = new WeakMap<Torrent, Promise<void>>();
+
+/**
+ * Stops the torrent, drops it from the client and frees its OPFS/memory store. Resolves once that
+ * is done or `timeoutMs` passed; calling it again for the same torrent returns the same promise
+ * (WebTorrent never calls a second `destroy()` back).
+ */
+export function destroyTorrent(torrent: Torrent, timeoutMs = DESTROY_TIMEOUT_MS): Promise<void> {
+  let done = destroys.get(torrent);
+  if (done) return done;
+  done = new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn(`torrent ${torrent.infoHash}: destroy still pending after ${timeoutMs} ms`);
+      resolve();
+    }, timeoutMs);
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    if (torrent.destroyed) return finish();
+    try {
+      torrent.destroy({ destroyStore: true }, finish);
+    } catch (err) {
+      console.warn('torrent destroy:', err);
+      finish();
+    }
+  });
+  const settled = done.then(() => void destroying.delete(settled));
+  destroying.add(settled);
+  destroys.set(torrent, done);
+  return done;
 }
