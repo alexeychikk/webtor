@@ -86,15 +86,18 @@ CADDY
 # memory: the E2.1.Micro fallback (1 GB, 1/8 OCPU baseline; it shows 2 vCPUs, so the CPU count can't
 # tell it apart from a real 2-CPU VM). Below 4 CPUs libx264 runs a faster preset: A1.Flex shows one
 # vCPU per OCPU (the default 2 OCPUs = 2 vCPUs, 12 GB), the paid E4/E5.Flex fallback two (1 OCPU =
-# 2 vCPUs, 4 GB). A1 with 4 OCPUs gets the default preset. Written on every boot, so a resized VM
-# gets the setting that fits it.
+# 2 vCPUs, 4 GB). A1 with 4 OCPUs gets the default preset. The Micro also gets no upload to peers
+# (its 50 Mbit/s is for the browser). Written on every boot, so a resized VM gets the setting that
+# fits it.
 write_transcode_config() {
   local cpus mem_mb setting
   cpus=$(nproc)
   mem_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
   if ((mem_mb < 2048)); then
-    setting=WEBTOR_RELAY_NO_TRANSCODE=1
+    # E2.1.Micro: 50 Mbit/s (~6 MB/s) for everything, so none of it goes to uploading to peers.
+    setting=$'WEBTOR_RELAY_NO_TRANSCODE=1\nWEBTOR_RELAY_NO_UPLOAD=1'
     log "video conversion off: ${mem_mb} MB of memory is too little"
+    log "uploading to peers off: this shape's network is capped at 50 Mbit/s (~6 MB/s)"
   elif ((cpus < 4)); then
     setting=WEBTOR_RELAY_TRANSCODE_PRESET=superfast
     log "video conversion with libx264 preset superfast ($cpus CPUs)"

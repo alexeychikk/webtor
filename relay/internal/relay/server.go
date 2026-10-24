@@ -43,6 +43,9 @@ const (
 	DefaultIdleTimeout     = 10 * time.Minute
 	DefaultEvictAfter      = time.Minute
 	DefaultReadahead       = 32 << 20
+	// DefaultMaxUploadRate caps uploading to peers (bytes/s), so seeding never takes the uplink the
+	// browser stream needs (ADR 0006, "Throughput").
+	DefaultMaxUploadRate = 1 << 20
 )
 
 // Options configure a Server.
@@ -60,8 +63,13 @@ type Options struct {
 	EvictAfter time.Duration
 	// ExtraTrackers are announced to for every torrent, in addition to the magnet's own `tr=`.
 	ExtraTrackers []string
-	// Readahead is how far past each served range the relay keeps downloading.
-	Readahead int64
+	// Readahead is the least the relay keeps downloading past each served range; it grows with the
+	// served rate (AdaptiveReadahead: ReadaheadSeconds of the stream) up to MaxReadahead.
+	Readahead    int64
+	MaxReadahead int64
+	// UploadLimit is reported by /v1/info and stats only (the client's limiter enforces it): bytes/s
+	// to peers, 0 = unlimited, -1 = no upload.
+	UploadLimit int64
 	// DataDir, when set, is the client's NewStorage directory: a torrent's data dir is deleted on drop.
 	DataDir string
 	// Transcode configures video conversion; its FFmpeg path turns it on.
@@ -91,9 +99,14 @@ type entry struct {
 	// active counts requests in flight; a torrent is never dropped while one runs.
 	active   int
 	lastUsed time.Time
-	// prefetch sits at the end of the last requested range so the next pieces keep downloading
-	// between the browser's requests.
-	prefetch torrent.Reader
+	// window holds the pieces past the last requested range that keep downloading between the
+	// browser's requests (Normal priority; see prefetchFrom).
+	window pieceRange
+	// served counts the bytes sent to the browser (web seed and conversions); the meters turn it
+	// and the client's counters into rates for stats and the adaptive readahead.
+	served               atomic.Int64
+	servedRate, down, up rateMeter
+	readahead            atomic.Int64
 	// lastNudge rate-limits watchStall's re-requests.
 	lastNudge time.Time
 }
@@ -123,6 +136,10 @@ func New(cl *torrent.Client, opts Options) (*Server, error) {
 	if opts.Readahead <= 0 {
 		opts.Readahead = DefaultReadahead
 	}
+	if opts.MaxReadahead <= 0 {
+		opts.MaxReadahead = DefaultMaxReadahead
+	}
+	opts.MaxReadahead = max(opts.MaxReadahead, opts.Readahead)
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
@@ -177,10 +194,6 @@ func (s *Server) Torrents() int {
 
 func (s *Server) dropLocked(e *entry, reason string) {
 	s.log.Info("dropping torrent", "infohash", e.ih.HexString(), "reason", reason)
-	if e.prefetch != nil {
-		e.prefetch.Close()
-		e.prefetch = nil
-	}
 	e.t.Drop()
 	delete(s.torrents, e.ih)
 	if s.opts.DataDir != "" {
@@ -304,8 +317,9 @@ func (w *statusWriter) WriteHeader(code int) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// APIVersion is /v1/info's "api": 2 added .../transcode/{fileIndex} and the "transcode" object.
-const APIVersion = 2
+// APIVersion is /v1/info's "api": 2 added .../transcode/{fileIndex} and the "transcode" object; 3
+// added the rates to .../stats and "uploadLimit".
+const APIVersion = 3
 
 // TranscodeInfo is /v1/info's "transcode" object.
 type TranscodeInfo struct {
@@ -319,7 +333,7 @@ type TranscodeInfo struct {
 func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
 	t := s.opts.Transcode
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name": "webtor-relay", "version": Version, "api": APIVersion,
+		"name": "webtor-relay", "version": Version, "api": APIVersion, "uploadLimit": s.opts.UploadLimit,
 		"transcode": TranscodeInfo{
 			Available: t.FFmpeg != "", FFmpeg: t.FFmpegVersion, MaxHeight: t.MaxHeight, Preset: t.Preset,
 			MaxTranscodes: t.MaxJobs,
@@ -423,6 +437,16 @@ type Stats struct {
 	BytesCompleted  int64  `json:"bytesCompleted"`
 	BytesReadData   int64  `json:"bytesReadData"`
 	BytesWrittenOut int64  `json:"bytesWrittenData"`
+	// Rates in bytes/s over the last few seconds (api 3): useful data from peers, data uploaded to
+	// peers, and data sent to the browser. With servedRate well under downloadRate the relay's
+	// uplink or the browser is the limit; with downloadRate low, the swarm is.
+	DownloadRate int64 `json:"downloadRate"`
+	UploadRate   int64 `json:"uploadRate"`
+	ServedRate   int64 `json:"servedRate"`
+	BytesServed  int64 `json:"bytesServed"`
+	// Readahead is the current prefetch window in bytes; UploadLimit as in /v1/info.
+	Readahead   int64 `json:"readahead"`
+	UploadLimit int64 `json:"uploadLimit"`
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +456,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(e)
 	st := e.t.Stats()
+	now := time.Now()
+	served := e.served.Load()
 	out := Stats{
 		InfoHash:        e.ih.HexString(),
 		Peers:           st.TotalPeers,
@@ -439,6 +465,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Seeders:         st.ConnectedSeeders,
 		BytesReadData:   st.BytesReadData.Int64(),
 		BytesWrittenOut: st.BytesWrittenData.Int64(),
+		DownloadRate:    int64(e.down.observe(now, st.BytesReadUsefulData.Int64())),
+		UploadRate:      int64(e.up.observe(now, st.BytesWrittenData.Int64())),
+		ServedRate:      int64(e.servedRate.observe(now, served)),
+		BytesServed:     served,
+		Readahead:       e.readahead.Load(),
+		UploadLimit:     s.opts.UploadLimit,
 	}
 	if e.t.Info() != nil {
 		out.HasMetadata = true
@@ -534,26 +566,26 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "", time.Time{}, io.NewSectionReader(nopReaderAt{}, 0, f.Length()))
 		return
 	}
-	// Download the whole requested range at once, and the Readahead after it with a lower priority,
+	// Download the whole requested range at once, and the readahead after it with a lower priority,
 	// so the next request (WebTorrent asks piece by piece) usually finds its data already here. A
 	// seek simply moves both: data around the old position stops being prioritised.
 	end := RangeEnd(r.Header.Get("Range"), f.Length())
+	ra := s.readaheadFor(e)
 	if end < f.Length() {
-		s.prefetchFrom(e, f, end)
+		s.prefetchFrom(e, f, end, ra)
 	}
 	rd := f.NewReader()
 	defer rd.Close()
 	rd.SetContext(r.Context())
 	// The page re-verifies every piece hash, so don't wait for the relay's own verification.
 	rd.SetResponsive()
-	ra := s.opts.Readahead
 	rd.SetReadaheadFunc(func(rc torrent.ReadaheadContext) int64 {
 		if end < f.Length() {
 			return max(end-rc.CurrentPos, 0)
 		}
 		return ra
 	})
-	pr := &progressReader{ReadSeeker: rd}
+	pr := &progressReader{ReadSeeker: rd, total: &e.served}
 	defer s.watchStall(r.Context(), e, pr)()
 	http.ServeContent(w, r, "", time.Time{}, pr)
 }
@@ -566,6 +598,8 @@ var stallCheck = 3 * time.Second
 type progressReader struct {
 	io.ReadSeeker
 	n atomic.Int64
+	// total is the torrent's served counter (entry.served).
+	total *atomic.Int64
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
@@ -576,6 +610,9 @@ func (p *progressReader) Read(b []byte) (int, error) {
 		n, err = p.ReadSeeker.Read(b)
 	}
 	p.n.Add(int64(n))
+	if p.total != nil {
+		p.total.Add(int64(n))
+	}
 	return n, err
 }
 
@@ -636,26 +673,39 @@ type nopReaderAt struct{}
 
 func (nopReaderAt) ReadAt([]byte, int64) (int, error) { return 0, io.EOF }
 
-// prefetchFrom moves the torrent's prefetch reader to off within f, so the next Readahead bytes keep
-// downloading while the browser is busy elsewhere.
-func (s *Server) prefetchFrom(e *entry, f *torrent.File, off int64) {
+// readaheadFor is the torrent's prefetch window now: ReadaheadSeconds of its recent served rate,
+// within Options.Readahead and MaxReadahead.
+func (s *Server) readaheadFor(e *entry) int64 {
+	rate := e.servedRate.observe(time.Now(), e.served.Load())
+	ra := AdaptiveReadahead(rate, s.opts.Readahead, s.opts.MaxReadahead)
+	e.readahead.Store(ra)
+	return ra
+}
+
+// prefetchFrom moves the torrent's prefetch window to the ra bytes after off within f, so they keep
+// downloading while the browser is busy elsewhere. The window raises piece priorities to Normal:
+// a torrent.Reader that only seeks (never reads) wants no pieces at all in anacrolix, which made
+// the old prefetch reader a no-op (ADR 0006, "Throughput"). Requested ranges (the web seed's own
+// readers) keep their higher reader priority.
+func (s *Server) prefetchFrom(e *entry, f *torrent.File, off, ra int64) {
+	info := e.t.Info()
+	if info == nil {
+		return
+	}
+	begin, end := pieceSpan(f.Offset()+off, min(ra, f.Length()-off), e.t.Length(), info.PieceLength)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.torrents[e.ih] != e {
 		return // dropped meanwhile
 	}
-	if e.prefetch != nil {
-		e.prefetch.Close()
-		e.prefetch = nil
+	next, cancel := nextWindow(e.window, pieceRange{begin, end})
+	e.window = next
+	for _, c := range cancel {
+		e.t.CancelPieces(c.begin, c.end)
 	}
-	rd := f.NewReader()
-	ra := s.opts.Readahead
-	rd.SetReadaheadFunc(func(torrent.ReadaheadContext) int64 { return ra })
-	if _, err := rd.Seek(off, io.SeekStart); err != nil {
-		rd.Close()
-		return
+	if next.begin < next.end {
+		e.t.DownloadPieces(next.begin, next.end)
 	}
-	e.prefetch = rd
 }
 
 // acquire finds or adds the torrent and marks a request on it as active.

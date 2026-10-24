@@ -2,6 +2,7 @@
  * Contracts between the torrent layer, the media pipeline and the UI. See docs/decisions/0003 and 0004.
  * Implementations live next to this file (src/lib/player/*) and in src/lib/torrent/*.
  */
+import type { RelayRates } from '../torrent/relay';
 
 /** Random-access bytes of one file; backs a Mediabunny `CustomSource` and the subtitle extractor. */
 export interface ByteSource {
@@ -70,6 +71,8 @@ export interface TorrentStats {
   length?: number;
   /** Swarm peers behind the relay (included in `numPeers`); absent without a relay. */
   relayPeers?: number;
+  /** The relay's own rates (swarm, peers, this browser); absent without a relay or before api 3. */
+  relayRates?: RelayRates;
 }
 
 /** One playing file. Created per (torrent, file) pair; destroyed when the user picks another file. */

@@ -405,8 +405,10 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
 - **Relay (opt-in, ADR 0006).** The setting is `localStorage['webtor:relay-url']` (normalised base);
   `#relay=<url>` (the relay's printed Open link) saves it and is stripped with `replaceState`. With a
   relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,
-urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer count. No relay set =
-  the original path, untouched. Never log or show the relay URL: the token is a password.
+urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer count; from api 3 its
+  rates show in the stats panel (`relay-rates` with `relay-download`, `relay-upload`,
+  `relay-served`). Relay torrents get `maxWebConns` `RELAY_WEB_CONNS` (16, ADR 0006 "Throughput").
+  No relay set = the original path, untouched. Never log or show the relay URL: the token is a password.
 - Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns magnets that only a TCP seeder on
   loopback has (no `xs=`/`ws=`): `magnet` (sample.mkv), `aviMagnet` (avi-xvid-ac3.avi), plus
   `relayUrl` (a webtor-relay that reaches it) and `noTranscodeRelayUrl` (same, `-no-transcode`)

@@ -1,15 +1,17 @@
 <script lang="ts">
   /**
-   * Content of the stats panel (docs/decisions/0008 §4): peers, speeds, buffer window and quota hits
-   * (docs/decisions/0003), progress; live values.
+   * Content of the stats panel (docs/decisions/0008 §4): peers, speeds, the relay's rates (ADR 0006),
+   * buffer window and quota hits (docs/decisions/0003), progress; live values.
    */
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Layers from '@lucide/svelte/icons/layers';
+  import Server from '@lucide/svelte/icons/server';
   import Users from '@lucide/svelte/icons/users';
   import { formatBytes, formatPercent, formatSeconds, formatSpeed } from './format';
   import type { BufferInfo } from './mse-player';
   import type { TorrentStats } from './types';
+  import { relayRateRows } from '../torrent/relay';
 
   let { stats, buffer = null }: { stats: TorrentStats; buffer?: BufferInfo | null } = $props();
 </script>
@@ -32,6 +34,22 @@
     <dt><ArrowUp size={16} aria-hidden="true" /> Up</dt>
     <dd data-testid="stats-upload">{formatSpeed(stats.uploadSpeed)}</dd>
   </div>
+  {#if stats.relayRates}
+    <!-- Where a slow relay stream is limited: the swarm, the relay's uplink, or this side. -->
+    <div class="relay" data-testid="relay-rates">
+      <dt><Server size={16} aria-hidden="true" /> Relay</dt>
+      <dd>
+        <dl>
+          {#each relayRateRows(stats.relayRates, formatSpeed) as row (row.key)}
+            <div>
+              <dt>{row.label}</dt>
+              <dd data-testid="relay-{row.key}">{row.value}</dd>
+            </div>
+          {/each}
+        </dl>
+      </dd>
+    </div>
+  {/if}
   {#if buffer}
     <div>
       <dt><Layers size={16} aria-hidden="true" /> Buffer</dt>
@@ -88,6 +106,22 @@
   }
   dd {
     margin: 0;
+  }
+  .stats > .relay {
+    align-items: flex-start;
+  }
+  .relay dl {
+    display: grid;
+    gap: var(--space-1);
+    margin: 0;
+  }
+  .relay dl div {
+    display: flex;
+    gap: var(--space-2);
+  }
+  .relay dl dt {
+    width: auto;
+    min-width: 5.5rem;
   }
   .progress {
     flex-wrap: wrap;

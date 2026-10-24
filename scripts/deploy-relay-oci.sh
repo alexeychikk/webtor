@@ -696,7 +696,9 @@ launch_instance() {
     fi
     if [[ $shape == "$MICRO_SHAPE" ]]; then
       log "Falling back to $MICRO_SHAPE (Always Free, amd64, 1 GB RAM): the relay runs, but Oracle caps"
-      log "its internet bandwidth at $(rate "$MICRO_MBPS") (about 6 MB/s). RELAY_ALLOW_PAID=1 takes a 1 Gbit/s paid shape instead."
+      log "its internet bandwidth at $(rate "$MICRO_MBPS") (about 6 MB/s): enough for 1080p, too slow for high-bitrate"
+      log "(4K) files. RELAY_ALLOW_PAID=1 takes a 1 Gbit/s paid shape instead; once Oracle has A1 capacity,"
+      log "re-run with --upgrade (or destroy, then deploy) to move to A1."
     else
       shape_args=(--shape-config "{\"ocpus\":$ocpus,\"memoryInGBs\":$mem}")
     fi

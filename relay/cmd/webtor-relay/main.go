@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"golang.org/x/time/rate"
 
 	"github.com/alexeychikk/webtor/relay/internal/relay"
 	"github.com/alexeychikk/webtor/relay/internal/webapp"
@@ -65,8 +66,10 @@ func run() error {
 	maxTorrents := flag.Int("max-torrents", envInt("WEBTOR_RELAY_MAX_TORRENTS", relay.DefaultMaxTorrents), "torrents open at once; one more gets HTTP 429")
 	metadataTimeout := flag.Duration("metadata-timeout", envDuration("WEBTOR_RELAY_METADATA_TIMEOUT", relay.DefaultMetadataTimeout), "how long a metainfo request waits for the swarm (then 504)")
 	idleTimeout := flag.Duration("idle-timeout", envDuration("WEBTOR_RELAY_IDLE_TIMEOUT", relay.DefaultIdleTimeout), "drop a torrent and delete its data after no request for this long")
-	readahead := flag.Int64("readahead", envInt64("WEBTOR_RELAY_READAHEAD", relay.DefaultReadahead), "bytes downloaded ahead of the last requested range")
-	noUpload := flag.Bool("no-upload", envBool("WEBTOR_RELAY_NO_UPLOAD"), "never upload to peers (default: upload while a torrent is open)")
+	readahead := flag.Int64("readahead", envInt64("WEBTOR_RELAY_READAHEAD", relay.DefaultReadahead), "least bytes downloaded ahead of the last requested range (grows to 30 s of the stream)")
+	maxReadahead := flag.Int64("max-readahead", envInt64("WEBTOR_RELAY_MAX_READAHEAD", relay.DefaultMaxReadahead), "most bytes downloaded ahead of the last requested range")
+	maxUploadRate := flag.Int64("max-upload-rate", envInt64("WEBTOR_RELAY_MAX_UPLOAD_RATE", relay.DefaultMaxUploadRate), "bytes/s uploaded to peers at most (0 = unlimited), so seeding leaves the uplink to the stream")
+	noUpload := flag.Bool("no-upload", envBool("WEBTOR_RELAY_NO_UPLOAD"), "never upload to peers (default: upload, capped by -max-upload-rate, while a torrent is open)")
 	noDefaultTrackers := flag.Bool("no-default-trackers", envBool("WEBTOR_RELAY_NO_DEFAULT_TRACKERS"), "announce only to the magnet's own trackers")
 	noDHT := flag.Bool("no-dht", envBool("WEBTOR_RELAY_NO_DHT"), "disable the DHT")
 	ffmpegPath := flag.String("ffmpeg", os.Getenv("WEBTOR_RELAY_FFMPEG"), "ffmpeg for video conversion (default: ffmpeg on PATH, then next to this binary)")
@@ -109,6 +112,11 @@ func run() error {
 	cfg.ListenPort = *peerPort
 	cfg.NoDHT = *noDHT
 	cfg.NoUpload = *noUpload
+	uploadLimit, upload := uploadSetting(*noUpload, *maxUploadRate)
+	if uploadLimit > 0 {
+		// Burst 0: the client sets it to one peer request's worth of data.
+		cfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(uploadLimit), 0)
+	}
 	cfg.Seed = false
 	cfg.DisableWebtorrent = true
 	cfg.DataDir = piecesDir
@@ -127,6 +135,8 @@ func run() error {
 		MetadataTimeout: *metadataTimeout,
 		IdleTimeout:     *idleTimeout,
 		Readahead:       *readahead,
+		MaxReadahead:    *maxReadahead,
+		UploadLimit:     uploadLimit,
 		DataDir:         piecesDir,
 		App:             webapp.FS(),
 		Logger:          logger,
@@ -174,7 +184,7 @@ func run() error {
 	served := make(chan error, 1)
 	go func() { served <- hs.Serve(ln) }()
 	logger.Info("listening", "http", ln.Addr().String(), "peer-port", cl.LocalPort(),
-		"max-torrents", *maxTorrents, "upload", !*noUpload)
+		"max-torrents", *maxTorrents, "upload", upload)
 
 	select {
 	case err := <-served:
@@ -192,6 +202,19 @@ func run() error {
 		return err
 	}
 	return nil // deferred: drop torrents, close the client, delete the data
+}
+
+// uploadSetting is the upload limit for /v1/info (bytes/s, 0 = unlimited, -1 = off) and its text
+// for the startup log.
+func uploadSetting(noUpload bool, maxRate int64) (int64, string) {
+	switch {
+	case noUpload:
+		return -1, "off"
+	case maxRate <= 0:
+		return 0, "unlimited"
+	default:
+		return maxRate, fmt.Sprintf("up to %.1f MB/s", float64(maxRate)/1e6)
+	}
 }
 
 func loadToken(flagValue, file string) (string, error) {

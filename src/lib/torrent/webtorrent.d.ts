@@ -85,6 +85,11 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     store?: new (chunkLength: number, opts: { length?: number }) => unknown;
     /** Pieces cached in memory in front of the store (default 20; 0 = none). */
     storeCacheSlots?: number;
+    /**
+     * Piece requests in flight per web seed (default 4). WebTorrent asks a web seed for whole
+     * pieces, one HTTP request each; fewer requests in flight than the round trip needs cap it.
+     */
+    maxWebConns?: number;
   }
 
   export interface ClientOptions {

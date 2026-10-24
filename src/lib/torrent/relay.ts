@@ -36,7 +36,10 @@ export function checkRelayUrl(input: string, pageProtocol: string): RelayUrlChec
 }
 
 export interface RelayEndpoints {
-  /** `GET` → `{name: 'webtor-relay', version, api: 2, transcode: {available, ffmpeg, …}}`. */
+  /**
+   * `GET` → `{name: 'webtor-relay', version, api: 3, uploadLimit, transcode: {available, ffmpeg, …}}`
+   * (`uploadLimit` since api 3: bytes/s to peers, 0 = unlimited, -1 = no upload).
+   */
   info: string;
   /**
    * `GET` → .torrent (info dict only) once the swarm delivered it; 504 after ~90 s without; 429
@@ -45,7 +48,11 @@ export interface RelayEndpoints {
   metainfo: string;
   /** `GET` → `[{index, path, length, webseedPath}]` (503 before metainfo). */
   files: string;
-  /** `GET` → `{peers, activePeers, seeders, hasMetadata, bytesCompleted, …}`. */
+  /**
+   * `GET` → `{peers, activePeers, seeders, hasMetadata, bytesCompleted, …}`; since api 3 also the
+   * rates in bytes/s `downloadRate` (from peers), `uploadRate` (to peers), `servedRate` (to the
+   * browser), and `bytesServed`, `readahead`, `uploadLimit`.
+   */
   stats: string;
   /** BEP-19 web seed URL for WebTorrent's `urlList`. */
   webseed: string;
@@ -255,29 +262,88 @@ export function transcodeSummary(t: RelayTranscodeInfo): string {
   return `Video conversion: on${details ? ` (${details})` : ''}.`;
 }
 
+/**
+ * The relay's rates in bytes/s (api 3), for telling apart where a slow stream is limited: the swarm
+ * (`download` low), the relay's uplink (`served` below `download`, or `upload` eating it) or the
+ * browser's side.
+ */
+export interface RelayRates {
+  /** Useful data from the swarm's peers. */
+  download: number;
+  /** Data uploaded to the swarm's peers. */
+  upload: number;
+  /** Data sent to the browser (web seed and video conversion). */
+  served: number;
+  /** Upload cap in bytes/s: 0 = unlimited, -1 = no upload. */
+  uploadLimit: number;
+}
+
 /** The part of `GET …/stats` the UI uses. */
 export interface RelayStats {
   /** Peers the relay is connected to right now. */
   activePeers: number;
   seeders: number;
   hasMetadata: boolean;
+  /** Absent from relays before api 3. */
+  rates?: RelayRates;
 }
+
+const num = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 
 export function parseRelayStats(json: unknown): RelayStats | null {
   if (typeof json !== 'object' || json === null) return null;
-  const { activePeers, seeders, hasMetadata } = json as Record<string, unknown>;
+  const { activePeers, seeders, hasMetadata, downloadRate, uploadRate, servedRate, uploadLimit } =
+    json as Record<string, unknown>;
   if (typeof activePeers !== 'number') return null;
-  return {
+  const stats: RelayStats = {
     activePeers,
     seeders: typeof seeders === 'number' ? seeders : 0,
     hasMetadata: hasMetadata === true,
   };
+  const download = num(downloadRate);
+  const served = num(servedRate);
+  if (download !== undefined && served !== undefined) {
+    stats.rates = {
+      download: Math.max(0, download),
+      upload: Math.max(0, num(uploadRate) ?? 0),
+      served: Math.max(0, served),
+      uploadLimit: num(uploadLimit) ?? 0,
+    };
+  }
+  return stats;
+}
+
+/** One row of the stats panel's relay section. */
+export interface RelayRateRow {
+  key: 'download' | 'upload' | 'served';
+  label: string;
+  value: string;
+}
+
+/**
+ * The stats panel's relay rows: swarm → relay, relay → peers (with its cap), relay → this browser.
+ * `formatSpeed` is passed in so this stays free of the player's modules.
+ */
+export function relayRateRows(
+  rates: RelayRates,
+  formatSpeed: (bytesPerSecond: number) => string,
+): RelayRateRow[] {
+  let upload = formatSpeed(rates.upload);
+  if (rates.uploadLimit < 0) upload = 'off';
+  else if (rates.uploadLimit > 0) upload += ` (max ${formatSpeed(rates.uploadLimit)})`;
+  return [
+    { key: 'download', label: 'From swarm', value: formatSpeed(rates.download) },
+    { key: 'upload', label: 'To peers', value: upload },
+    { key: 'served', label: 'To you', value: formatSpeed(rates.served) },
+  ];
 }
 
 /**
  * Peer count to show with a relay. WebTorrent sees the relay as one web-seed wire; the swarm behind
  * it is in the relay's `/stats`. So: WebTorrent's wires minus its web seeds, plus the relay's peers.
- * Speeds and progress stay WebTorrent's (everything the page gets passes through it).
+ * Speeds and progress stay WebTorrent's (everything the page gets passes through it); the relay's
+ * own rates go along as `relayRates`.
  */
 export function mergeRelayStats(
   base: TorrentStats,
@@ -289,5 +355,6 @@ export function mergeRelayStats(
     ...base,
     numPeers: Math.max(0, base.numPeers - webSeedWires) + relay.activePeers,
     relayPeers: relay.activePeers,
+    ...(relay.rates ? { relayRates: relay.rates } : {}),
   };
 }

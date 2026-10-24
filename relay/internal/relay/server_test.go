@@ -519,3 +519,51 @@ func TestPostMetainfo(t *testing.T) {
 		t.Fatalf("torrents: %d, want 1", h.srv.Torrents())
 	}
 }
+
+// TestPrefetchDownloadsAhead: after one web seed request the relay keeps downloading the readahead
+// after it without further requests (a seek-only anacrolix reader used to want nothing), and
+// stats report what was served.
+func TestPrefetchDownloadsAhead(t *testing.T) {
+	seed, _ := seedFileP(t, "movie.mkv", 16<<20, 256<<10)
+	h := newHarness(t, Options{MetadataTimeout: 20 * time.Second, Readahead: 4 << 20, UploadLimit: 12345})
+	base := h.torrentURL(seed.InfoHash)
+	res := get(t, base+"/metainfo?dn=movie.mkv&x.pe="+seed.Addr, "")
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	res = get(t, base+"/webseed/", "bytes=0-262143")
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+
+	var e *entry
+	h.srv.mu.Lock()
+	for _, x := range h.srv.torrents {
+		e = x
+	}
+	h.srv.mu.Unlock()
+	// The requested piece and the 4 MiB after it, nothing much further.
+	waitFor(t, func() bool { return e.t.BytesCompleted() >= 4<<20+256<<10 }, 10*time.Second, "the readahead to download")
+	time.Sleep(300 * time.Millisecond)
+	if got := e.t.BytesCompleted(); got > 6<<20 {
+		t.Errorf("downloaded %d bytes, more than the readahead", got)
+	}
+
+	res = get(t, base+"/stats", "")
+	var st Stats
+	if err := json.NewDecoder(res.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if st.BytesServed != 256<<10 || st.Readahead != 4<<20 || st.UploadLimit != 12345 {
+		t.Errorf("stats: served %d, readahead %d, upload limit %d", st.BytesServed, st.Readahead, st.UploadLimit)
+	}
+	if st.DownloadRate < 0 || st.ServedRate < 0 || st.UploadRate < 0 {
+		t.Errorf("negative rates: %+v", st)
+	}
+
+	// A seek elsewhere moves the window: the pieces after the new position download too.
+	res = get(t, base+"/webseed/", "bytes=12582912-12845055")
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	// 12 MiB to the end (16 MiB) comes on top of the first 4.25 MiB.
+	waitFor(t, func() bool { return e.t.BytesCompleted() >= 4<<20+256<<10+4<<20 }, 10*time.Second, "the window after the seek to download")
+}

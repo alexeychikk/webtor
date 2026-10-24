@@ -127,6 +127,12 @@ The VM's shape sets the relay's speed: Oracle caps each VM's internet bandwidth 
   and rarer on Pay As You Go. Without `allow_paid` the script then takes the Micro, and when neither
   is free, run it again later. With `allow_paid` it takes the paid AMD shape instead of the Micro and
   logs its bandwidth and price before launching it.
+- **The Micro is capped at 50 Mbit/s (~6 MB/s)** of internet bandwidth
+  ([Oracle](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)):
+  fine for most 1080p files, too slow for high-bitrate ones (4K remuxes need 8–10 MB/s). On it the
+  relay doesn't upload to peers (`WEBTOR_RELAY_NO_UPLOAD`), so the whole uplink goes to your stream,
+  and the deploy log says so when it falls back to it. To move to A1 once Oracle has capacity, run
+  `deploy` with `upgrade` (below), or `destroy`, then `deploy`.
 - **Pay As You Go:** Always Free resources stay free on a Pay As You Go account, and the first 10 TB of
   outbound data a month is free. Only what goes past the allowances is billed: a paid shape, A1 past 2
   OCPUs, storage past 200 GB. The script creates nothing billed without `allow_paid`.
@@ -225,12 +231,21 @@ with `docker cp webtor-relay:/licenses/ffmpeg .`). The pinned version and checks
   a web seed read) always keeps its torrent.
 - Downloaded data lives in `<data-dir>/pieces/<infohash>/` only while the torrent is open. It is
   deleted when the torrent is dropped, at shutdown and at startup.
-- The relay uploads to peers while a torrent is open (`-no-upload` turns that off) and never seeds
+- The relay uploads to peers while a torrent is open, at most `-max-upload-rate` (1 MiB/s), so
+  seeding never takes the uplink your stream needs (`-no-upload` turns it off), and never seeds
   after.
-- Each web seed request downloads its whole range with top priority, plus `-readahead` bytes after
-  it, so WebTorrent's next piece is usually already there. A seek moves both. A read that gets no
+- Each web seed request downloads its whole range with top priority, plus a readahead after it, so
+  WebTorrent's next piece is usually already there. The readahead is 30 s of the stream at the rate
+  the relay served it lately, at least `-readahead` and at most `-max-readahead`. A seek moves both.
+  Disk use per torrent is what was played plus at most `-max-readahead`, deleted when the torrent is
+  dropped. A read that gets no
   data for 3 s makes the relay re-request the torrent's pieces (works around an anacrolix
   stall that otherwise lasts until WebTorrent's 60 s timeout).
+- `GET {relay URL}/v1/torrents/<infohash>/stats` reports the rates of the last seconds:
+  `downloadRate` (from peers), `uploadRate` (to peers) and `servedRate` (to the browser), in bytes/s;
+  the app's stats panel shows them under "Relay". When the video keeps buffering, a low "From
+  swarm" means the swarm is slow, and "To you" well below "From swarm" means the relay's uplink or
+  your connection is the limit.
 - The BitTorrent library logs at warning level and above. Read errors that are part of normal
   streaming (a seek aborts a web seed read, the stall workaround above) are left out, so an
   `error` line on stderr is worth a look.
@@ -272,7 +287,9 @@ Every flag can also be set by its environment variable (handy in Docker).
 | `-max-torrents`         | `WEBTOR_RELAY_MAX_TORRENTS`         | `3`                                                                   |
 | `-metadata-timeout`     | `WEBTOR_RELAY_METADATA_TIMEOUT`     | `90s`                                                                 |
 | `-idle-timeout`         | `WEBTOR_RELAY_IDLE_TIMEOUT`         | `10m`                                                                 |
-| `-readahead`            | `WEBTOR_RELAY_READAHEAD`            | `33554432` (32 MiB)                                                   |
+| `-readahead`            | `WEBTOR_RELAY_READAHEAD`            | `33554432` (32 MiB; the least, grows to 30 s of the stream)           |
+| `-max-readahead`        | `WEBTOR_RELAY_MAX_READAHEAD`        | `536870912` (512 MiB)                                                 |
+| `-max-upload-rate`      | `WEBTOR_RELAY_MAX_UPLOAD_RATE`      | `1048576` (bytes/s to peers; `0` = unlimited)                         |
 | `-no-upload`            | `WEBTOR_RELAY_NO_UPLOAD`            | off                                                                   |
 | `-no-default-trackers`  | `WEBTOR_RELAY_NO_DEFAULT_TRACKERS`  | off                                                                   |
 | `-no-dht`               | `WEBTOR_RELAY_NO_DHT`               | off                                                                   |
