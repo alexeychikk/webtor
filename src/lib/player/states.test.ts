@@ -68,8 +68,9 @@ describe('playerStates', () => {
 });
 
 describe('errorActions', () => {
-  it('retries everything but a non-torrent', () => {
+  it('retries everything but a non-torrent and a Dolby Vision-only video', () => {
     expect(errorActions('invalid-input').retry).toBe(false);
+    expect(errorActions('dolby-vision-unsupported')).toEqual({ retry: false, relay: null });
     expect(errorActions('torrent-failed')).toEqual({ retry: true, relay: null });
   });
 

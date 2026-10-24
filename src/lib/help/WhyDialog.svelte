@@ -82,6 +82,14 @@
       more WebRTC seeders make it faster.
     </li>
   </ul>
+  <h3>It loads, but the video won’t play</h3>
+  <p data-testid="why-video">
+    The video is never converted, so it plays only if this browser decodes its codec: HEVC (H.265)
+    and 10-bit H.264 need Safari, or Chrome/Edge with a hardware decoder. HDR10 and HLG play, and
+    show as HDR where the browser and display support it. <strong>Dolby Vision</strong> never shows as
+    such: most releases (profiles 7 and 8) play their built-in HDR10/HLG picture instead, but profile
+    5 has none, so it can’t play correctly in a browser. Look for an HDR10 or SDR release.
+  </p>
   <section bind:this={shortcuts} data-testid="shortcuts-help" aria-labelledby="shortcuts-title">
     <h3 id="shortcuts-title">Keyboard shortcuts</h3>
     <dl>
