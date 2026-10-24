@@ -108,7 +108,7 @@ func TestTranscodeUnavailable(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
 		t.Fatal(err)
 	}
-	if info.API != 2 || info.Transcode.Available || info.Transcode.MaxHeight != 720 || info.Transcode.Preset != "veryfast" {
+	if info.API != APIVersion || info.Transcode.Available || info.Transcode.MaxHeight != 720 || info.Transcode.Preset != "veryfast" {
 		t.Errorf("info: %+v", info)
 	}
 	res = get(t, h.torrentURL(metainfo.Hash{1})+"/transcode/0?start=3", "")

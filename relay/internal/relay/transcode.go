@@ -420,6 +420,7 @@ func (s *Server) runJob(ctx context.Context, w http.ResponseWriter, e *entry, f 
 			}
 			_ = rc.Flush()
 			lastWrite.Store(time.Now().UnixNano())
+			e.served.Add(int64(n))
 		}
 		if rerr != nil {
 			break

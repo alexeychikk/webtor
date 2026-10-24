@@ -40,12 +40,13 @@ and a default public tracker list. WebRTC and seeding-after-done are off. API (`
   needs no preflight beyond Private Network Access) adds the torrent from it at once and answers
   like GET. The app uses it for an opened .torrent that needs relay video conversion (0007).
 - `GET {base}/v1/torrents/{ih}/files` → `[{index, path, length, webseedPath}]`.
-- `GET {base}/v1/torrents/{ih}/stats` → swarm peers/seeders, bytes. This is what the UI shows,
+- `GET {base}/v1/torrents/{ih}/stats` → swarm peers/seeders, bytes, and (api 3) rates: from the
+  swarm, to peers, served to the browser, plus the readahead and upload cap in force. This is what the UI shows,
   because WebTorrent only sees one wire, the web seed.
 - `GET|HEAD {base}/v1/torrents/{ih}/webseed/[<name>/<path>]` returns file bytes with `Range`
   (`http.ServeContent` over an anacrolix `Reader`). The reader is responsive (the page re-hashes)
-  and reads ahead to the end of the requested range. A prefetch reader parks at that end with a
-  32 MiB readahead. `ResolveWebseedPath` copes with WebTorrent not percent-encoding `#`/`?` in file
+  and reads ahead to the end of the requested range. Past that end the relay raises the piece
+  priority of a readahead window (see Throughput). `ResolveWebseedPath` copes with WebTorrent not percent-encoding `#`/`?` in file
   names (a `#` loses the rest of the path: the relay matches the unique file it can still be).
   anacrolix sometimes leaves a seeder connection interested and unchoked but sending no requests
   (about 1 cold 200 MB run in 10 on loopback), until the readers go away when the browser times
@@ -98,6 +99,51 @@ just as with qBittorrent. Keep the relay URL secret: it is the password.
   the public measurement (metadata time, seek latency, 64 MiB throughput) on a normal network.
 - Static cross-builds (`CGO_ENABLED=0`) for linux, windows/amd64 and darwin/arm64 work (~30 MB).
 
+## Throughput (2026-10-24)
+
+A user's relay on Oracle's E2.1.Micro streamed at no more than ~5 MB/s. Four candidates, measured
+with `relay/scripts/bench-webtorrent.mjs` (WebTorrent 3.0.21 in Chromium, 100 MB from the loopback
+`tcp-seeder`, delay proxies for RTT; MB/s cold relay / warm relay):
+
+| page↔relay RTT | relay↔swarm RTT | piece   | before (main) | after                                   |
+| -------------- | --------------- | ------- | ------------- | --------------------------------------- |
+| 0 ms           | 0 ms            | 1 MiB   | 32.8 / 39.6   | 32.9 / 60.2                             |
+| 100 ms         | 0 ms            | 256 KiB | 6.2 / 7.4     | 8.9 / 12.0                              |
+| 100 ms         | 0 ms            | 1 MiB   | 19.2 / 22.4   | 34.3 / 39.7                             |
+| 100 ms         | 0 ms            | 4 MiB   | 41.4 / 45.4   | 48.0 / 53.1                             |
+| 0 ms           | 100 ms          | 1 MiB   | 11.3 / 54.7   | 30.4 / 54.8                             |
+| 50 ms          | 100 ms          | 1 MiB   | 8.7 / 30.7    | 19.7 / 29.5 (23.5 / 37.2 with 16 conns) |
+
+"Before" is WebTorrent's default `maxWebConns` 4. "After" uses 16, as the app now does, in the
+rows with page RTT. The swarm-RTT rows keep 4, to show the readahead fix on its own.
+
+1. **The E2.1.Micro network cap: the ceiling.** Oracle caps the shape at 50 Mbit/s, ~6 MB/s, about
+   5.5 MB/s of payload after TCP/TLS, which is the reported number. No relay change goes past it. A
+   4K remux needs 6–12 MB/s, so the Micro can't stream one. A1 gets 1 Gbit/s per OCPU. The deploy
+   script says so when it falls back to the Micro, and the README does too.
+2. **Upload to peers: shares that ceiling.** Serving the browser and uploading to peers are both
+   egress on the same capped VNIC, and anacrolix uploaded without limit to every peer it unchoked.
+   Now `-max-upload-rate` defaults to 1 MiB/s (a token bucket, `ClientConfig.UploadRateLimiter`),
+   and the Micro runs with `WEBTOR_RELAY_NO_UPLOAD=1`. `/stats` shows `uploadRate` next to
+   `servedRate`, so the share is visible.
+3. **The 32 MiB readahead: worse than small, it did nothing.** The prefetch was an anacrolix
+   `Reader` seeked to the end of the served range and never read. anacrolix only wants the
+   readahead of a reader that is reading (`piecesUncached` sets it to 0 otherwise, and `Seek` resets
+   that), so beyond each web seed request the relay fetched nothing until the browser asked. With
+   the swarm 100 ms away a cold relay ran at 11.3 MB/s against 54.7 MB/s warm. Now the relay raises
+   the priority of a window of pieces past each request (`DownloadPieces`, cancelling what falls
+   behind on a seek, `nextWindow`). The window is 30 s of what the relay serves (rate over 5 s),
+   at least `-readahead` (32 MiB) and at most `-max-readahead` (512 MiB). It lives on disk, and
+   pieces leave with the torrent when it goes idle. Cold went to 30.4 MB/s; a seek costs at most
+   the old window's not-yet-downloaded pieces, which are cancelled.
+4. **Web seed latency and concurrency.** WebTorrent fetches one whole piece per request and keeps
+   `min(1 + ceil(speed·1 s / pieceLength), maxWebConns)` requests in flight, `maxWebConns` 4 by
+   default. At 100 ms RTT with 256 KiB pieces that is ~1 MiB per round trip: 6.2 MB/s. The app now
+   adds relay torrents with `maxWebConns` 16 (`RELAY_WEB_CONNS`, `src/lib/torrent/client.ts`):
+   +40–80 % at 50–100 ms. Over HTTPS the relay speaks HTTP/2 (Caddy), so 16 streams share one
+   connection. Over plain HTTP Chromium opens at most 6 per host, which the bench above hits.
+   Small pieces stay slow at high RTT; nothing on the relay's side changes piece size.
+
 ## Consequences
 
 - Without a relay nothing changes. The no-peers message gains "Connect a relay".
@@ -105,7 +151,9 @@ just as with qBittorrent. Keep the relay URL secret: it is the password.
   user's uplink, not by the web seed path.
 - The relay is an open door to whoever has the URL: token in the path, nothing else. Rate limits,
   multiple users and accounts are non-goals.
-- Disk: the relay holds the pieces of what is being watched (plus readahead) until the torrent goes
-  idle.
+- Disk: the relay holds the pieces of what is being watched (plus up to `-max-readahead`) until the
+  torrent goes idle.
+- On a capped host (the E2.1.Micro) the host, not the relay, sets the speed. `/stats` and the
+  app's stats panel ("From swarm", "To peers", "To you") tell which side limits it.
 - Releases are manual like the site (0005): binaries via `gh release`, image to GHCR, no GitHub
   Actions.

@@ -33,6 +33,18 @@ test('plays a magnet only regular peers have, through webtor-relay set by #relay
   // and lets the seeder go).
   await openMenu(page, 'stats-button');
   await expect(page.getByTestId('relay-peers')).toHaveText(/^· \d+ via relay$/);
+  // The relay's own rates (api 3): swarm → relay, relay → peers (capped by default), relay → page.
+  const speed = /^[\d.]+ (B|kB|MB)\/s/;
+  await expect(page.getByTestId('relay-download')).toHaveText(speed);
+  await expect(page.getByTestId('relay-upload')).toHaveText(
+    /^[\d.]+ (B|kB|MB)\/s \(max 1\.0 MB\/s\)$/,
+  );
+  await expect(page.getByTestId('relay-served')).toHaveText(speed);
+  // What the panel shows comes from /stats, which counted what the page got.
+  const infoHash = /btih:([0-9a-f]{40})/i.exec(magnet)![1]!.toLowerCase();
+  const stats = await (await page.request.get(`${relayUrl}/v1/torrents/${infoHash}/stats`)).json();
+  expect(stats.bytesServed).toBeGreaterThan(0);
+  expect(stats.uploadLimit).toBe(1 << 20);
   await closeMenu(page);
   await expect(page.getByTestId('error')).toHaveCount(0);
 

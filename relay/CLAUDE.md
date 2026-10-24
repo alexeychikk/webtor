@@ -44,6 +44,15 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   (`main.defaultListen`, `main.defaultDataDir`) in both `.ko.yaml` and `Dockerfile`. The images'
   ffmpeg is pinned in `scripts/relay-ffmpeg.sh` (both use it); its version is the base image tag in
   `.ko.yaml` (the release script checks they match).
+- Readahead (`prefetchFrom`, ADR 0006 "Throughput") is a window of pieces raised with
+  `DownloadPieces` and trimmed with `CancelPieces` (`nextWindow`), not a parked `Reader`: anacrolix
+  wants nothing for a reader that only seeked (`piecesUncached` zeroes its readahead). Its size is
+  `AdaptiveReadahead` (30 s of the served rate, between `-readahead` and `-max-readahead`).
+- Rates in `/stats` come from `rateMeter`s (5 s window) sampled on each `/stats` call: from swarm
+  (`BytesReadUsefulData`), to peers (`BytesWrittenData`), served (`entry.served`, counted by
+  `progressReader` and the transcode writer). Bump `APIVersion` and `src/lib/torrent/relay.ts`
+  together when the JSON changes.
 - `scripts/bench-webtorrent.mjs` measures loopback throughput through WebTorrent in Chromium (see
-  the root Playwright setup).
+  the root Playwright setup). Knobs: `BENCH_RTT_MS` (page↔relay delay proxy), `BENCH_SWARM_RTT_MS`
+  (relay↔seeder), `BENCH_PIECE`, `BENCH_WEB_CONNS` (`maxWebConns`), `BENCH_URLS`, `BENCH_RELAY_ARGS`.
 - No GitHub Actions (root `CLAUDE.md`).
