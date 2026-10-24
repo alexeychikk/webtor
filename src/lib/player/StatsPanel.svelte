@@ -1,19 +1,34 @@
 <script lang="ts">
   /**
    * Content of the stats panel (docs/decisions/0008 §4): peers, speeds, the relay's rates (ADR 0006),
-   * buffer window and quota hits (docs/decisions/0003), progress; live values.
+   * buffer window and quota hits (docs/decisions/0003), the video's HDR format (ADR 0010), progress;
+   * live values.
    */
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Layers from '@lucide/svelte/icons/layers';
   import Server from '@lucide/svelte/icons/server';
+  import Sun from '@lucide/svelte/icons/sun';
   import Users from '@lucide/svelte/icons/users';
   import { formatBytes, formatPercent, formatSeconds, formatSpeed } from './format';
+  import { HDR_LABELS, type HdrFormat } from './hdr';
   import type { BufferInfo } from './mse-player';
   import type { TorrentStats } from './types';
   import { relayRateRows } from '../torrent/relay';
 
-  let { stats, buffer = null }: { stats: TorrentStats; buffer?: BufferInfo | null } = $props();
+  let {
+    stats,
+    buffer = null,
+    hdr = null,
+    toneMapped = false,
+  }: {
+    stats: TorrentStats;
+    buffer?: BufferInfo | null;
+    /** HDR format of the video playing; null = SDR (no row). */
+    hdr?: HdrFormat | null;
+    /** The display shows only SDR, so the HDR video is tone-mapped. */
+    toneMapped?: boolean;
+  } = $props();
 </script>
 
 <dl class="stats" data-testid="stats" aria-label="Download stats">
@@ -62,6 +77,17 @@
         {formatSeconds(buffer.ahead)} of {formatSeconds(buffer.target)} ahead
         {#if buffer.quotaHits > 0}
           <span class="bytes">· {buffer.quotaHits} quota hits</span>
+        {/if}
+      </dd>
+    </div>
+  {/if}
+  {#if hdr}
+    <div>
+      <dt><Sun size={16} aria-hidden="true" /> Video</dt>
+      <dd>
+        <span class="chip" data-testid="stats-hdr" data-format={hdr}>{HDR_LABELS[hdr]}</span>
+        {#if toneMapped}
+          <span class="bytes" data-testid="stats-hdr-tone-mapped">· shown as SDR</span>
         {/if}
       </dd>
     </div>
@@ -146,5 +172,14 @@
   }
   .bytes {
     color: var(--text-muted);
+  }
+  .chip {
+    padding: 0 var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-bold);
+    line-height: var(--leading-normal);
+    letter-spacing: 0.04em;
   }
 </style>

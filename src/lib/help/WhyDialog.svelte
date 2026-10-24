@@ -11,14 +11,17 @@
 
   let dialog = $state<HTMLDialogElement>();
   let shortcuts = $state<HTMLElement>();
+  let hdr = $state<HTMLElement>();
 
   $effect(() => {
     if (!dialog) return;
     if (helpDialog.open && !dialog.open) {
       const d = dialog;
-      // Opened by `?`: straight to the keyboard shortcuts.
+      // Opened by `?`: straight to the keyboard shortcuts; by the HDR toast: to the HDR section.
       void showPageDialog(d, () => helpDialog.open).then(() => {
-        if (helpDialog.section === 'shortcuts') shortcuts?.scrollIntoView({ block: 'start' });
+        const section = helpDialog.section;
+        const target = section === 'shortcuts' ? shortcuts : section === 'hdr' ? hdr : null;
+        if (target) target.scrollIntoView({ block: 'start' });
         else d.scrollTop = 0;
       });
     } else if (!helpDialog.open && dialog.open) dialog.close();
@@ -88,11 +91,39 @@
   <h3>It loads, but the video won’t play</h3>
   <p data-testid="why-video">
     The video is never converted, so it plays only if this browser decodes its codec: HEVC (H.265)
-    and 10-bit H.264 need Safari, or Chrome/Edge with a hardware decoder. HDR10 and HLG play, and
-    show as HDR where the browser and display support it. <strong>Dolby Vision</strong> never shows as
-    such: most releases (profiles 7 and 8) play their built-in HDR10/HLG picture instead, but profile
-    5 has none, so it can’t play correctly in a browser. Look for an HDR10 or SDR release.
+    and 10-bit H.264 need Safari, or Chrome/Edge with a hardware decoder. For HDR and Dolby Vision,
+    see the HDR section below.
   </p>
+  <section bind:this={hdr} data-testid="hdr-help" aria-labelledby="hdr-title">
+    <h3 id="hdr-title">HDR</h3>
+    <p>
+      HDR10 and HLG videos keep their HDR colours here. They show as HDR only when the browser, the
+      graphics card and the display all do it; otherwise they play tone-mapped to SDR, which looks
+      flatter but has the right colours.
+    </p>
+    <ul>
+      <li>
+        <strong>Windows:</strong> turn on Settings › System › Display › <em>Use HDR</em>. On a
+        laptop, also clear “Turn off HDR when on battery”.
+      </li>
+      <li>
+        A graphics card with HEVC Main10 hardware decoding and current drivers, and hardware
+        acceleration on in the browser’s settings.
+      </li>
+      <li>
+        <strong>Chrome 110+</strong> works best. <strong>Edge</strong> also needs the “HEVC Video
+        Extensions” from the Microsoft Store. <strong>Firefox 153+</strong> shows HDR on AMD and NVIDIA
+        graphics, with the HEVC Video Extensions installed.
+      </li>
+      <li>
+        <strong>Safari</strong> on macOS and iPad shows HDR10 and HLG on HDR displays.
+      </li>
+      <li>
+        <strong>Dolby Vision</strong> never shows as such: profiles 7 and 8 play their HDR10/HLG fallback,
+        but profile 5 has none and can’t play in a browser. Look for an HDR10 or SDR release.
+      </li>
+    </ul>
+  </section>
   <section bind:this={shortcuts} data-testid="shortcuts-help" aria-labelledby="shortcuts-title">
     <h3 id="shortcuts-title">Keyboard shortcuts</h3>
     <dl>

@@ -41,6 +41,7 @@ import { boundedMagnet } from '../history/history';
 import { saveTorrentFile } from '../history/torrent-files';
 import { rememberAudioLanguage } from './audio-preference';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
+import { HDR_DISPLAY_QUERY, toneMapped, type HdrFormat } from './hdr';
 import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
@@ -120,6 +121,8 @@ export class PlayerController {
   buffer = $state<BufferInfo | null>(null);
   /** Element time this file resumed at (watch state), for the "Resumed at" toast; null = none. */
   resumedAt = $state<number | null>(null);
+  /** HDR format of the playing video (stats panel chip, ADR 0010); null = SDR or no file. */
+  hdr = $state<HdrFormat | null>(null);
 
   /** Bumped by every load, file switch, stop and failure: async work of an older one bails out. */
   private run = 0;
@@ -356,6 +359,8 @@ export class PlayerController {
     this.resumedAt = reopen ? null : player.resumedAt;
     this.phase = 'buffering';
     this.watchVideo(video);
+    this.hdr = player.hdr;
+    this.watchDisplay();
     if (reopen) this.watchRecovery(video, () => (recovered = true));
     void this.listEmbeddedSubtitles(run, source, video, player.startTime);
     if (reopen && !reopen.play) return this.updatePhase();
@@ -444,6 +449,7 @@ export class PlayerController {
     this.watch = null;
     this.sourceSaved = null;
     this.resumedAt = null;
+    this.hdr = null;
     this.downloaded = [];
     this.buffer = null;
     this.audioTracks = [];
@@ -594,6 +600,7 @@ export class PlayerController {
     this.infoHash = null;
     this.sourceSaved = null;
     this.resumedAt = null;
+    this.hdr = null;
     await destroyed;
   }
 
@@ -656,6 +663,23 @@ export class PlayerController {
 
   dismissResume() {
     this.resumedAt = null;
+  }
+
+  /**
+   * An HDR video on a display that shows only SDR plays tone-mapped: the `hdr-sdr-display` toast,
+   * re-checked whenever the display changes (HDR turned on or off, window moved to another screen).
+   */
+  private watchDisplay() {
+    if (!this.hdr || typeof matchMedia !== 'function' || !this.videoEvents) return;
+    const query = matchMedia(HDR_DISPLAY_QUERY);
+    const update = () => {
+      const want = toneMapped(this.hdr, query.matches);
+      if (want === this.notices.includes('hdr-sdr-display')) return;
+      const others = this.notices.filter((n) => n !== 'hdr-sdr-display');
+      this.notices = want ? [...others, 'hdr-sdr-display'] : others;
+    };
+    update();
+    query.addEventListener('change', update, { signal: this.videoEvents.signal });
   }
 
   private watchVideo(video: HTMLVideoElement) {

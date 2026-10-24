@@ -55,6 +55,7 @@ import {
   type DolbyVisionPlayback,
 } from './dolby-vision';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
+import { hdrFormatOf, type HdrFormat } from './hdr';
 import { AAC_FRAME_SAMPLES, silentAacFrame } from './silence';
 import {
   MAX_REMOTE_RESUMES,
@@ -244,6 +245,8 @@ export class MsePlayer {
   readonly audioTracks: readonly AudioTrackInfo[];
   /** Non-fatal conditions to show next to the player, e.g. `no-playable-audio`. */
   readonly notices: readonly PlaybackErrorCode[];
+  /** HDR format of the video (its colour tags pass through the remux, ADR 0010); null = SDR. */
+  hdr: HdrFormat | null = null;
   private readonly pipelines: Pipeline[] = [];
   private destroyed = false;
   private seekTimer: ReturnType<typeof setTimeout> | undefined;
@@ -423,6 +426,8 @@ export class MsePlayer {
       if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
       if (avi?.indexMode === 'scan') notices.push('avi-no-index');
       if (dolbyVision?.kind === 'base-layer') notices.push('dolby-vision-base-layer');
+      // The relay's conversion (DivX/Xvid → H.264) is SDR.
+      const hdr = remote ? null : hdrFormatOf(await videoTrack.getColorSpace().catch(() => null));
 
       // The element timeline starts at 0 even when the file's first frame does not.
       const tl = timeline(await videoTrack.getFirstTimestamp());
@@ -472,6 +477,7 @@ export class MsePlayer {
         remote,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
+      player.hdr = hdr;
       player.encoder = target;
       if (resumeAt !== null) {
         // Before any media: the element keeps it as its start position and seeks there once the
