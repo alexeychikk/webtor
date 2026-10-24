@@ -152,6 +152,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   append.ts                    appendBuffer with back-pressure: QuotaExceededError waits, never fails (ADR 0003)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  downmix.ts                   stereo downmix of every transcode (ITU matrix by channel count, limiter;
+                               Mediabunny `process` step, ADR 0003 "Downmix")
   dolby-vision.ts              DV record (MKV `BlockAdditionMapping` dvcC/dvvC via `readMkvHeader().videoTracks`,
                                MP4 `dv*` sample entries) → base-layer toast or refusal (ADR 0010)
   remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
@@ -351,6 +353,9 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay). Synthetic RIFFs (OpenDML, AVIX, `rec `,
   truncation) are built in `src/lib/player/avi/index.test.ts`.
 - `short-audio.mkv`: 12 s 320×180 H.264 whose audio tracks ("English AAC", "Russian AC3") end at 6 s.
+- `surround.mkv`: 8 s 320×180 H.264, one tone per channel (L 400, R 600, C 1000, LFE 60, Ls 1400,
+  Rs 1800 Hz) in "DTS 5.1" (default), "AC-3 5.1", "E-AC-3 5.1", "DTS 5.0". `e2e/surround.spec.ts`
+  measures each tone per stereo output (Web Audio splitter + analysers on the `<video>`).
 - `dolby-vision-p5.mkv` (= `short-audio.mkv` + `dvcC` profile 5: error card) and `dolby-vision-p8.mkv`
   (= `sample.mkv` + `dvvC` profile 8.1: plays, toast), written by `scripts/make-dv-fixtures.mjs` into the
   Void ffmpeg leaves before Info/Tracks. Synthetic headers: `src/lib/subtitles/mkv/test-ebml.ts`.

@@ -143,6 +143,25 @@ ln -sfn ../sample.mkv resume/extra.mkv
   -metadata:s:a:1 language=rus -metadata:s:a:1 title="Russian AC3" \
   -disposition:a:0 default \
   short-audio.mkv
+# surround.mkv: 8 s 320x180 H.264 with one 5.1(side) tone per channel (L 400, R 600, C 1000,
+# LFE 60, Ls 1400, Rs 1800 Hz) in four transcoded tracks: "DTS 5.1" (default), "AC-3 5.1",
+# "E-AC-3 5.1" and "DTS 5.0" (the same without LFE). e2e/surround.spec.ts checks the stereo
+# downmix per output channel (ADR 0003 "Downmix").
+tones=()
+for f in 400 600 1000 60 1400 1800; do tones+=(-f lavfi -i "sine=frequency=$f:duration=8"); done
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i testsrc2=size=320x180:rate=24:duration=8 "${tones[@]}" \
+  -filter_complex "[1:a][2:a][3:a][4:a][5:a][6:a]join=inputs=6:channel_layout=5.1(side):map=0.0-FL|1.0-FR|2.0-FC|3.0-LFE|4.0-SL|5.0-SR,asplit=4[a1][a2][a3][a4]" \
+  -map 0:v -map '[a1]' -map '[a2]' -map '[a3]' -map '[a4]' \
+  -c:v libx264 -preset veryfast -g 24 -pix_fmt yuv420p -b:v 100k \
+  -c:a:0 dca -strict -2 -b:a:0 768k -c:a:1 ac3 -b:a:1 384k -c:a:2 eac3 -b:a:2 384k \
+  -c:a:3 dca -strict -2 -b:a:3 768k -channel_layout:a:3 '5.0(side)' \
+  -metadata:s:a:0 language=eng -metadata:s:a:0 title="DTS 5.1" \
+  -metadata:s:a:1 language=eng -metadata:s:a:1 title="AC-3 5.1" \
+  -metadata:s:a:2 language=eng -metadata:s:a:2 title="E-AC-3 5.1" \
+  -metadata:s:a:3 language=eng -metadata:s:a:3 title="DTS 5.0" \
+  -disposition:a:0 default \
+  surround.mkv
 # dolby-vision-p5.mkv / -p8.mkv: short-audio.mkv / sample.mkv with a DV configuration record.
 node ../../scripts/make-dv-fixtures.mjs
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv dolby-vision-*.mkv
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv
