@@ -98,10 +98,11 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   the layout comes from the channel count: 3 = 3.0, 4 = 4.0 (3/1: L R C Cs), 5 = 5.0, 6 = 5.1, 7 =
   6.1 (back centre), 8 = 7.1 (back pair, then sides). Ambiguous counts (2.1 or 3.0; 3.1, quad or
   3/1; 4.1 or 5.0) take the reading with a centre, so dialogue is never dropped or pushed to one
-  side; a 3.1's LFE or a quad's surrounds then reach both outputs at −6 dB. Reading the layout from
-  the bitstream headers (AC-3 `acmod`/`lfeon`, DTS `AMODE`) would settle those rare cases, at the
-  cost of a packet read before every start. Checked by `e2e/surround.spec.ts`: a tone per channel in
-  `surround.mkv`, measured per output with Web Audio.
+  side; a 3.1's LFE or a quad's right surround then reaches both outputs at −6 dB (a quad's left
+  surround, read as C, at −3 dB). Reading the layout from the bitstream headers (AC-3
+  `acmod`/`lfeon`, DTS `AMODE`) would settle those rare cases, at the cost of a packet read before
+  every start. Checked by `e2e/surround.spec.ts`: a tone per channel in `surround.mkv`, measured per
+  output with Web Audio.
 - **Audio track switching** (`HTMLMediaElement.audioTracks` is not used anywhere):
   1. Cancel the audio conversion and `abort()` the audio SourceBuffer, keeping everything it has
      buffered. The old track plays on until the new one replaces it. Cutting it (all of it, or

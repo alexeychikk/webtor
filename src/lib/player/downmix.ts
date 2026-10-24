@@ -13,8 +13,9 @@ export type Speaker = 'L' | 'R' | 'C' | 'LFE' | 'Ls' | 'Rs' | 'Lb' | 'Rb' | 'Cs'
  * FFmpeg's native (WAV/SMPTE) order: `@mediabunny/ac3` (AC-3, E-AC-3) and `@mediabunny/dts` are
  * FFmpeg, and WebCodecs decoders use the same order. Decoded samples carry no layout, so counts
  * with two or more possible layouts take one with a centre (3: 3.0 not 2.1; 4: 4.0 = L R C Cs, not
- * quad or 3.1; 5: 5.0 not 4.1). So a 3.1's LFE or a quad's surrounds reach both outputs at −6 dB
- * rather than dialogue landing on one side. Channels past 8 are dropped.
+ * quad or 3.1; 5: 5.0 not 4.1). So a 3.1's LFE or a quad's right surround reaches both outputs at
+ * −6 dB (a quad's left surround, read as C, at −3 dB) rather than dialogue landing on one side.
+ * Channels past 8 are dropped.
  */
 export function decoderLayout(channels: number): Speaker[] {
   switch (channels) {
