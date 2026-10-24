@@ -22,7 +22,7 @@ function route(channels: number, speaker: string): [number, number] {
 // `@mediabunny/dts` are FFmpeg decoders): the channel counts each codec delivers.
 const CODECS: Record<string, Record<string, number>> = {
   dts: { '5.0': 5, '5.1': 6, '6.1 (ES)': 7, '7.1 (HD)': 8 },
-  ac3: { '3.0': 3, '5.0': 5, '5.1': 6 },
+  ac3: { '3.0': 3, '3/1 (4.0)': 4, '3.1': 4, '5.0': 5, '5.1': 6 },
   eac3: { '5.1': 6, '7.1': 8 },
 };
 
@@ -50,6 +50,7 @@ describe('stereo downmix per transcoded codec', () => {
   }
 
   it('maps the FFmpeg channel orders', () => {
+    expect(decoderLayout(4)).toEqual(['L', 'R', 'C', 'Cs']);
     expect(decoderLayout(6)).toEqual(['L', 'R', 'C', 'LFE', 'Ls', 'Rs']);
     expect(decoderLayout(7)).toEqual(['L', 'R', 'C', 'LFE', 'Cs', 'Ls', 'Rs']);
     expect(decoderLayout(8)).toEqual(['L', 'R', 'C', 'LFE', 'Lb', 'Rb', 'Ls', 'Rs']);
@@ -57,6 +58,12 @@ describe('stereo downmix per transcoded codec', () => {
 
   it('6.1: the back centre reaches both outputs at −6 dB', () => {
     const [l, r] = route(7, 'Cs');
+    expect(l).toBeCloseTo(0.5, 5);
+    expect(r).toBeCloseTo(0.5, 5);
+  });
+
+  it('4 channels: the 4th (3/1 back centre, 3.1 LFE, a quad surround) reaches both at −6 dB', () => {
+    const [l, r] = route(4, 'Cs');
     expect(l).toBeCloseTo(0.5, 5);
     expect(r).toBeCloseTo(0.5, 5);
   });

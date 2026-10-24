@@ -90,16 +90,18 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   (`processedNumberOfChannels: 2`; `src/lib/player/downmix.ts`). Mediabunny's remix knows only 1, 2,
   4 and 6 channels; any other count keeps channels 0 and 1. So DTS 5.0, DTS-ES 6.1 and DTS-HD MA /
   E-AC-3 7.1 lost the centre: no dialogue (reported on a DTS track; DTS/AC-3/E-AC-3 5.1 were already
-  right). Its 5.1 mix is not limited either. Ours is ITU-R BS.775: L' = L + 0.707·C + 0.707·(Ls + Lb)
-  - 0.5·Cs, R' likewise, LFE dropped, then a peak limiter at 0 dBFS (instant attack, 0.2 s release),
-    which leaves anything under full scale untouched (stereo passes through as decoded). Decoded
-    samples carry no channel layout: every decoder we use outputs FFmpeg's native (WAV/SMPTE) order
-    (`@mediabunny/ac3` and `@mediabunny/dts` are FFmpeg, and WebCodecs uses the same order), so the
-    layout comes from the channel count: 3 = 3.0, 4 = quad, 5 = 5.0, 6 = 5.1, 7 = 6.1 (back centre),
-    8 = 7.1 (back pair, then sides). The ambiguous counts (2.1, 4.1, 3/1) take the reading with a centre, so
-    dialogue is never dropped. Reading the layout from the bitstream headers (AC-3 `acmod`, DTS `AMODE`)
-    would settle those rare cases, at the cost of a packet read before every start. Checked by
-    `e2e/surround.spec.ts`: a tone per channel in `surround.mkv`, measured per output with Web Audio.
+  right). Its 5.1 mix is not limited either. Ours is ITU-R BS.775: L' = L + 0.707·C + 0.707·(Ls +
+  Lb) plus 0.5·Cs, R' likewise, LFE dropped, then a peak limiter at 0 dBFS (instant attack, 0.2 s
+  release), which leaves anything under full scale untouched (stereo passes through as decoded).
+  Decoded samples carry no channel layout: every decoder we use outputs FFmpeg's native (WAV/SMPTE)
+  order (`@mediabunny/ac3` and `@mediabunny/dts` are FFmpeg, and WebCodecs uses the same order), so
+  the layout comes from the channel count: 3 = 3.0, 4 = 4.0 (3/1: L R C Cs), 5 = 5.0, 6 = 5.1, 7 =
+  6.1 (back centre), 8 = 7.1 (back pair, then sides). Ambiguous counts (2.1 or 3.0; 3.1, quad or
+  3/1; 4.1 or 5.0) take the reading with a centre, so dialogue is never dropped or pushed to one
+  side; a 3.1's LFE or a quad's surrounds then reach both outputs at −6 dB. Reading the layout from
+  the bitstream headers (AC-3 `acmod`/`lfeon`, DTS `AMODE`) would settle those rare cases, at the
+  cost of a packet read before every start. Checked by `e2e/surround.spec.ts`: a tone per channel in
+  `surround.mkv`, measured per output with Web Audio.
 - **Audio track switching** (`HTMLMediaElement.audioTracks` is not used anywhere):
   1. Cancel the audio conversion and `abort()` the audio SourceBuffer, keeping everything it has
      buffered. The old track plays on until the new one replaces it. Cutting it (all of it, or
