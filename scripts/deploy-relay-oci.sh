@@ -36,7 +36,8 @@
 # boot volume of n GB, DRY_RUN_EXISTING_SHAPE=<shape> (and DRY_RUN_EXISTING_OCPUS=<n>) an existing
 # relay VM (DRY_RUN_EXISTING_RESERVED=1: holding the reserved public IP), DRY_RUN_NO_RESERVED_IP=1
 # an account that can't reserve a public IP, DRY_RUN_FAIL_MOVE=1 a failing move of the reserved IP
-# to the new VM (an upgrade rolls back).
+# to the new VM (an upgrade rolls back), DRY_RUN_FAIL_WAIT=1 a failing state read of the new VM while
+# it boots (an upgrade rolls back).
 set -euo pipefail
 # Plain bash 3.2 (macOS) works: no empty-array expansions under set -u, no GNU-only tools.
 cd "$(dirname "$0")/.."
@@ -320,6 +321,9 @@ fake_oci() {
       jq -n --arg s "$shape" --argjson o "$ocpus" --argjson t "$TAGS" '{data: {"lifecycle-state": "RUNNING",
         shape: $s, "shape-config": {ocpus: $o, "memory-in-gbs": (if $s | test("Micro") then 1 else $o * 6 end)},
         "freeform-tags": ($t + {config: "dryrun"})}}'
+    elif [[ ${DRY_RUN_FAIL_WAIT:-} == 1 && " $* " == *" $DRY_NEW "* ]]; then
+      echo 'ServiceError: {"code": "InternalError", "message": "Simulated failure.", "status": 500}' >&2
+      return 1
     else
       echo '{"data":{"lifecycle-state":"RUNNING"}}'
     fi
@@ -714,6 +718,11 @@ launch_instance() {
         --assign-public-ip true --user-data-file "$user_data" ${ssh_args[@]+"${ssh_args[@]}"} \
         --freeform-tags "$tags" 2>"$WORK/err"); then
         INSTANCE_ID=$(data_id <<<"$out")
+        [[ -n $INSTANCE_ID && $INSTANCE_ID != null ]] || die "the launch returned no instance id"
+        # From here an upgrade owns the new VM: a die while it boots (wait_instance) rolls it back.
+        if [[ -n $old ]]; then
+          PENDING_NEW=$INSTANCE_ID
+        fi
         if wait_instance "$INSTANCE_ID" RUNNING; then
           LAUNCHED=$(describe "$shape" "$ocpus" "$mem")
           ((!paid)) || LAUNCHED="$LAUNCHED, paid"
@@ -721,6 +730,7 @@ launch_instance() {
           return 0
         fi
         log "  the launch in $ad failed (instance terminated), trying the next one."
+        PENDING_NEW=""
         continue
       fi
       err=$(mask <"$WORK/err")
@@ -949,10 +959,8 @@ check_home_region() {
 bring_up() {
   local old=${1:-} old_mbps=${2:-0} old_ip=${3:-} ip final priv
   UP=0
+  # With an old VM, launch_instance sets PENDING_NEW as soon as the new VM exists.
   launch_instance "$WORK/user-data" "$CONFIG_TAG" "$old" "$old_mbps"
-  if [[ -n $old ]]; then
-    PENDING_NEW=$INSTANCE_ID
-  fi
   ip=$(public_ip_of "$INSTANCE_ID")
   log "Public IP of the new VM: $ip"
   ensure_reserved_ip
