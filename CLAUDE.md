@@ -88,12 +88,21 @@ tagged `reserved-ip=want`: the next run moves the free reserved IP to it (`claim
 responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity", `DRY_RUN_EXISTING_SHAPE`/`_OCPUS`
 an existing VM, `DRY_RUN_EXISTING_RESERVED=1` it holding the reserved IP, `DRY_RUN_NO_RESERVED_IP=1`
 no reserved IP, `DRY_RUN_FAIL_MOVE=1` a failing reserved-IP move, `DRY_RUN_FAIL_WAIT=1` a failing state read of the booting new VM: the upgrade rolls back;
-`DRY_RUN_NO_ANSWER=1` a relay that doesn't answer in time, `DRY_RUN_EXISTING_RESERVED=free` a VM still waiting for the reserved IP). An upgrade
+`DRY_RUN_NO_ANSWER=1` a relay that doesn't answer in time, `DRY_RUN_EXISTING_RESERVED=free` a VM still waiting for the reserved IP,
+`DRY_RUN_TERMINATE=slow|stuck|ignored|rejected` a termination that is slow, never ends, doesn't take or that the CLI refuses,
+`DRY_RUN_EXISTING_STATE=TERMINATING`, `DRY_RUN_WAIT_TIMEOUT=1` delete waits timing out). An upgrade
 that fails after the launch (an EXIT trap) terminates the new VM and gives the reserved IP back;
-call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition), `scripts/deploy-relay-oci.test.sh` (dry-run assertions, e.g. the storage check:
+call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition.
+Terminations poll the instance's state (`terminate_instance`: TERMINATED or 404 = gone, one more
+request if it isn't TERMINATING after a minute, the work request's errors logged; returns 2 when it is
+still TERMINATING at `TERMINATE_WAIT_SECONDS`): oci-cli 3.95.0's `instance terminate --wait-for-state`
+takes work-request states only. `oci_` logs a usage error (exit 2, printed on stdout) and returns 64
+for it, so exit 2 from `oci_` always means a `--wait-for-state` timed out (the request was accepted).
+`destroy` and `deploy` wait for our VMs still TERMINATING. More checks: `scripts/deploy-relay-oci.test.sh` (dry-run assertions, e.g. the storage check:
 `DRY_RUN_USED_GB=<n>[,<n>…]` = unattached volumes next to the old VM's own 50 GB boot volume; an
 upgrade is judged on the total after it terminates the old VM, every counted volume is logged with its
-attachment), `--print-cloud-init` piped to
+attachment; with `oci` on PATH it also runs every dry-run call through that CLI to catch options it
+rejects: `pipx install oci-cli==<the workflow's version>`), `--print-cloud-init` piped to
 `cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)
