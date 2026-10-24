@@ -79,12 +79,27 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   ("Hi10P", common in anime).
 - **Audio** is copied when MSE accepts it in MP4 (AAC, MP3, Opus, FLAC; AC-3/E-AC-3 only on Safari
   and some Edge). Otherwise it is transcoded inside the same `Conversion`
-  (`{ codec, numberOfChannels: 2, sampleRate: 48000, bitrate: 128_000 }`). Decoders: WebCodecs, plus
+  (`{ codec, sampleRate: 48000, bitrate: 128_000 }`, stereo through our own downmix, below). Decoders: WebCodecs, plus
   lazily imported `@mediabunny/ac3` (AC-3/E-AC-3) and `@mediabunny/dts` (DTS), registered on first
   need. Target codec: the first of Opus, AAC that `canEncodeAudio()` reports and MSE accepts in MP4.
   If neither, load `@mediabunny/aac-encoder` (wasm). Tracks with no decoder (e.g. TrueHD, or
   `codec === null`) are listed as unsupported. If no audio track is playable, play the video muted
   with a notice.
+- **Downmix (2026-10-24): our own, not Mediabunny's.** A transcode keeps the decoded layout through
+  Mediabunny's resampler (48 kHz only) and mixes it to stereo in the conversion's `process` step
+  (`processedNumberOfChannels: 2`; `src/lib/player/downmix.ts`). Mediabunny's remix knows only 1, 2,
+  4 and 6 channels; any other count keeps channels 0 and 1. So DTS 5.0, DTS-ES 6.1 and DTS-HD MA /
+  E-AC-3 7.1 lost the centre: no dialogue (reported on a DTS track; DTS/AC-3/E-AC-3 5.1 were already
+  right). Its 5.1 mix is not limited either. Ours is ITU-R BS.775: L' = L + 0.707·C + 0.707·(Ls + Lb)
+  - 0.5·Cs, R' likewise, LFE dropped, then a peak limiter at 0 dBFS (instant attack, 0.2 s release),
+    which leaves anything under full scale untouched (stereo passes through as decoded). Decoded
+    samples carry no channel layout: every decoder we use outputs FFmpeg's native (WAV/SMPTE) order
+    (`@mediabunny/ac3` and `@mediabunny/dts` are FFmpeg, and WebCodecs uses the same order), so the
+    layout comes from the channel count: 3 = 3.0, 4 = quad, 5 = 5.0, 6 = 5.1, 7 = 6.1 (back centre),
+    8 = 7.1 (back pair, then sides). The ambiguous counts (2.1, 4.1, 3/1) take the reading with a centre, so
+    dialogue is never dropped. Reading the layout from the bitstream headers (AC-3 `acmod`, DTS `AMODE`)
+    would settle those rare cases, at the cost of a packet read before every start. Checked by
+    `e2e/surround.spec.ts`: a tone per channel in `surround.mkv`, measured per output with Web Audio.
 - **Audio track switching** (`HTMLMediaElement.audioTracks` is not used anywhere):
   1. Cancel the audio conversion and `abort()` the audio SourceBuffer, keeping everything it has
      buffered. The old track plays on until the new one replaces it. Cutting it (all of it, or

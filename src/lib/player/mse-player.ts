@@ -45,6 +45,7 @@ import {
   type SilencePlan,
   type TranscodeTarget,
 } from './codecs';
+import { stereoDownmixer } from './downmix';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { AAC_FRAME_SAMPLES, silentAacFrame } from './silence';
 import {
@@ -1017,9 +1018,18 @@ export class MsePlayer {
       video: (t) => (p.kind === 'video' && t.id === p.trackId ? {} : { discard: true }),
       audio: (t) => {
         if (p.kind !== 'audio' || t.id !== p.trackId) return { discard: true };
-        return transcode
-          ? { codec: transcode.target.codec, ...TRANSCODE_AUDIO, forceTranscode: true }
-          : {};
+        if (!transcode) return {};
+        // Resample only: the decoded layout reaches our own stereo downmix (docs/decisions/0003).
+        const { numberOfChannels, sampleRate, bitrate } = TRANSCODE_AUDIO;
+        return {
+          codec: transcode.target.codec,
+          sampleRate,
+          bitrate,
+          forceTranscode: true,
+          process: stereoDownmixer(mb.AudioSample),
+          processedNumberOfChannels: numberOfChannels,
+          processedSampleRate: sampleRate,
+        };
       },
       trim: { start: k },
       // Video is never transcoded (it can't be encoded in real time); copied audio must stay copied.
