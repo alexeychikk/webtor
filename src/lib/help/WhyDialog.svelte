@@ -4,7 +4,7 @@
   import { SHORTCUTS } from '../player/shortcuts';
   import { relaySettings } from '../torrent/relay-settings.svelte';
   import IconButton from '../ui/IconButton.svelte';
-  import { showPageDialog } from '../ui/page-dialog';
+  import { closeOnBackdrop, showPageDialog } from '../ui/page-dialog';
   import { helpDialog } from './help-dialog.svelte';
 
   const WEBTORRENT_DESKTOP_URL = 'https://webtorrent.io/desktop/';
@@ -27,6 +27,9 @@
   function close() {
     helpDialog.open = false;
   }
+
+  // Close button, Esc (`onclose`) and a click on the backdrop all close it.
+  $effect(() => (dialog ? closeOnBackdrop(dialog, close) : undefined));
 
   function openRelay() {
     close();
