@@ -16,8 +16,9 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
   TrueHD and bitmap subtitles (PGS) are unsupported.
 - **HDR passes through, untouched.** HDR10/HLG (HEVC, AV1, VP9.2) keep their colour tags in the remux and
   show as HDR where the browser does (Chrome/Edge on Windows with HDR on and a HEVC GPU decoder, Firefox ≥ 153,
-  Safari). Dolby Vision is never recognised: profile 8/7 plays its HDR10/HLG base, profile 5 gets wrong
-  colours. See `docs/decisions/0010-hdr-video.md`.
+  Safari). Dolby Vision itself never shows: profile 7/8.x plays its HDR10/HLG base (toast
+  `dolby-vision-base-layer`); profile 5, compatibility id 0 and MP4 `dvh1`/`dvhe` are refused
+  (`dolby-vision-unsupported`). See `docs/decisions/0010-hdr-video.md`.
 
 ## Stack
 
@@ -46,6 +47,7 @@ pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
 scripts/release-relay.sh <version> [all|binaries|image|build]   # relay release, see below
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
+node scripts/make-dv-fixtures.mjs   # dolby-vision-p5/p8.mkv from short-audio/sample.mkv (make-fixtures.sh runs it)
 node scripts/make-icons.mjs   # public/favicon-32.png + apple-touch-icon.png from public/favicon.svg (Playwright)
 scripts/deploy-relay-oci.sh [--destroy] [--dry-run | --print-cloud-init]   # relay on Oracle Cloud, see below
 cd relay && go test ./...  # relay checks: gofmt -l . && go vet ./... && go test ./...  (relay/CLAUDE.md)
@@ -152,6 +154,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
   downmix.ts                   stereo downmix of every transcode (ITU matrix by channel count, limiter;
                                Mediabunny `process` step, ADR 0003 "Downmix")
+  dolby-vision.ts              DV record (MKV `BlockAdditionMapping` dvcC/dvvC via `readMkvHeader().videoTracks`,
+                               MP4 `dv*` sample entries) → base-layer toast or refusal (ADR 0010)
   remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   PlayerControls.svelte        control layer over the picture: scrims, title strip, seek bar (track, downloaded,
                                buffered, played; hover time), play, volume, time, the one fullscreen icon
@@ -352,6 +356,9 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
 - `surround.mkv`: 8 s 320×180 H.264, one tone per channel (L 400, R 600, C 1000, LFE 60, Ls 1400,
   Rs 1800 Hz) in "DTS 5.1" (default), "AC-3 5.1", "E-AC-3 5.1", "DTS 5.0". `e2e/surround.spec.ts`
   measures each tone per stereo output (Web Audio splitter + analysers on the `<video>`).
+- `dolby-vision-p5.mkv` (= `short-audio.mkv` + `dvcC` profile 5: error card) and `dolby-vision-p8.mkv`
+  (= `sample.mkv` + `dvvC` profile 8.1: plays, toast), written by `scripts/make-dv-fixtures.mjs` into the
+  Void ffmpeg leaves before Info/Tracks. Synthetic headers: `src/lib/subtitles/mkv/test-ebml.ts`.
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the

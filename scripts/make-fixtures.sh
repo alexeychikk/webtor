@@ -162,4 +162,6 @@ for f in 400 600 1000 60 1400 1800; do tones+=(-f lavfi -i "sine=frequency=$f:du
   -metadata:s:a:3 language=eng -metadata:s:a:3 title="DTS 5.0" \
   -disposition:a:0 default \
   surround.mkv
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv
+# dolby-vision-p5.mkv / -p8.mkv: short-audio.mkv / sample.mkv with a DV configuration record.
+node ../../scripts/make-dv-fixtures.mjs
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv
