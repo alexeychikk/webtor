@@ -90,7 +90,10 @@ an existing VM, `DRY_RUN_EXISTING_RESERVED=1` it holding the reserved IP, `DRY_R
 no reserved IP, `DRY_RUN_FAIL_MOVE=1` a failing reserved-IP move, `DRY_RUN_FAIL_WAIT=1` a failing state read of the booting new VM: the upgrade rolls back;
 `DRY_RUN_NO_ANSWER=1` a relay that doesn't answer in time, `DRY_RUN_EXISTING_RESERVED=free` a VM still waiting for the reserved IP). An upgrade
 that fails after the launch (an EXIT trap) terminates the new VM and gives the reserved IP back;
-call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition), `--print-cloud-init` piped to
+call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition), `scripts/deploy-relay-oci.test.sh` (dry-run assertions, e.g. the storage check:
+`DRY_RUN_USED_GB=<n>[,<n>…]` = unattached volumes next to the old VM's own 50 GB boot volume; an
+upgrade is judged on the total after it terminates the old VM, every counted volume is logged with its
+attachment), `--print-cloud-init` piped to
 `cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)
