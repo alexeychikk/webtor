@@ -166,8 +166,16 @@ The VM's shape sets the relay's speed: Oracle caps each VM's internet bandwidth 
 - **Checks before launching:** that `OCI_REGION` is the home region (Always Free exists only there),
   that the tenancy's other instances leave room in the free allowance (A1: 2 OCPUs and 12 GB in total;
   two E2.1.Micro), and that its boot and block volumes leave room for the VM's 50 GB boot volume (200
-  GB in total, both VMs' volumes counted during an upgrade). It stops with a message otherwise, unless
-  `allow_paid` accepts the cost, which it logs.
+  GB in total, detached and preserved boot volumes included; 50 GB is the smallest boot volume Oracle
+  takes). It stops with a message otherwise, unless `allow_paid` accepts the cost, which it logs. The
+  log lists every volume it counted: name, boot or block, size, and the instance it is attached to
+  or "not attached". A volume that isn't attached is usually a leftover: delete it in the OCI Console
+  (Storage → Boot Volumes / Block Volumes) to make room.
+- **Storage during an upgrade:** the check counts the total once the upgrade has terminated the old VM
+  and its boot volume (marked "terminated by this upgrade" in the list). If only the hour or so
+  while both VMs exist goes past 200 GB, the upgrade goes ahead without `allow_paid` and logs that
+  overlap's cost: about $0.003 an hour for 50 GB, billed by the hour. If it is still over after the
+  old VM is gone, it stops (or, with `allow_paid`, logs the monthly cost).
 - Oracle's terms apply to what you download through it, and swarm peers see the VM's IP address.
 
 ### Any server with Docker

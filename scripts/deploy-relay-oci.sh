@@ -33,8 +33,9 @@
 # --dry-run needs none of them: it prints the OCI calls it would make (with stand-in responses, as if
 # nothing existed yet) and the rendered cloud-init. The token is never printed: output shows
 # <RELAY_TOKEN> instead. Dry-run knobs: DRY_RUN_NO_A1=1 simulates "Out of host capacity" for the A1
-# shape, DRY_RUN_NOT_HOME=1 a region that isn't the home region, DRY_RUN_USED_GB=<n> an existing
-# boot volume of n GB, DRY_RUN_EXISTING_SHAPE=<shape> (and DRY_RUN_EXISTING_OCPUS=<n>) an existing
+# shape, DRY_RUN_NOT_HOME=1 a region that isn't the home region, DRY_RUN_USED_GB=<n>[,<n>...]
+# volumes of these sizes that aren't attached to anything (a boot volume, then block volumes) next
+# to the existing VM's own 50 GB boot volume, DRY_RUN_EXISTING_SHAPE=<shape> (and DRY_RUN_EXISTING_OCPUS=<n>) an existing
 # relay VM (DRY_RUN_EXISTING_RESERVED=1: holding the reserved public IP; =free: launched for it, but
 # it is still unassigned, as after a first deploy that timed out), DRY_RUN_NO_RESERVED_IP=1
 # an account that can't reserve a public IP, DRY_RUN_FAIL_MOVE=1 a failing move of the reserved IP
@@ -321,6 +322,8 @@ fake_oci() {
     if [[ " $* " == *" $DRY_OLD "* ]]; then
       local shape=${DRY_RUN_EXISTING_SHAPE:-$MICRO_SHAPE} ocpus=${DRY_RUN_EXISTING_OCPUS:-1}
       jq -n --arg s "$shape" --argjson o "$ocpus" --argjson t "$TAGS" '{data: {"lifecycle-state": "RUNNING",
+        "display-name": "webtor-relay", "compartment-id": "ocid1.tenancy.oc1..dryrun",
+        "availability-domain": "Xxxx:EU-FRANKFURT-1-AD-1",
         shape: $s, "shape-config": {ocpus: $o, "memory-in-gbs": (if $s | test("Micro") then 1 else $o * 6 end)},
         "freeform-tags": ($t + {config: "dryrun"} + (if env.DRY_RUN_EXISTING_RESERVED // "" | . == "" then {}
           else {"reserved-ip": "want"} end))}}'
@@ -376,14 +379,30 @@ fake_oci() {
     fi
     echo '{"data":{"id":"ocid1.publicip.oc1.dryrun-ephemeral","ip-address":"203.0.113.10","lifetime":"EPHEMERAL"}}'
     ;;
-  "bv boot-volume get") echo "{\"data\":{\"size-in-gbs\":${DRY_RUN_USED_GB:-0}}}" ;;
+  "bv boot-volume get" | "bv volume get")
+    # The existing VM's own boot volume, else the n-th size of DRY_RUN_USED_GB.
+    if [[ $5 == *-existing ]]; then
+      jq -n --argjson s $BOOT_VOLUME_GB '{data: {"display-name": "webtor-relay (Boot Volume)", "size-in-gbs": $s}}'
+    else
+      local n=${5##*-}
+      jq -n --arg k "$2" --arg n "$n" --argjson s "$(cut -d, -f"$n" <<<"$DRY_RUN_USED_GB")" \
+        '{data: {"display-name": (if $k == "boot-volume" then "old-vm-\($n) (Boot Volume)" else "data-\($n)" end),
+          "size-in-gbs": $s}}'
+    fi
+    ;;
+  "compute boot-volume-attachment list")
+    if [[ " $* " == *" $DRY_OLD "* ]]; then
+      echo '{"data":[{"boot-volume-id":"ocid1.bootvolume.oc1.dryrun-existing","lifecycle-state":"ATTACHED"}]}'
+    fi
+    ;;
+  "compute volume-attachment list") ;;
   "search resource structured-search")
     if [[ " $* " == *" query bootvolume, volume "* ]]; then
-      if [[ -n ${DRY_RUN_USED_GB:-} ]]; then
-        echo '{"data":{"items":[{"identifier":"ocid1.bootvolume.oc1.dryrun","resource-type":"BootVolume"}]}}'
-      else
-        echo '{"data":{"items":[]}}'
-      fi
+      jq -n --arg used "${DRY_RUN_USED_GB:-}" --arg old "${DRY_RUN_EXISTING_SHAPE:-}" '{data: {items: (
+        (if $old == "" then [] else [{identifier: "ocid1.bootvolume.oc1.dryrun-existing", "resource-type": "BootVolume"}] end)
+        + ($used | if . == "" then [] else split(",") end | to_entries | map(if .key == 0
+          then {identifier: "ocid1.bootvolume.oc1.dryrun-\(.key + 1)", "resource-type": "BootVolume"}
+          else {identifier: "ocid1.volume.oc1.dryrun-\(.key + 1)", "resource-type": "Volume"} end)))}}'
     elif [[ -n ${DRY_RUN_EXISTING_SHAPE:-} ]]; then
       echo "{\"data\":{\"items\":[{\"identifier\":\"$DRY_OLD\",\"resource-type\":\"Instance\"}]}}"
     else
@@ -627,40 +646,137 @@ monthly_usd() {
     BEGIN { if (s == a1) { o = over(o, uo, fo); m = over(m, um, fm) }; printf "%.0f\n", (o * po + m * pm) * h }'
 }
 
-# Always Free covers 200 GB of boot and block volumes in total, across the tenancy (detached and
-# preserved boot volumes included). Past it, a new boot volume is billed: allowed with
-# RELAY_ALLOW_PAID=1 (logged), else it dies. An upgrade counts the old VM's volume too: both exist
-# until the old VM is terminated.
+# volume_attachments [<old VM id>]: one line "<volume id>\t<instance name> (<state>)\t<1 if it is the
+# old VM's boot volume, else 0>" per boot or block volume attached to one of the tenancy's instances.
+# Best effort: a lookup that fails is logged and printed as a line "-" (attachments unknown).
+volume_attachments() {
+  local old=${1:-} ids id info name state comp ad vol mine
+  ids=$(oci_ search resource structured-search \
+    --query-text "query instance resources where lifecycleState != 'TERMINATED' && lifecycleState != 'TERMINATING'" |
+    jq -r '.data.items[]?.identifier') || {
+    log "warning: can't list the tenancy's instances to tell what the volumes are attached to"
+    echo -
+    ids=""
+  }
+  if [[ -n $old ]] && ! grep -qxF "$old" <<<"$ids"; then
+    ids=$(printf '%s\n%s' "$ids" "$old")
+  fi
+  for id in $ids; do
+    # No empty fields: read would merge adjacent tabs.
+    info=$(oci_ compute instance get --instance-id "$id" | jq -r '[.data["display-name"] // "?",
+      .data["lifecycle-state"] // "?", .data["compartment-id"] // "-", .data["availability-domain"] // "-"] | @tsv') || {
+      log "warning: can't read instance $id to tell which volumes it has"
+      echo -
+      continue
+    }
+    IFS=$'\t' read -r name state comp ad <<<"$info"
+    mine=0
+    [[ $id != "$old" ]] || mine=1
+    vol=$(oci_ compute boot-volume-attachment list --compartment-id "$comp" --availability-domain "$ad" \
+      --instance-id "$id" --all |
+      jq -r '.data[]? | select(.["lifecycle-state"] | IN("ATTACHING", "ATTACHED")) | .["boot-volume-id"]') || {
+      log "warning: can't list the boot volume of instance $name"
+      echo -
+    }
+    for vol in $vol; do
+      printf '%s\t%s (%s)\t%s\n' "$vol" "$name" "$state" "$mine"
+    done
+    vol=$(oci_ compute volume-attachment list --compartment-id "$comp" --instance-id "$id" --all |
+      jq -r '.data[]? | select(.["lifecycle-state"] | IN("ATTACHING", "ATTACHED")) | .["volume-id"]') || {
+      log "warning: can't list the block volumes of instance $name"
+      echo -
+    }
+    for vol in $vol; do
+      printf '%s\t%s (%s)\t0\n' "$vol" "$name" "$state"
+    done
+  done
+}
+
+# check_free_storage [<old VM id>]: Always Free covers 200 GB of boot and block volumes in total,
+# across the tenancy (detached and preserved boot volumes included). Past it, a new boot volume is
+# billed: allowed with RELAY_ALLOW_PAID=1 (logged), else it dies. An upgrade is judged on the total
+# once it has terminated the old VM with its boot volume: the overlap while both exist (about an hour)
+# is billed by the hour, a few cents at most, so it is only logged. Every counted volume is listed
+# with what it is attached to, so the user can tell which leftover to delete.
 check_free_storage() {
-  local items id type size used=0 total over
+  local old=${1:-} items attached id type kind info size name att where used=0 old_boot=0 unknown=0
+  local list="" unattached="" peak after over cost
   items=$(oci_ search resource structured-search \
     --query-text "query bootvolume, volume resources where lifecycleState != 'TERMINATED' && lifecycleState != 'TERMINATING'" |
     jq -r '.data.items[]? | "\(.identifier) \(.["resource-type"])"') ||
     die "can't list the tenancy's volumes to check the Always Free storage (the user needs permission to inspect volumes)"
+  attached=""
+  if [[ -n $items ]]; then
+    attached=$(volume_attachments "$old")
+  fi
+  if grep -qx -- - <<<"$attached"; then
+    unknown=1
+  fi
   while read -r id type; do
     [[ -n $id ]] || continue
     case $type in
-    BootVolume) size=$(oci_ bv boot-volume get --boot-volume-id "$id" | jq -r '.data["size-in-gbs"] // empty') ;;
-    *) size=$(oci_ bv volume get --volume-id "$id" | jq -r '.data["size-in-gbs"] // empty') ;;
+    BootVolume)
+      kind=boot
+      info=$(oci_ bv boot-volume get --boot-volume-id "$id")
+      ;;
+    *)
+      kind=block
+      info=$(oci_ bv volume get --volume-id "$id")
+      ;;
     esac || die "can't read volume $id to check the Always Free storage"
+    size=$(jq -r '.data["size-in-gbs"] // empty' <<<"$info")
+    name=$(jq -r '.data["display-name"] // empty' <<<"$info")
     [[ $size =~ ^[0-9]+$ ]] || die "volume $id has no size (got '$size')"
+    [[ -n $name ]] || name=$id
     used=$((used + size))
+    att=$(awk -F'\t' -v v="$id" '$1 == v { print $2 "\t" $3; exit }' <<<"$attached")
+    if [[ -n $att ]]; then
+      where="attached to ${att%%$'\t'*}"
+      if [[ ${att#*$'\t'} == 1 ]]; then
+        where="$where: terminated by this upgrade"
+        old_boot=$((old_boot + size))
+      fi
+    elif ((unknown)); then
+      where="attachment unknown"
+    else
+      where="not attached"
+      unattached="$unattached; $name: $size GB $kind volume"
+    fi
+    list="$list"$'\n'"  - $name: $kind volume, $size GB, $where"
   done <<<"$items"
-  total=$((used + BOOT_VOLUME_GB))
-  local during=""
-  if [[ -n ${OLD_ID:-} ]]; then
-    during=", counting the old VM's boot volume until the upgrade terminates it"
+  log "Storage: the tenancy's boot and block volumes take $used of the $FREE_STORAGE_GB GB Always Free storage:${list:- none}"
+  if [[ -n $old ]] && ((old_boot == 0)); then
+    log "Storage: the old VM's boot volume wasn't found among them; counting every volume as staying."
   fi
-  if ((total <= FREE_STORAGE_GB)); then
-    log "Storage: $used GB used, $BOOT_VOLUME_GB GB more stays within the $FREE_STORAGE_GB GB Always Free allowance$during."
+  peak=$((used + BOOT_VOLUME_GB))
+  after=$((peak - old_boot))
+  if ((after <= FREE_STORAGE_GB)); then
+    if ((peak <= FREE_STORAGE_GB)); then
+      log "Storage: the relay's $BOOT_VOLUME_GB GB boot volume makes it $peak GB, within the free storage$( ((old_boot)) && printf ' (%s GB once the upgrade terminates the old VM)' "$after")."
+    else
+      over=$((peak - FREE_STORAGE_GB))
+      cost=$(awk -v g=$over -v p=$BLOCK_GB_MONTH_USD -v h=$HOURS_PER_MONTH 'BEGIN { printf "%.3f", g * p / h }')
+      log "Storage: the relay's $BOOT_VOLUME_GB GB boot volume makes it $peak GB while the old VM still exists: $over GB over the free storage, briefly, until the upgrade terminates the old VM (then $after GB, free). That overlap is billed by the hour: about \$$cost an hour, cents at most ($PRICE_LIST_URL)."
+    fi
     return 0
   fi
-  over=$((total - FREE_STORAGE_GB))
+  over=$((after - FREE_STORAGE_GB))
+  cost=$(awk -v g=$over -v p=$BLOCK_GB_MONTH_USD 'BEGIN { printf "%.2f", g * p }')
+  local what="the relay's $BOOT_VOLUME_GB GB boot volume would make it $after GB"
+  if ((old_boot)); then
+    what="even after the upgrade terminates the old VM's $old_boot GB boot volume, $what"
+  fi
   if ((RELAY_ALLOW_PAID)); then
-    log "Storage: $used GB used; the relay's $BOOT_VOLUME_GB GB boot volume makes it $total GB$during, $over GB over the $FREE_STORAGE_GB GB Always Free storage. That part is billed: about \$$(awk -v g=$over -v p=$BLOCK_GB_MONTH_USD 'BEGIN { printf "%.2f", g * p }') a month, by the hour ($PRICE_LIST_URL)."
+    log "Storage: $what, $over GB over the $FREE_STORAGE_GB GB Always Free storage. That part is billed: about \$$cost a month, by the hour ($PRICE_LIST_URL)."
     return 0
   fi
-  die "the tenancy's boot and block volumes already take $used of the $FREE_STORAGE_GB GB Always Free storage; the relay's $BOOT_VOLUME_GB GB boot volume would go $over GB over it$during, which is billed. Free up space (delete unused volumes) first, or set RELAY_ALLOW_PAID=1 to accept the cost."
+  local fix="Free up space (delete volumes you don't need in the OCI Console: Storage → Boot Volumes / Block Volumes)"
+  if [[ -n $unattached ]]; then
+    fix="Not attached to anything: ${unattached#; }. Delete the ones you don't need in the OCI Console (Storage → Boot Volumes / Block Volumes)"
+  elif ((!unknown)); then
+    fix="Every volume is attached to an instance: free up space (delete instances or volumes you don't need in the OCI Console)"
+  fi
+  die "$what, $over GB over the $FREE_STORAGE_GB GB Always Free storage, which is billed (about \$$cost a month). $fix, or set RELAY_ALLOW_PAID=1 to accept the cost."
 }
 
 # launch_instance <user-data> <config tag> [<VM it replaces> <its Mbit/s>]: launches the first
@@ -678,7 +794,7 @@ launch_instance() {
   ads=$(oci_ iam availability-domain list --compartment-id "$OCI_TENANCY_OCID" | jq -r '.data[].name')
   [[ -n $ads ]] || die "no availability domains in $OCI_REGION"
   offered=$(oci_ compute shape list --compartment-id "$COMPARTMENT" --all | jq -r '.data[]?.shape' | sort -u)
-  check_free_storage
+  check_free_storage "$old"
 
   cands=$(candidates)
   # fd 3: the loop body runs commands that could read stdin.
