@@ -11,6 +11,8 @@ export type PlaybackErrorCode =
   | 'unsupported-container'
   | 'unsupported-video-codec'
   | 'video-needs-relay'
+  | 'dolby-vision-unsupported'
+  | 'dolby-vision-base-layer'
   | 'unsupported-audio-codec'
   | 'no-mse'
   | 'no-playable-audio'
@@ -47,6 +49,13 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'video-needs-relay':
     'This video uses an old format that browsers can’t play. Converting it needs a relay you run ' +
     'yourself (webtor-relay) with ffmpeg installed.',
+  'dolby-vision-unsupported':
+    'This video is Dolby Vision without an HDR10 or SDR fallback, and browsers can’t show Dolby ' +
+    'Vision: it would play with wrong, green and purple colours. Look for an HDR10 or SDR release ' +
+    'of it.',
+  'dolby-vision-base-layer':
+    'Browsers can’t show Dolby Vision, so this video plays its HDR10/HLG fallback (SDR in a few ' +
+    'releases). The colours are right; only Dolby Vision’s scene-by-scene tuning is missing.',
   'unsupported-audio-codec':
     'This audio track cannot be played or converted in the browser. Pick another audio track.',
   'no-mse': 'This browser cannot stream video (Media Source Extensions missing; iOS needs 17.1+).',
@@ -90,6 +99,8 @@ export const PLAYBACK_ERROR_TITLES: Record<PlaybackErrorCode, string> = {
   'unsupported-container': 'Format not supported',
   'unsupported-video-codec': 'Video codec not supported',
   'video-needs-relay': 'Video needs a relay',
+  'dolby-vision-unsupported': 'Dolby Vision not supported',
+  'dolby-vision-base-layer': 'Dolby Vision plays as HDR10/HLG',
   'unsupported-audio-codec': 'Audio track not supported',
   'no-mse': 'Streaming not supported',
   'no-playable-audio': 'Playing without sound',

@@ -30,9 +30,21 @@ remux and the browser outputs HDR.
   profile 8.1/8.4 and 7 (single-track; the decoder skips RPU/EL NAL units 62/63) play as their
   HDR10/HLG base layer, which is what Chrome ≥ 122 does with them anyway. Profile 5 (IPTPQc2, no
   backward-compatible base) decodes with a green/purple cast. MP4 `dvh1`/`dvhe` sample entries are
-  an unknown codec → `unsupported-video-codec`.
+  an unknown codec.
 - **Nothing in the app touches colour.** There is no canvas, filter or CSS on the video. The relay
   serves the torrent's bytes unchanged. Its ffmpeg conversion (0007 §2) only handles DivX/Xvid AVI.
+
+## Decision: detect Dolby Vision, say what happens
+
+Our EBML header pass (`readMkvHeader`) reads each video track's `BlockAdditionMapping`; a
+`dvcC`/`dvvC`/`dvwC` type carries the DOVIDecoderConfigurationRecord (`src/lib/player/dolby-vision.ts`).
+
+- **Profile 5, compatibility id 0, or no base layer:** refused with `dolby-vision-unsupported` (error
+  card, no Retry), instead of a picture with the wrong colours. MP4 `dvh1`/`dvhe`/`dva1`/`dvav`/`dav1`
+  sample entries (an unknown codec to Mediabunny) get the same error.
+- **Profile 7, 8.x (and any other with a compatibility id):** played as today, as the base layer,
+  plus the toast `dolby-vision-base-layer`.
+- Writing real DV (`dvh1` + `dvcC` in our output, for Safari) stays out of scope.
 
 ## Where it shows as HDR
 

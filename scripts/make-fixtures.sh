@@ -143,4 +143,6 @@ ln -sfn ../sample.mkv resume/extra.mkv
   -metadata:s:a:1 language=rus -metadata:s:a:1 title="Russian AC3" \
   -disposition:a:0 default \
   short-audio.mkv
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv
+# dolby-vision-p5.mkv / -p8.mkv: short-audio.mkv / sample.mkv with a DV configuration record.
+node ../../scripts/make-dv-fixtures.mjs
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv dolby-vision-*.mkv

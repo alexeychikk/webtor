@@ -15,6 +15,7 @@ import {
 } from './embedded';
 import { readAttachments, readCuePoints, readMkvHeader, type MkvSubtitleTrack } from './header';
 import { ByteReader, readRange } from './reader';
+import { cat, el, str, uint, unknownEl, type Bytes } from './test-ebml';
 import { ClusterScanner } from './scanner';
 
 const fixture = new Uint8Array(
@@ -186,28 +187,6 @@ describe('cluster scan on sample.mkv', () => {
   });
 });
 
-// --- A tiny EBML writer for cases the fixture doesn't have. ---
-
-function idBytes(id: number): number[] {
-  const out: number[] = [];
-  for (let v = id; v > 0; v = Math.floor(v / 256)) out.unshift(v & 0xff);
-  return out;
-}
-function sizeBytes(size: number | null): number[] {
-  if (size === null) return [0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-  return [0x10, (size >>> 16) & 0xff, (size >>> 8) & 0xff, size & 0xff].map((b, i) =>
-    i === 0 ? b | ((size / 2 ** 24) & 0x0f) : b,
-  );
-}
-type Bytes = number[] | Uint8Array;
-const cat = (...parts: Bytes[]) => parts.flatMap((p) => [...p]);
-const el = (id: number, ...body: Bytes[]) => {
-  const data = cat(...body);
-  return cat(idBytes(id), sizeBytes(data.length), data);
-};
-const unknownEl = (id: number, ...body: Bytes[]) => cat(idBytes(id), sizeBytes(null), ...body);
-const uint = (id: number, v: number) => el(id, v === 0 ? [0] : idBytes(v));
-const str = (id: number, s: string) => el(id, new TextEncoder().encode(s));
 const block = (track: number, offset: number, payload: Bytes) =>
   cat([0x80 | track, (offset >> 8) & 0xff, offset & 0xff, 0x80], payload);
 
