@@ -228,6 +228,14 @@ docs/decisions/                ADRs
   destroys the MsePlayer and subtitle sources and opens a new one on the same torrent; after a fatal
   error it reloads the torrent on that file. An opened/dropped `.torrent` (`TorrentInput` =
   `Uint8Array`) goes straight to WebTorrent (no relay); its `magnetURI` then goes into the hash.
+- **Switching torrents** (`controller.load` while one plays): `teardown()` runs synchronously before
+  any await (saves the position, bumps `run`, releases player, timers, relay polling, listeners),
+  so the phase goes straight to `connecting`, never `idle` (the landing view). Never await a
+  torrent's destroy unbounded: WebTorrent calls back only after its store and trackers closed, and
+  never when the OPFS store's cleanup throws. `destroyTorrent` (client.ts) is deduplicated and
+  settles after `DESTROY_TIMEOUT_MS`; adds wait for pending destroys and skip a superseded load
+  (`isStale`). `tick` ignores a destroyed torrent (it has no files and no peers). e2e:
+  `e2e/switch.spec.ts` (a hanging `removeEntry` stands in for a stuck store).
 - UI test hooks: `data-testid` `torrent-file` (the .torrent input), `video`, `status` (sr-only live
   region "<phase> · <file name>", with `data-phase`), `error` and `notice` (with `data-code` = the
   `PlaybackErrorCode`), `subtitle-upload` (hidden file input, always in the screen), `screen` (the
