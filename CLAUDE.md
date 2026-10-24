@@ -14,6 +14,10 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
 - **Video is never transcoded.** HEVC and 10-bit H.264 play only where the browser decodes them.
   Audio the browser can't play (AC-3, E-AC-3, DTS, Vorbis…) is transcoded in-browser to Opus/AAC.
   TrueHD and bitmap subtitles (PGS) are unsupported.
+- **HDR passes through, untouched.** HDR10/HLG (HEVC, AV1, VP9.2) keep their colour tags in the remux and
+  show as HDR where the browser does (Chrome/Edge on Windows with HDR on and a HEVC GPU decoder, Firefox ≥ 153,
+  Safari). Dolby Vision is never recognised: profile 8/7 plays its HDR10/HLG base, profile 5 gets wrong
+  colours. See `docs/decisions/0010-hdr-video.md`.
 
 ## Stack
 
@@ -23,7 +27,7 @@ anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torr
 media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay, 0007 AVI
 playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg, 0008 UI
 design system: dark, Lucide icons, every player control inside the player, 0009 per-video watch
-state: remembered tracks and resume).
+state: remembered tracks and resume, 0010 HDR video: what the remux keeps, where it shows).
 
 ## Commands
 
