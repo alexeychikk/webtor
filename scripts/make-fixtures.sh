@@ -6,7 +6,8 @@
 # (docs/decisions/0007): avi-h264-mp3.avi (H.264 High with B-frames + VBR MP3, plays in the browser),
 # avi-xvid-mp3.avi and avi-xvid-ac3.avi (MPEG-4 Part 2 "Xvid": needs the relay to convert the video),
 # and avi-h264-noidx.avi: avi-h264-mp3.avi without its index (idx1 cut, AVIF_HASINDEX cleared).
-# Needs an ffmpeg with libx264 + libxvid + libmp3lame + ac3 on PATH, or:
+# Needs an ffmpeg with libx264 + libxvid + libmp3lame + ac3 + libaom on PATH (scripts/relay-ffmpeg.sh
+# lays out one that has them all), or:
 #   FFMPEG=$(node -e "console.log(require('ffmpeg-static'))") after `npm i --no-save ffmpeg-static`
 set -euo pipefail
 FFMPEG=${FFMPEG:-ffmpeg}
@@ -164,4 +165,14 @@ for f in 400 600 1000 60 1400 1800; do tones+=(-f lavfi -i "sine=frequency=$f:du
   surround.mkv
 # dolby-vision-p5.mkv / -p8.mkv: short-audio.mkv / sample.mkv with a DV configuration record.
 node ../../scripts/make-dv-fixtures.mjs
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv
+# hdr10-av1.mkv: 6 s 320x180 AV1 10-bit tagged BT.2020/PQ (HDR10 without HEVC, so Chromium plays
+# it) + AAC, for the HDR chip and the tone-mapped toast (e2e/hdr.spec.ts, ADR 0010).
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i testsrc2=size=320x180:rate=24:duration=6 \
+  -f lavfi -i sine=frequency=440:duration=6 \
+  -map 0:v -map 1:a \
+  -c:v libaom-av1 -cpu-used 8 -row-mt 1 -g 48 -b:v 150k -pix_fmt yuv420p10le \
+  -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv \
+  -c:a aac -b:a 48k -metadata:s:a:0 language=eng -metadata:s:a:0 title="English AAC" \
+  hdr10-av1.mkv
+ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv hdr10-av1.mkv

@@ -100,6 +100,15 @@
                 onclick={() => helpDialog.show()}
               />
             {/if}
+            {#if t.code === 'hdr-sdr-display'}
+              <IconButton
+                class="small"
+                testid="hdr-help-link"
+                icon={CircleQuestionMark}
+                label="How to see HDR"
+                onclick={() => helpDialog.show('hdr')}
+              />
+            {/if}
             <IconButton
               class="small"
               testid="notice-dismiss"

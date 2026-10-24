@@ -28,7 +28,8 @@ export type PlaybackErrorCode =
   | 'relay-transcode-busy'
   | 'relay-transcode-failed'
   | 'relay-transcode-slow'
-  | 'avi-no-index';
+  | 'avi-no-index'
+  | 'hdr-sdr-display';
 
 export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'invalid-input': 'That is not a magnet link, info hash or .torrent file.',
@@ -87,6 +88,8 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'avi-no-index':
     'This AVI file has no index, so seeking is limited: it plays from the start, and you can only ' +
     'seek within the part loaded so far.',
+  'hdr-sdr-display':
+    'This HDR video plays tone-mapped: turn on HDR in your OS display settings to see it in HDR.',
 };
 
 /** Short titles over the message in the player's error cards and toasts (docs/decisions/0008 §5). */
@@ -117,6 +120,7 @@ export const PLAYBACK_ERROR_TITLES: Record<PlaybackErrorCode, string> = {
   'relay-transcode-failed': 'Relay conversion failed',
   'relay-transcode-slow': 'Relay converts too slowly',
   'avi-no-index': 'Seeking is limited',
+  'hdr-sdr-display': 'HDR video on an SDR display',
 };
 
 export class PlaybackError extends Error {

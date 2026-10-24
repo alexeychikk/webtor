@@ -839,7 +839,12 @@
               onselect={selectFile}
             />
           {:else if m.id === 'stats'}
-            <StatsPanel stats={controller.stats} buffer={controller.buffer} />
+            <StatsPanel
+              stats={controller.stats}
+              buffer={controller.buffer}
+              hdr={controller.hdr}
+              toneMapped={controller.notices.includes('hdr-sdr-display')}
+            />
           {:else if m.id === 'share'}
             <div class="share-panel">
               <p>Couldn’t copy. Copy the link from here:</p>

@@ -62,6 +62,16 @@ Our EBML header pass (`readMkvHeader`) reads each video track's `BlockAdditionMa
   HDR". The display check is `matchMedia('(dynamic-range: high)')`. `video-dynamic-range` isn't in
   Safari or Chromium.
 
+## Decision: show HDR10/HLG, say when it is tone-mapped
+
+- `hdr.ts` classifies the video track's colour space by its transfer only: PQ (16) = HDR10, HLG (18)
+  = HLG, anything else SDR. BT.2020 primaries with an SDR transfer (14) are wide gamut, not HDR, so
+  Mediabunny's `hasHighDynamicRange()` (true for any BT.2020) isn't used.
+- The stats panel shows the format as a chip. An HDR video while `(dynamic-range: high)` is false gets
+  the dismissable toast `hdr-sdr-display` (re-checked on the query's `change`), which links to the
+  help dialog's HDR section (the conditions above, in plain words). A Dolby Vision 7/8.x base layer is
+  classified like any other video (its HDR10/HLG transfer), next to its `dolby-vision-base-layer` toast.
+
 Sources: Chromium `media/formats/mp4/box_definitions.cc` and `media/base/supported_types.cc`;
 https://github.com/StaZhu/enable-chromium-hevc-hardware-decoding;
 https://bugzilla.mozilla.org/show_bug.cgi?id=2025322;

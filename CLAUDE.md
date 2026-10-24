@@ -16,9 +16,10 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
   TrueHD and bitmap subtitles (PGS) are unsupported.
 - **HDR passes through, untouched.** HDR10/HLG (HEVC, AV1, VP9.2) keep their colour tags in the remux and
   show as HDR where the browser does (Chrome/Edge on Windows with HDR on and a HEVC GPU decoder, Firefox ≥ 153,
-  Safari). Dolby Vision itself never shows: profile 7/8.x plays its HDR10/HLG base (toast
-  `dolby-vision-base-layer`); profile 5, compatibility id 0 and MP4 `dvh1`/`dvhe` are refused
-  (`dolby-vision-unsupported`). See `docs/decisions/0010-hdr-video.md`.
+  Safari). The stats panel shows an HDR10/HLG chip; on an SDR display (`(dynamic-range: high)` false)
+  the toast `hdr-sdr-display` says it plays tone-mapped. Dolby Vision itself never shows: profile 7/8.x
+  plays its HDR10/HLG base (toast `dolby-vision-base-layer`); profile 5, compatibility id 0 and MP4
+  `dvh1`/`dvhe` are refused (`dolby-vision-unsupported`). See `docs/decisions/0010-hdr-video.md`.
 
 ## Stack
 
@@ -156,6 +157,7 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
                                Mediabunny `process` step, ADR 0003 "Downmix")
   dolby-vision.ts              DV record (MKV `BlockAdditionMapping` dvcC/dvvC via `readMkvHeader().videoTracks`,
                                MP4 `dv*` sample entries) → base-layer toast or refusal (ADR 0010)
+  hdr.ts                       HDR format from the colour space (transfer PQ/HLG only), tone-mapped rule (ADR 0010)
   remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   PlayerControls.svelte        control layer over the picture: scrims, title strip, seek bar (track, downloaded,
                                buffered, played; hover time), play, volume, time, the one fullscreen icon
@@ -291,7 +293,8 @@ docs/decisions/                ADRs
   (`data-delay` in s), `subtitle-delay-minus|plus|reset`), `audio-menu` (`audio-option`,
   `data-value`, accessible name `audioOptionText`), `files-panel` (`file-list` / `file` with
   `data-index`, `data-kind`, `aria-current`), `stats-panel` (`stats` with `stats-peers`,
-  `relay-peers`, `stats-download`, `stats-upload`, `stats-buffer`, `stats-progress`), `share-panel` (`share-url`,
+  `relay-peers`, `stats-download`, `stats-upload`, `stats-buffer`, `stats-progress`, `stats-hdr` (HDR
+  only, `data-format` `hdr10|hlg`) with `stats-hdr-tone-mapped`), `share-panel` (`share-url`,
   only after a refused copy), `more-menu` (`more-sound`, `more-audio|files|stats`, `share-link`). In
   e2e use `e2e/support/player.ts`: `openMenu(page, trigger)`, `closeMenu`, `selectSubtitle` /
   `selectAudio(page, {label} | {value})`, `subtitleGroup`.
@@ -360,6 +363,8 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   in the browser), `avi-h264-noidx.avi` (the same without `idx1`: the scan path), `avi-xvid-mp3.avi`
   and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay). Synthetic RIFFs (OpenDML, AVIX, `rec `,
   truncation) are built in `src/lib/player/avi/index.test.ts`.
+- `hdr10-av1.mkv`: 6 s 320×180 AV1 10-bit BT.2020/PQ + AAC (HDR10 that Chromium plays; headless Chromium
+  is an SDR display, so the `hdr-sdr-display` toast shows, with `hdr-help-link` → help section `hdr-help`).
 - `short-audio.mkv`: 12 s 320×180 H.264 whose audio tracks ("English AAC", "Russian AC3") end at 6 s.
 - `surround.mkv`: 8 s 320×180 H.264, one tone per channel (L 400, R 600, C 1000, LFE 60, Ls 1400,
   Rs 1800 Hz) in "DTS 5.1" (default), "AC-3 5.1", "E-AC-3 5.1", "DTS 5.0". `e2e/surround.spec.ts`
