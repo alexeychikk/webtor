@@ -150,7 +150,10 @@ The VM's shape sets the relay's speed: Oracle caps each VM's internet bandwidth 
   alone only updates the relay, and says so).
 - **Your own domain:** add a repository _variable_ `RELAY_HOST` (e.g. `relay.example.com`) before
   the VM is created (or `destroy` first). The run prints the VM's IP: point the name's DNS A record
-  at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it.
+  at it. Caddy gets the certificate once the name resolves; run `deploy` again to wait for it. An
+  upgrade that changes the address (the first one, or one without a reserved IP) checks the new VM
+  on its own IP, retires the old one and prints the IP the A record must move to: the relay is back
+  at the same URL once the record points there.
 - **Remove:** run the workflow with `destroy`; it deletes everything it created, the reserved IP too.
 - **Checks before launching:** that `OCI_REGION` is the home region (Always Free exists only there),
   that the tenancy's other instances leave room in the free allowance (A1: 2 OCPUs and 12 GB in total;

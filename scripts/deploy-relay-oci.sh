@@ -35,7 +35,8 @@
 # shape, DRY_RUN_NOT_HOME=1 a region that isn't the home region, DRY_RUN_USED_GB=<n> an existing
 # boot volume of n GB, DRY_RUN_EXISTING_SHAPE=<shape> (and DRY_RUN_EXISTING_OCPUS=<n>) an existing
 # relay VM (DRY_RUN_EXISTING_RESERVED=1: holding the reserved public IP), DRY_RUN_NO_RESERVED_IP=1
-# an account that can't reserve a public IP.
+# an account that can't reserve a public IP, DRY_RUN_FAIL_MOVE=1 a failing move of the reserved IP
+# to the new VM (an upgrade rolls back).
 set -euo pipefail
 # Plain bash 3.2 (macOS) works: no empty-array expansions under set -u, no GNU-only tools.
 cd "$(dirname "$0")/.."
@@ -168,6 +169,9 @@ check_inputs() {
   [[ $RELAY_WAIT_SECONDS =~ ^[0-9]+$ ]] || die "RELAY_WAIT_SECONDS must be a number"
   [[ $RELAY_OCPUS =~ ^[1-4]$ ]] || die "RELAY_OCPUS must be 1, 2, 3 or 4"
   [[ $RELAY_ALLOW_PAID =~ ^[01]$ ]] || die "RELAY_ALLOW_PAID must be 1 (allow a paid shape) or 0"
+  if [[ $action == deploy ]] && ((RELAY_OCPUS > FREE_A1_OCPUS && !RELAY_ALLOW_PAID)); then
+    die "RELAY_OCPUS=$RELAY_OCPUS: an A1 with over $FREE_A1_OCPUS OCPUs is billed (Always Free covers $FREE_A1_OCPUS OCPUs and $FREE_A1_MEMORY_GB GB). Set RELAY_ALLOW_PAID=1 (the workflow's allow_paid) to accept the cost, or RELAY_OCPUS=$FREE_A1_OCPUS to stay free."
+  fi
   A1_OCPUS=$RELAY_OCPUS
   A1_MEMORY_GB=$((RELAY_OCPUS * A1_MEMORY_PER_OCPU_GB))
 }
@@ -220,7 +224,18 @@ EOF
 # --- OCI CLI ------------------------------------------------------------------------------------
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# An upgrade that fails after the launch (a die anywhere) must not leave the new VM next to the old one.
+on_exit() {
+  local rc=$?
+  set +e
+  if [[ -n ${PENDING_NEW:-} ]]; then
+    log "deploy-relay-oci: error: the upgrade failed (see above): rolling back, the old VM keeps serving."
+  fi
+  rollback
+  rm -rf "$WORK"
+  exit $rc
+}
+trap on_exit EXIT
 
 setup_oci() {
   if ((dry_run)); then
@@ -252,7 +267,7 @@ oci_() {
   log "+ oci $*" 2>&4
   if ((dry_run)); then
     fake_oci "$@"
-    return
+    return $? # explicit: a bare return in a trap handler (rollback) returns the status before the trap
   fi
   oci --config-file "$WORK/config" --output json "$@"
 }
@@ -335,7 +350,18 @@ fake_oci() {
         "assigned-entity-id": "ocid1.privateip.oc1.dryrun-existing"}]}'
     fi
     ;;
+  "network public-ip update")
+    if [[ ${DRY_RUN_FAIL_MOVE:-} == 1 && " $* " == *" ocid1.privateip.oc1.dryrun-new "* ]]; then
+      echo 'ServiceError: {"code": "InternalError", "message": "dry run: the move fails", "status": 500}' >&2
+      return 1
+    fi
+    echo '{"data":{"id":"ocid1.publicip.oc1.dryrun-reserved","lifecycle-state":"ASSIGNED"}}'
+    ;;
   "network public-ip get")
+    if [[ " $* " == *" ocid1.privateip.oc1.dryrun-existing "* && ${DRY_RUN_EXISTING_RESERVED:-} == 1 ]]; then
+      echo '{"data":{"id":"ocid1.publicip.oc1.dryrun-reserved","ip-address":"203.0.113.20","lifetime":"RESERVED"}}'
+      return 0
+    fi
     echo '{"data":{"id":"ocid1.publicip.oc1.dryrun-ephemeral","ip-address":"203.0.113.10","lifetime":"EPHEMERAL"}}'
     ;;
   "bv boot-volume get") echo "{\"data\":{\"size-in-gbs\":${DRY_RUN_USED_GB:-0}}}" ;;
@@ -470,7 +496,7 @@ instance_state() {
 wait_instance() {
   local id=$1 want=$2 state deadline=$((SECONDS + 1200))
   while :; do
-    state=$(instance_state "$id")
+    state=$(instance_state "$id") || die "can't read the state of instance $id"
     if [[ $state == "$want" ]]; then
       return 0
     elif [[ $state == TERMINATED || $state == TERMINATING ]]; then
@@ -723,7 +749,9 @@ launch_instance() {
 public_ip_of() {
   local ip deadline=$((SECONDS + 300))
   while :; do
-    ip=$(oci_ compute instance list-vnics --instance-id "$1" | jq -r '[.data[]?["public-ip"] // empty][0] // empty')
+    # Called as $(public_ip_of …): set -e is off in there (bash), so check the call itself.
+    ip=$(oci_ compute instance list-vnics --instance-id "$1" | jq -r '[.data[]?["public-ip"] // empty][0] // empty') ||
+      die "can't read the VNICs of instance $1"
     if [[ -n $ip ]]; then
       printf '%s\n' "$ip"
       return 0
@@ -761,13 +789,15 @@ restart_instance() {
 # A reserved public IP outlives instances, so the <ip>.sslip.io relay URL (or RELAY_HOST's A record)
 # stays when a new VM replaces the old one. Oracle doesn't charge for public IPs (no price list
 # entry); Pay As You Go allows 50 per region. Sets RESERVED_ID, RESERVED_IP and RESERVED_AT (the
-# private IP it is assigned to, or -). Returns 1 when the account can't reserve one.
+# private IP it is assigned to, or -). RESERVED_ID stays empty when the account can't reserve one.
 ensure_reserved_ip() {
   local found
+  RESERVED_ID="" RESERVED_IP="" RESERVED_AT=-
   found=$(oci_ network public-ip list --compartment-id "$COMPARTMENT" --scope REGION --lifetime RESERVED --all |
     jq -r '[.data[]? | select(.["freeform-tags"]["managed-by"] == "webtor-relay")
       | select(.["lifecycle-state"] | IN("TERMINATED", "TERMINATING") | not)][0] // empty
-      | "\(.id) \(.["ip-address"]) \(.["assigned-entity-id"] // .["private-ip-id"] // "-")"')
+      | "\(.id) \(.["ip-address"]) \(.["assigned-entity-id"] // .["private-ip-id"] // "-")"') ||
+    die "can't list the reserved public IPs"
   if [[ -n $found ]]; then
     read -r RESERVED_ID RESERVED_IP RESERVED_AT <<<"$found"
     log "Reserved public IP: reusing $RESERVED_IP"
@@ -778,11 +808,10 @@ ensure_reserved_ip() {
     mask <"$WORK/err" >&2
     log "Can't reserve a public IP: the new VM keeps the address it launched with, so the relay URL"
     log "changes whenever a new VM replaces it."
-    return 1
+    return 0
   fi
   RESERVED_ID=$(data_id <<<"$found")
   RESERVED_IP=$(jq -r '.data["ip-address"]' <<<"$found")
-  RESERVED_AT=-
   log "Reserved public IP: created $RESERVED_IP"
 }
 
@@ -823,21 +852,26 @@ curl_url() {
 
 relay_host() { printf '%s\n' "${RELAY_HOST:-${1//./-}.sslip.io}"; }
 
+# wait_relay <host> [<ip>]: does the relay answer at https://<host>/? With an ip, at that address
+# (curl --resolve), not wherever DNS points. A probe: safe to call in a condition (no set -e needed).
 wait_relay() {
-  local host=$1 deadline=$((SECONDS + RELAY_WAIT_SECONDS)) next_note=0
+  local host=$1 deadline=$((SECONDS + RELAY_WAIT_SECONDS)) next_note=0 at=()
+  if [[ -n ${2:-} ]]; then
+    at=(--resolve "$host:443:$2")
+  fi
   if ((dry_run)); then
-    log "(dry run: would wait up to ${RELAY_WAIT_SECONDS}s for https://$host/ to answer)"
+    log "(dry run: would wait up to ${RELAY_WAIT_SECONDS}s for https://$host/${2:+ on $2} to answer)"
     return 0
   fi
   if ((${REBOOTED:-0})); then
     # Don't take the old relay's last answers for the new one: wait (up to 3 min) until it goes down.
     local down=$((SECONDS + 180))
-    while ((SECONDS < down)) && curl_url "https://$host/" -o /dev/null 2>/dev/null; do
+    while ((SECONDS < down)) && curl_url "https://$host/" ${at[@]+"${at[@]}"} -o /dev/null 2>/dev/null; do
       sleep 5
     done
   fi
   log "Waiting for https://$host/ (first boot installs packages and gets a certificate: 5–10 min)…"
-  until curl_url "https://$host/" -o /dev/null 2>/dev/null; do
+  until curl_url "https://$host/" ${at[@]+"${at[@]}"} -o /dev/null 2>/dev/null; do
     if ((SECONDS > deadline)); then
       log "The relay did not answer at https://$host/ within ${RELAY_WAIT_SECONDS}s."
       log "The VM may still be setting up: run the deploy again in a few minutes (it reboots the VM),"
@@ -852,7 +886,7 @@ wait_relay() {
     sleep 10
   done
   local info
-  if info=$(curl_url "https://$host/$RELAY_TOKEN/v1/info" 2>/dev/null); then
+  if info=$(curl_url "https://$host/$RELAY_TOKEN/v1/info" ${at[@]+"${at[@]}"} 2>/dev/null); then
     log "Relay answers: $(jq -r '"\(.name) \(.version)"' <<<"$info" 2>/dev/null || echo ok)"
   else
     log "warning: the relay answers but rejects RELAY_TOKEN: it was created with another token."
@@ -863,11 +897,12 @@ wait_relay() {
 # wait_setup <ip>: has a new VM finished its first-boot setup? With sslip.io: its relay answers on
 # its own address. With RELAY_HOST (DNS still points at the old address, so no certificate yet):
 # Caddy on port 80 redirects that name to HTTPS, which it does once setup wrote the Caddyfile.
+# A probe, like wait_relay.
 wait_setup() {
   local ip=$1 deadline=$((SECONDS + RELAY_WAIT_SECONDS)) code
   if [[ -z $RELAY_HOST ]]; then
-    wait_relay "$(relay_host "$ip")"
-    return
+    wait_relay "$(relay_host "$ip")" "$ip"
+    return $?
   fi
   if ((dry_run)); then
     log "(dry run: would wait up to ${RELAY_WAIT_SECONDS}s for http://$RELAY_HOST/ on $ip to redirect to HTTPS)"
@@ -903,52 +938,63 @@ check_home_region() {
   log "Region: $OCI_REGION (home region)"
 }
 
-# bring_up [<old VM id> <its Mbit/s>]: launches a new VM and makes it the relay. It first answers on
-# the address it launched with; then (when the account has a reserved public IP) it takes over the
-# reserved one and reboots, so its setup serves that. With an old VM, the old one is terminated only
-# once the new one answers; if the new one fails, the old one keeps (or gets back) the address and
-# the new one is terminated. Sets HOST; returns 1 when the relay doesn't answer.
+# bring_up [<old VM id> <its Mbit/s> <its public IP>]: launches a new VM and makes it the relay. It
+# first answers on the address it launched with; then (when the account has a reserved public IP) it
+# takes over the reserved one and reboots, so its setup serves that. With an old VM, the old one is
+# terminated only once the new one answers; until then any failure (abandon, or a die: the EXIT trap)
+# terminates the new one and gives the reserved IP back to the old one (rollback). Sets HOST, UP (1:
+# the relay answers) and DNS_MOVE (the address RELAY_HOST's A record must move to, if it must).
+# Call it as a plain command, never in a condition or with && / ||: bash ignores set -e in a
+# function called there, and everything it calls would carry on after a failure.
 bring_up() {
-  local old=${1:-} old_mbps=${2:-0} old_private="" ip
+  local old=${1:-} old_mbps=${2:-0} old_ip=${3:-} ip final priv
+  UP=0
   launch_instance "$WORK/user-data" "$CONFIG_TAG" "$old" "$old_mbps"
+  if [[ -n $old ]]; then
+    PENDING_NEW=$INSTANCE_ID
+  fi
   ip=$(public_ip_of "$INSTANCE_ID")
   log "Public IP of the new VM: $ip"
-  if ! ensure_reserved_ip; then
-    HOST=$(relay_host "$ip")
-    dns_note "$ip"
-    if wait_relay "$HOST"; then
-      retire "$old"
+  ensure_reserved_ip
+  final=$ip
+  if [[ -n $RESERVED_ID ]]; then
+    if [[ -n $old && $RESERVED_AT != - ]]; then
+      GIVE_BACK=$RESERVED_AT
+    fi
+    log "Waiting for the new VM's setup on its own address before it takes over $RESERVED_IP…"
+    if ! wait_setup "$ip"; then
+      abandon
       return 0
     fi
-    abandon "$old"
-    return 1
+    log "Moving the reserved public IP $RESERVED_IP to the new VM…"
+    priv=$(primary_private_ip "$INSTANCE_ID")
+    MOVED=1
+    move_reserved_ip "$priv"
+    log "Rebooting the new VM so that its setup serves $RESERVED_IP…"
+    oci_ compute instance action --instance-id "$INSTANCE_ID" --action SOFTRESET >/dev/null
+    REBOOTED=1
+    wait_instance "$INSTANCE_ID" RUNNING || die "the new instance $INSTANCE_ID terminated"
+    final=$RESERVED_IP
   fi
-  if [[ -n $old && $RESERVED_AT != - ]]; then
-    old_private=$RESERVED_AT
+  HOST=$(relay_host "$final")
+  if [[ -n $RELAY_HOST && -n $old && $final != "$old_ip" ]]; then
+    # RELAY_HOST's A record still points at the old VM, which would answer the check, and the new VM
+    # can't get a certificate before the record moves: check the new VM's setup on its own address.
+    log "RELAY_HOST's A record points at the old VM ($old_ip): checking the new VM on $final instead."
+    if ! wait_setup "$final"; then
+      abandon
+      return 0
+    fi
+    DNS_MOVE=$final
+  else
+    dns_note "$final"
+    if ! wait_relay "$HOST" "$final"; then
+      abandon
+      return 0
+    fi
   fi
-  log "Waiting for the new VM's setup on its own address before it takes over $RESERVED_IP…"
-  if ! wait_setup "$ip"; then
-    abandon "$old"
-    return 1
-  fi
-  log "Moving the reserved public IP $RESERVED_IP to the new VM…"
-  move_reserved_ip "$(primary_private_ip "$INSTANCE_ID")"
-  log "Rebooting the new VM so that its setup serves $RESERVED_IP…"
-  oci_ compute instance action --instance-id "$INSTANCE_ID" --action SOFTRESET >/dev/null
-  REBOOTED=1
-  wait_instance "$INSTANCE_ID" RUNNING || die "the new instance $INSTANCE_ID terminated"
-  HOST=$(relay_host "$RESERVED_IP")
-  dns_note "$RESERVED_IP"
-  if wait_relay "$HOST"; then
-    retire "$old"
-    return 0
-  fi
-  if [[ -n $old_private ]]; then
-    log "Giving the reserved public IP back to the old VM…"
-    move_reserved_ip "$old_private"
-  fi
-  abandon "$old"
-  return 1
+  retire "$old"
+  UP=1
 }
 
 dns_note() {
@@ -957,19 +1003,41 @@ dns_note() {
   fi
 }
 
-# The upgrade worked: the old VM goes (and with it its boot volume and allowance).
+# The upgrade worked: the old VM goes (and with it its boot volume and allowance). From here on a
+# failure keeps the new VM.
 retire() {
   [[ -n ${1:-} ]] || return 0
+  PENDING_NEW=""
   log "Terminating the old VM $1 ($OLD_DESC) and its boot volume…"
-  terminate_instance "$1"
+  terminate_instance "$1" ||
+    die "the new relay serves, but terminating the old VM $1 failed: terminate it in the OCI Console (Compute → Instances), or the next run may pick either VM"
   log "Old VM terminated."
 }
 
 # The new VM doesn't answer: with an old VM, that one keeps serving and the new one goes.
 abandon() {
-  [[ -n ${1:-} ]] || return 0
-  log "The new VM did not come up: terminating it ($INSTANCE_ID). The old VM keeps serving."
-  terminate_instance "$INSTANCE_ID"
+  [[ -n ${PENDING_NEW:-} ]] || return 0
+  log "The new VM did not come up. The old VM keeps serving."
+  rollback
+}
+
+# Undoes an unfinished upgrade (abandon, and the EXIT trap after a die): the reserved IP goes back to
+# the old VM if it had it, and the new VM is terminated. Best effort: each step reports its failure.
+rollback() {
+  [[ -n ${PENDING_NEW:-} ]] || return 0
+  local id=$PENDING_NEW
+  PENDING_NEW=""
+  if ((${MOVED:-0})) && [[ -n ${GIVE_BACK:-} ]]; then
+    log "Giving the reserved public IP $RESERVED_IP back to the old VM…"
+    if ! move_reserved_ip "$GIVE_BACK"; then
+      log "warning: giving the reserved public IP back failed: in the OCI Console, assign $RESERVED_IP"
+      log "  to the old VM's primary VNIC (Networking → Reserved public IPs), or run the upgrade again."
+    fi
+  fi
+  log "Terminating the new VM $id…"
+  if ! terminate_instance "$id"; then
+    log "warning: terminating the new VM $id failed: terminate it in the OCI Console (Compute → Instances)."
+  fi
 }
 
 deploy() {
@@ -979,7 +1047,7 @@ deploy() {
     mask <"$WORK/user-data" >&2
     log "--- end of user-data ---"
   fi
-  local ids best_mbps ready=0 upgraded=0 old_host=""
+  local ids best_mbps ready=0 upgraded=0 old_ip="" old_host=""
   # Fingerprint of everything that only applies at launch, to tell when a re-run can't apply it.
   CONFIG_TAG=$({ cat "$WORK/user-data"; printf '%s\n' "$OCI_SSH_PUBLIC_KEY"; } | sha256 | cut -c1-16)
   # The fastest VM the settings launch: the A1 with RELAY_OCPUS (paid shapes get 1 OCPU, 1 Gbit/s).
@@ -990,7 +1058,8 @@ deploy() {
   ids=$(find_instances)
   OLD_ID=$(first_line <<<"$ids")
   if [[ -z $OLD_ID ]]; then
-    bring_up && ready=1
+    bring_up
+    ready=$UP
   else
     if (($(wc -l <<<"$ids") > 1)); then
       log "warning: several $NAME instances exist, using $OLD_ID"
@@ -1008,9 +1077,11 @@ deploy() {
     if ((old_mbps > 0 && old_mbps < best_mbps)); then
       if ((upgrade)); then
         log "Upgrade: replacing it with a faster VM (up to $(rate "$best_mbps"): $A1_SHAPE with $A1_OCPUS OCPUs$( ((RELAY_ALLOW_PAID)) && printf ', else a paid 1 Gbit/s shape'))."
-        old_host=$(relay_host "$(public_ip_of "$OLD_ID")")
+        old_ip=$(public_ip_of "$OLD_ID")
+        old_host=$(relay_host "$old_ip")
         upgraded=1
-        bring_up "$OLD_ID" "$old_mbps" && ready=1
+        bring_up "$OLD_ID" "$old_mbps" "$old_ip"
+        ready=$UP
         if ((!ready)); then
           die "the upgrade did not finish; the old relay keeps serving at https://$old_host/. Run it again later."
         fi
@@ -1037,7 +1108,9 @@ deploy() {
       HOST=$(relay_host "$ip")
       log "Public IP: $ip"
       dns_note "$ip"
-      wait_relay "$HOST" && ready=1
+      if wait_relay "$HOST" "$ip"; then
+        ready=1
+      fi
     fi
   fi
 
@@ -1046,6 +1119,12 @@ deploy() {
     changed="
 The relay URL CHANGED (it was https://$old_host/<your RELAY_TOKEN>): paste the new one into the
 app's relay setting on every device that uses it."
+  fi
+  if [[ -n ${DNS_MOVE:-} ]]; then
+    changed="
+Move the DNS A record of $RELAY_HOST to $DNS_MOVE NOW: the old VM is gone, and the relay
+answers at https://$RELAY_HOST/ (same relay URL) only once the record points there and the new
+VM got its certificate (Caddy keeps retrying; a few minutes after the DNS change)."
   fi
   summary=$(
     cat <<EOF

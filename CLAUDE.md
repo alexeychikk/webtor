@@ -86,7 +86,9 @@ old VM. Never print `RELAY_TOKEN`: output masks it as
 `shellcheck scripts/deploy-relay-oci.sh scripts/deploy-relay-oci/setup.sh`, `--dry-run` (stand-in
 responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity", `DRY_RUN_EXISTING_SHAPE`/`_OCPUS`
 an existing VM, `DRY_RUN_EXISTING_RESERVED=1` it holding the reserved IP, `DRY_RUN_NO_RESERVED_IP=1`
-no reserved IP), `--print-cloud-init` piped to
+no reserved IP, `DRY_RUN_FAIL_MOVE=1` a failing reserved-IP move: the upgrade rolls back). An upgrade
+that fails after the launch (an EXIT trap) terminates the new VM and gives the reserved IP back;
+call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition), `--print-cloud-init` piped to
 `cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)
