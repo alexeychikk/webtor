@@ -163,6 +163,12 @@ The VM's shape sets the relay's speed: Oracle caps each VM's internet bandwidth 
   on its own IP, retires the old one and prints the IP the A record must move to: the relay is back
   at the same URL once the record points there.
 - **Remove:** run the workflow with `destroy`; it deletes everything it created, the reserved IP too.
+  It terminates the VM first and waits until Oracle reports it gone (up to 20 minutes, logging its
+  state), because the network can't go while the VM exists. If the VM is still terminating after
+  that, or wasn't terminated at all, `destroy` stops and says why (with Oracle's own error, if any),
+  keeping the network: run it again once the OCI Console shows the VM Terminated. A re-run waits for
+  a VM that is still terminating. A `deploy` right after a `destroy` first waits for such a VM too:
+  its boot volume counts against the 200 GB of free storage until it is gone.
 - **Checks before launching:** that `OCI_REGION` is the home region (Always Free exists only there),
   that the tenancy's other instances leave room in the free allowance (A1: 2 OCPUs and 12 GB in total;
   two E2.1.Micro), and that its boot and block volumes leave room for the VM's 50 GB boot volume (200

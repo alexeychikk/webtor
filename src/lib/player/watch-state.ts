@@ -58,8 +58,26 @@ export interface WatchState {
   /** Element time the user was at, and the video's duration then (s). */
   position?: number;
   duration?: number;
-  /** `Date.now()` of the last write, for eviction. */
+  /** What the watch history lists and how it reopens the video (ADR 0011). */
+  source?: WatchSource;
+  /** `Date.now()` of the last write, for eviction (and "last watched" in the history). */
   updated: number;
+}
+
+/** How the history names and reopens a video (docs/decisions/0011). */
+export interface WatchSource {
+  /** Torrent name. */
+  name: string;
+  /** File name. */
+  file: string;
+  /** The file sits in a folder of the torrent (its path has a `/`): the history shows its name. */
+  multi: boolean;
+  /** Index into the torrent's files. */
+  index: number;
+  /** What reopens it: the magnet / info hash the user gave, or an opened .torrent's `magnetURI`. */
+  magnet: string;
+  /** Opened from a .torrent file: its bytes may be kept in IndexedDB (torrent-files.ts). */
+  fromFile?: boolean;
 }
 
 /** A user-uploaded subtitle file, re-added on reopen. */
@@ -291,8 +309,20 @@ export function matchSubtitleTrack(
 export function resumePoint(position: number | undefined, duration: number): number | null {
   if (position === undefined || !Number.isFinite(position) || position < RESUME_MIN_S) return null;
   if (!Number.isFinite(duration) || duration <= 0) return null;
-  const tail = Math.min(FINISHED_MAX_S, duration * FINISHED_FRACTION);
-  return position >= duration - tail ? null : position;
+  return inWatchedTail(position, duration) ? null : position;
+}
+
+const inWatchedTail = (position: number, duration: number) =>
+  position >= duration - Math.min(FINISHED_MAX_S, duration * FINISHED_FRACTION);
+
+/**
+ * Whether a video left at `position` counts as watched: it reached the watched end (the same tail
+ * `resumePoint` doesn't resume from). The first `RESUME_MIN_S` and an unknown duration never do.
+ */
+export function isWatched(position: number | undefined, duration: number | undefined): boolean {
+  if (position === undefined || !Number.isFinite(position) || position < RESUME_MIN_S) return false;
+  if (duration === undefined || !Number.isFinite(duration) || duration <= 0) return false;
+  return inWatchedTail(position, duration);
 }
 
 /**

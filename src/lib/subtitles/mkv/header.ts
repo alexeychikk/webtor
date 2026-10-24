@@ -29,6 +29,14 @@ export interface MkvSubtitleTrack {
   encodings: ContentEncoding[];
 }
 
+/** A video track: what the Dolby Vision check needs (docs/decisions/0010). */
+export interface MkvVideoTrack {
+  number: number;
+  codecId: string;
+  /** `BlockAdditionMapping`s: `dvcC`/`dvvC` carry the Dolby Vision configuration record. */
+  blockAdditionMappings: { type: number; extraData: Uint8Array | null }[];
+}
+
 export interface MkvHeader {
   /** Nanoseconds per timestamp unit. */
   timestampScale: number;
@@ -39,11 +47,13 @@ export interface MkvHeader {
   /** File offset of the first Cluster. */
   firstCluster: number | null;
   subtitleTracks: MkvSubtitleTrack[];
+  videoTracks: MkvVideoTrack[];
   /** File offsets of `Cues` / `Attachments`, if the file has them. */
   cuesPosition: number | null;
   attachmentsPosition: number | null;
 }
 
+const TRACK_TYPE_VIDEO = 1;
 const TRACK_TYPE_SUBTITLE = 0x11;
 
 const TEXT_FORMATS: Record<string, SubtitleFormat> = {
@@ -137,6 +147,17 @@ export async function readMkvHeader(reader: ByteReader): Promise<MkvHeader | nul
       .all(ID.TrackEntry)
       .filter((t) => t.uint(ID.TrackType) === TRACK_TYPE_SUBTITLE && t.uint(ID.FlagEnabled) !== 0)
       .map(parseSubtitleTrack),
+    videoTracks: tracks
+      .all(ID.TrackEntry)
+      .filter((t) => t.uint(ID.TrackType) === TRACK_TYPE_VIDEO)
+      .map((t) => ({
+        number: t.uint(ID.TrackNumber) ?? 0,
+        codecId: t.string(ID.CodecID) ?? '',
+        blockAdditionMappings: t.all(ID.BlockAdditionMapping).map((m) => ({
+          type: m.uint(ID.BlockAddIDType) ?? 0,
+          extraData: m.bytes(ID.BlockAddIDExtraData) ?? null,
+        })),
+      })),
     cuesPosition: found.get(ID.Cues) ?? null,
     attachmentsPosition: found.get(ID.Attachments) ?? null,
   };

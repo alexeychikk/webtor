@@ -45,6 +45,15 @@ import {
   type SilencePlan,
   type TranscodeTarget,
 } from './codecs';
+import { stereoDownmixer } from './downmix';
+import { ByteReader } from '../subtitles/mkv/reader';
+import { readMkvHeader } from '../subtitles/mkv/header';
+import {
+  doviConfigOf,
+  dolbyVisionPlayback,
+  isDolbyVisionSampleEntry,
+  type DolbyVisionPlayback,
+} from './dolby-vision';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { AAC_FRAME_SAMPLES, silentAacFrame } from './silence';
 import {
@@ -67,6 +76,35 @@ import {
 import type { AudioTrackInfo, ByteSource } from './types';
 
 type Mediabunny = typeof import('mediabunny');
+
+/**
+ * Dolby Vision (docs/decisions/0010). Mediabunny doesn't see it: MKV carries the configuration
+ * record in the track's `BlockAdditionMapping` (read with our EBML header pass), and MP4's DV-only
+ * sample entries (`dvh1`, `dvhe`…) come out as an unknown codec. `detail` names the profile or entry.
+ */
+async function dolbyVisionOf(
+  mb: Mediabunny,
+  input: Input,
+  track: InputVideoTrack,
+  source: ByteSource,
+): Promise<(DolbyVisionPlayback & { detail: string }) | null> {
+  if ((await track.getCodec()) === null) {
+    const entry = String((await track.getInternalCodecId()) ?? '');
+    return isDolbyVisionSampleEntry(entry)
+      ? { kind: 'unsupported', profile: '', detail: entry }
+      : null;
+  }
+  if (!((await input.getFormat()) instanceof mb.MatroskaInputFormat)) return null;
+  const header = await readMkvHeader(new ByteReader(source)).catch((err: unknown) => {
+    console.warn('Dolby Vision check: MKV header unreadable', err);
+    return null;
+  });
+  const entry = header?.videoTracks.find((t) => t.number === track.id);
+  const config = doviConfigOf(entry?.blockAdditionMappings ?? []);
+  if (!config) return null;
+  const playback = dolbyVisionPlayback(config);
+  return { ...playback, detail: `profile ${playback.profile}` };
+}
 
 declare global {
   // Safari 17+ (and iOS 17.1+, where it is the only MSE). Not in lib.dom yet.
@@ -299,6 +337,11 @@ export class MsePlayer {
         throw err;
       }
       if (!videoTrack) throw new PlaybackError('no-playable-file', 'no video track');
+      const dolbyVision = await dolbyVisionOf(mb, input, videoTrack, source);
+      if (dolbyVision?.kind === 'unsupported') {
+        throw new PlaybackError('dolby-vision-unsupported', dolbyVision.detail);
+      }
+      if (dolbyVision) console.info(`Dolby Vision ${dolbyVision.detail}: plays its base layer`);
       const avi = (await input.getFormat()).name === AVI_FORMAT_NAME ? aviFormat.demuxer : null;
       let remote: RemoteVideo | null = null;
       if (
@@ -379,6 +422,7 @@ export class MsePlayer {
       }
       if (!audio && audioTracks.length > 0) notices.push('no-playable-audio');
       if (avi?.indexMode === 'scan') notices.push('avi-no-index');
+      if (dolbyVision?.kind === 'base-layer') notices.push('dolby-vision-base-layer');
 
       // The element timeline starts at 0 even when the file's first frame does not.
       const tl = timeline(await videoTrack.getFirstTimestamp());
@@ -1017,9 +1061,18 @@ export class MsePlayer {
       video: (t) => (p.kind === 'video' && t.id === p.trackId ? {} : { discard: true }),
       audio: (t) => {
         if (p.kind !== 'audio' || t.id !== p.trackId) return { discard: true };
-        return transcode
-          ? { codec: transcode.target.codec, ...TRANSCODE_AUDIO, forceTranscode: true }
-          : {};
+        if (!transcode) return {};
+        // Resample only: the decoded layout reaches our own stereo downmix (docs/decisions/0003).
+        const { numberOfChannels, sampleRate, bitrate } = TRANSCODE_AUDIO;
+        return {
+          codec: transcode.target.codec,
+          sampleRate,
+          bitrate,
+          forceTranscode: true,
+          process: stereoDownmixer(mb.AudioSample),
+          processedNumberOfChannels: numberOfChannels,
+          processedSampleRate: sampleRate,
+        };
       },
       trim: { start: k },
       // Video is never transcoded (it can't be encoded in real time); copied audio must stay copied.

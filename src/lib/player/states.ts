@@ -38,13 +38,16 @@ export function playerStates(s: {
   return { card, toasts: toasts.filter((t) => !s.dismissed.has(t.code)) };
 }
 
-/** The buttons of an error card: Retry (pointless for a non-torrent) and a way to the relay. */
+/**
+ * The buttons of an error card: Retry (pointless for a non-torrent or a Dolby Vision-only video,
+ * which fail the same way again) and a way to the relay.
+ */
 export function errorActions(code: PlaybackErrorCode): {
   retry: boolean;
   relay: 'settings' | 'setup' | null;
 } {
   return {
-    retry: code !== 'invalid-input',
+    retry: code !== 'invalid-input' && code !== 'dolby-vision-unsupported',
     relay: code.startsWith('relay-') ? 'settings' : code === 'video-needs-relay' ? 'setup' : null,
   };
 }

@@ -14,6 +14,11 @@ remux, audio transcode) → MSE `<video>`. Static site on GitHub Pages.
 - **Video is never transcoded.** HEVC and 10-bit H.264 play only where the browser decodes them.
   Audio the browser can't play (AC-3, E-AC-3, DTS, Vorbis…) is transcoded in-browser to Opus/AAC.
   TrueHD and bitmap subtitles (PGS) are unsupported.
+- **HDR passes through, untouched.** HDR10/HLG (HEVC, AV1, VP9.2) keep their colour tags in the remux and
+  show as HDR where the browser does (Chrome/Edge on Windows with HDR on and a HEVC GPU decoder, Firefox ≥ 153,
+  Safari). Dolby Vision itself never shows: profile 7/8.x plays its HDR10/HLG base (toast
+  `dolby-vision-base-layer`); profile 5, compatibility id 0 and MP4 `dvh1`/`dvhe` are refused
+  (`dolby-vision-unsupported`). See `docs/decisions/0010-hdr-video.md`.
 
 ## Stack
 
@@ -23,7 +28,8 @@ anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torr
 media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay, 0007 AVI
 playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg, 0008 UI
 design system: dark, Lucide icons, every player control inside the player, 0009 per-video watch
-state: remembered tracks and resume).
+state: remembered tracks and resume, 0010 HDR video: what the remux keeps, where it shows, 0011
+watch history: on the watch entry, .torrent bytes in IndexedDB).
 
 ## Commands
 
@@ -41,6 +47,7 @@ pnpm build          # → dist/
 pnpm run deploy:pages      # build main and publish dist/ to gh-pages (scripts/deploy-pages.sh)
 scripts/release-relay.sh <version> [all|binaries|image|build]   # relay release, see below
 scripts/make-fixtures.sh   # regenerate e2e/fixtures/sample.mkv (needs ffmpeg)
+node scripts/make-dv-fixtures.mjs   # dolby-vision-p5/p8.mkv from short-audio/sample.mkv (make-fixtures.sh runs it)
 node scripts/make-icons.mjs   # public/favicon-32.png + apple-touch-icon.png from public/favicon.svg (Playwright)
 scripts/deploy-relay-oci.sh [--destroy] [--dry-run | --print-cloud-init]   # relay on Oracle Cloud, see below
 cd relay && go test ./...  # relay checks: gofmt -l . && go vet ./... && go test ./...  (relay/CLAUDE.md)
@@ -88,12 +95,21 @@ tagged `reserved-ip=want`: the next run moves the free reserved IP to it (`claim
 responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity", `DRY_RUN_EXISTING_SHAPE`/`_OCPUS`
 an existing VM, `DRY_RUN_EXISTING_RESERVED=1` it holding the reserved IP, `DRY_RUN_NO_RESERVED_IP=1`
 no reserved IP, `DRY_RUN_FAIL_MOVE=1` a failing reserved-IP move, `DRY_RUN_FAIL_WAIT=1` a failing state read of the booting new VM: the upgrade rolls back;
-`DRY_RUN_NO_ANSWER=1` a relay that doesn't answer in time, `DRY_RUN_EXISTING_RESERVED=free` a VM still waiting for the reserved IP). An upgrade
+`DRY_RUN_NO_ANSWER=1` a relay that doesn't answer in time, `DRY_RUN_EXISTING_RESERVED=free` a VM still waiting for the reserved IP,
+`DRY_RUN_TERMINATE=slow|stuck|ignored|rejected` a termination that is slow, never ends, doesn't take or that the CLI refuses,
+`DRY_RUN_EXISTING_STATE=TERMINATING`, `DRY_RUN_WAIT_TIMEOUT=1` delete waits timing out). An upgrade
 that fails after the launch (an EXIT trap) terminates the new VM and gives the reserved IP back;
-call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition), `scripts/deploy-relay-oci.test.sh` (dry-run assertions, e.g. the storage check:
+call `bring_up` plainly (it reports `UP`), as bash drops `set -e` in a function used in a condition.
+Terminations poll the instance's state (`terminate_instance`: TERMINATED or 404 = gone, one more
+request if it isn't TERMINATING after a minute, the work request's errors logged; returns 2 when it is
+still TERMINATING at `TERMINATE_WAIT_SECONDS`): oci-cli 3.95.0's `instance terminate --wait-for-state`
+takes work-request states only. `oci_` logs a usage error (exit 2, printed on stdout) and returns 64
+for it, so exit 2 from `oci_` always means a `--wait-for-state` timed out (the request was accepted).
+`destroy` and `deploy` wait for our VMs still TERMINATING. More checks: `scripts/deploy-relay-oci.test.sh` (dry-run assertions, e.g. the storage check:
 `DRY_RUN_USED_GB=<n>[,<n>…]` = unattached volumes next to the old VM's own 50 GB boot volume; an
 upgrade is judged on the total after it terminates the old VM, every counted volume is logged with its
-attachment), `--print-cloud-init` piped to
+attachment; with `oci` on PATH it also runs every dry-run call through that CLI to catch options it
+rejects: `pipx install oci-cli==<the workflow's version>`), `--print-cloud-init` piped to
 `cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)
@@ -136,6 +152,10 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   codecs.ts buffer.ts watchdog.ts   pure decisions (codec copy/transcode, buffer math, no-peers/stalled)
   append.ts                    appendBuffer with back-pressure: QuotaExceededError waits, never fails (ADR 0003)
   codec-extensions.ts          lazy import + register of @mediabunny/ac3, dts, aac-encoder
+  downmix.ts                   stereo downmix of every transcode (ITU matrix by channel count, limiter;
+                               Mediabunny `process` step, ADR 0003 "Downmix")
+  dolby-vision.ts              DV record (MKV `BlockAdditionMapping` dvcC/dvvC via `readMkvHeader().videoTracks`,
+                               MP4 `dv*` sample entries) → base-layer toast or refusal (ADR 0010)
   remote-video.ts              relay-converted video (ADR 0007 §2): RemoteVideo, MIME, slow/resume rules
   PlayerControls.svelte        control layer over the picture: scrims, title strip, seek bar (track, downloaded,
                                buffered, played; hover time), play, volume, time, the one fullscreen icon
@@ -155,6 +175,9 @@ src/lib/ui/IconButton.svelte   icon-only button + our tooltip (400 ms hover / fo
                                to `[data-tooltip-bounds]`, hidden with the controls); tooltip-context.ts
   page-dialog.ts               `showPageDialog`: leave fullscreen, then `showModal()` (help, relay dialogs)
   menu.ts Menu.svelte          player menus: panel (inside the screen) or bottom sheet, listbox keys
+src/lib/history/               watch history (ADR 0011): history.ts (pure: list, remove/undo, clear, row text,
+                               `boundedMagnet`, `torrentFilesToEvict`), torrent-files.ts (IndexedDB .torrent bytes),
+                               history-dialog.svelte.ts (open state), HistoryDialog.svelte (panel / sheet)
 src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay;
                                last section: keyboard shortcuts, opened scrolled there by `?`);
                                open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
@@ -292,13 +315,22 @@ docs/decisions/                ADRs
   together, in `webtor:watch-upload:…`); it wins over the language preferences, which stay the fallback. Resume
   starts the pipelines at the keyframe before the saved position (`MsePlayer` `startAt`), not under
   10 s or in the last 5 % (≤ 60 s); toast `resume-toast` with `start-over`.
+  **Watch history (ADR 0011)** is every watch entry with a `source` (`WatchSource`: torrent name, file,
+  index, magnet, `fromFile`), newest `updated` first; no store of its own, so it is evicted with the watch
+  entries. `controller.forget()` stops writing the open file's entry (after a removal or Clear; reopens keep it
+  forgotten), `controller.remember(key)` (Undo) resumes it. Opened
+  .torrent bytes: IndexedDB `webtor`/`torrent-files` (≤ 20, ≤ 16 MB), every IDB error ignored (magnet
+  fallback). Hooks: `history-button` (header, `H`), `history-dialog` (`data-state` `list|empty|unavailable`),
+  `history-close`, `history-list`, `history-entry` (`data-key` = `<infohash>:<path>`, `data-state`
+  `progress|watched|playing`, `data-position` s), `history-remove`, `history-undo`, `history-clear`,
+  `history-clear-confirm`, `history-clear-cancel`, `history-empty`.
   **Subtitle delay** (`SubtitleManager.delay`, ±0.5 s, reset per file) re-fills the showing track
   with `shiftCues` (pure, `cue.ts`); embedded tracks refill from `source.live`, and `appendCues` shifts
   new cues by the track's delay. The JASSUB overlay gets unshifted events and renders with
   `timeOffset = −delay` (`AssOverlay.setDelay`). Any renderer must draw cues shifted by it. Note: a disabled
   `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
 - Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
-  Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
+  Ctrl/Meta/Alt; they act only while a file is open (not idle/error), except `?` (help) and `H` (history). On our control bar
   (`[data-player-controls]`) they work, except arrows on its sliders. Player.svelte handles them in
   the window's capture phase (preventDefault + stopPropagation, keyup of a handled Space too, no
   auto-repeat except seeks and volume), so a focused button or native control never toggles a second time. Inside an open menu
@@ -329,6 +361,12 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   and `avi-xvid-ac3.avi` (12 s 320×180 Xvid; need the relay). Synthetic RIFFs (OpenDML, AVIX, `rec `,
   truncation) are built in `src/lib/player/avi/index.test.ts`.
 - `short-audio.mkv`: 12 s 320×180 H.264 whose audio tracks ("English AAC", "Russian AC3") end at 6 s.
+- `surround.mkv`: 8 s 320×180 H.264, one tone per channel (L 400, R 600, C 1000, LFE 60, Ls 1400,
+  Rs 1800 Hz) in "DTS 5.1" (default), "AC-3 5.1", "E-AC-3 5.1", "DTS 5.0". `e2e/surround.spec.ts`
+  measures each tone per stereo output (Web Audio splitter + analysers on the `<video>`).
+- `dolby-vision-p5.mkv` (= `short-audio.mkv` + `dvcC` profile 5: error card) and `dolby-vision-p8.mkv`
+  (= `sample.mkv` + `dvvC` profile 8.1: plays, toast), written by `scripts/make-dv-fixtures.mjs` into the
+  Void ffmpeg leaves before Info/Tracks. Synthetic headers: `src/lib/subtitles/mkv/test-ebml.ts`.
 - `sample.mkv`: 12 s 640×360 H.264 · audio 1 "English AAC" (eng, default) · audio 2 "Russian AC3" (rus) ·
   subtitles SRT (eng) and ASS (rus). `sidecar.en.srt` is a standalone SRT.
 - A directory in `e2e/fixtures/` is served as a multi-file torrent named after it (web seed = the

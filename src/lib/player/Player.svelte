@@ -58,6 +58,7 @@
   import FileList from '../torrent/FileList.svelte';
   import { isTorrentFile } from '../torrent/files';
   import { helpDialog } from '../help/help-dialog.svelte';
+  import { historyDialog } from '../history/history-dialog.svelte';
 
   let {
     controller,
@@ -545,8 +546,8 @@
       targetEditable: target?.isContentEditable,
       inPlayerControls: onControls(target),
     });
-    // Only `?` (help) works without a file open.
-    if (!action || (stopped && action.type !== 'help')) return;
+    // Only `?` (help) and `H` (history) work without a file open.
+    if (!action || (stopped && action.type !== 'help' && action.type !== 'history')) return;
     // Handled here only: the window's capture phase runs before the focused element's own
     // listeners (a native controls' play button, our bar's buttons), which would toggle again.
     event.preventDefault();
@@ -587,6 +588,9 @@
         break;
       case 'help':
         helpDialog.show('shortcuts');
+        break;
+      case 'history':
+        historyDialog.show(document.activeElement);
         break;
     }
   }
