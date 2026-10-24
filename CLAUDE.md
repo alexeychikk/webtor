@@ -27,7 +27,8 @@ anacrolix/torrent. Decisions: `docs/decisions/` (0001 stack & hosting, 0002 torr
 media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers relay, 0007 AVI
 playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg, 0008 UI
 design system: dark, Lucide icons, every player control inside the player, 0009 per-video watch
-state: remembered tracks and resume, 0010 HDR video: what the remux keeps, where it shows).
+state: remembered tracks and resume, 0010 HDR video: what the remux keeps, where it shows, 0011
+watch history: on the watch entry, .torrent bytes in IndexedDB).
 
 ## Commands
 
@@ -168,6 +169,9 @@ src/lib/ui/IconButton.svelte   icon-only button + our tooltip (400 ms hover / fo
                                to `[data-tooltip-bounds]`, hidden with the controls); tooltip-context.ts
   page-dialog.ts               `showPageDialog`: leave fullscreen, then `showModal()` (help, relay dialogs)
   menu.ts Menu.svelte          player menus: panel (inside the screen) or bottom sheet, listbox keys
+src/lib/history/               watch history (ADR 0011): history.ts (pure: list, remove/undo, clear, row text,
+                               `boundedMagnet`, `torrentFilesToEvict`), torrent-files.ts (IndexedDB .torrent bytes),
+                               history-dialog.svelte.ts (open state), HistoryDialog.svelte (panel / sheet)
 src/lib/help/WhyDialog.svelte  "Why won't my torrent play?" (WebRTC-only peers, WebTorrent Desktop, relay;
                                last section: keyboard shortcuts, opened scrolled there by `?`);
                                open state in help-dialog.svelte.ts (header button, no-peers/stalled notices)
@@ -297,13 +301,22 @@ docs/decisions/                ADRs
   together, in `webtor:watch-upload:…`); it wins over the language preferences, which stay the fallback. Resume
   starts the pipelines at the keyframe before the saved position (`MsePlayer` `startAt`), not under
   10 s or in the last 5 % (≤ 60 s); toast `resume-toast` with `start-over`.
+  **Watch history (ADR 0011)** is every watch entry with a `source` (`WatchSource`: torrent name, file,
+  index, magnet, `fromFile`), newest `updated` first; no store of its own, so it is evicted with the watch
+  entries. `controller.forget()` stops writing the open file's entry (after a removal or Clear; reopens keep it
+  forgotten), `controller.remember(key)` (Undo) resumes it. Opened
+  .torrent bytes: IndexedDB `webtor`/`torrent-files` (≤ 20, ≤ 16 MB), every IDB error ignored (magnet
+  fallback). Hooks: `history-button` (header, `H`), `history-dialog` (`data-state` `list|empty|unavailable`),
+  `history-close`, `history-list`, `history-entry` (`data-key` = `<infohash>:<path>`, `data-state`
+  `progress|watched|playing`, `data-position` s), `history-remove`, `history-undo`, `history-clear`,
+  `history-clear-confirm`, `history-clear-cancel`, `history-empty`.
   **Subtitle delay** (`SubtitleManager.delay`, ±0.5 s, reset per file) re-fills the showing track
   with `shiftCues` (pure, `cue.ts`); embedded tracks refill from `source.live`, and `appendCues` shifts
   new cues by the track's delay. The JASSUB overlay gets unshifted events and renders with
   `timeOffset = −delay` (`AssOverlay.setDelay`). Any renderer must draw cues shifted by it. Note: a disabled
   `TextTrack` returns `cues === null`, so `clearTrack` unhides it before removing cues.
 - Keyboard shortcuts (`shortcuts.ts`) are ignored in form controls, buttons, links, dialogs and with
-  Ctrl/Meta/Alt; they act only while a file is open (not idle/error). On our control bar
+  Ctrl/Meta/Alt; they act only while a file is open (not idle/error), except `?` (help) and `H` (history). On our control bar
   (`[data-player-controls]`) they work, except arrows on its sliders. Player.svelte handles them in
   the window's capture phase (preventDefault + stopPropagation, keyup of a handled Space too, no
   auto-repeat except seeks and volume), so a focused button or native control never toggles a second time. Inside an open menu
