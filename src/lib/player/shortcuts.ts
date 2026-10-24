@@ -7,7 +7,8 @@ export type ShortcutAction =
   | { type: 'mute' }
   | { type: 'volume'; by: number }
   | { type: 'cycle-subtitles' }
-  | { type: 'help' };
+  | { type: 'help' }
+  | { type: 'history' };
 
 /** Seconds ←/→ jump. */
 export const SEEK_STEP_S = 5;
@@ -22,6 +23,7 @@ export const SHORTCUTS: readonly { keys: string; action: string }[] = [
   { keys: 'F', action: 'Fullscreen' },
   { keys: 'M', action: 'Mute' },
   { keys: 'C', action: 'Next subtitle track (or off)' },
+  { keys: 'H', action: 'Watch history' },
   { keys: '?', action: 'Keyboard shortcuts' },
 ];
 
@@ -79,6 +81,9 @@ function keyAction(key: string): ShortcutAction | null {
     case 'c':
     case 'C':
       return { type: 'cycle-subtitles' };
+    case 'h':
+    case 'H':
+      return { type: 'history' };
     case '?':
       return { type: 'help' };
     default:

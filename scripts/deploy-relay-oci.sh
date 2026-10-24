@@ -30,6 +30,8 @@
 #   RELAY_REPO             GitHub repo whose latest release is installed (default alexeychikk/webtor)
 #   RELAY_WAIT_SECONDS     how long to wait for https://<host>/ to answer (default 900)
 #                          (a new VM that misses it is kept; the next run gives it the reserved IP)
+#   TERMINATE_WAIT_SECONDS how long to wait for a terminated VM to be gone (default 1200; past it,
+#                          destroy stops and says so: the termination goes on at Oracle)
 # --dry-run needs none of them: it prints the OCI calls it would make (with stand-in responses, as if
 # nothing existed yet) and the rendered cloud-init. The token is never printed: output shows
 # <RELAY_TOKEN> instead. Dry-run knobs: DRY_RUN_NO_A1=1 simulates "Out of host capacity" for the A1
@@ -40,7 +42,11 @@
 # it is still unassigned, as after a first deploy that timed out), DRY_RUN_NO_RESERVED_IP=1
 # an account that can't reserve a public IP, DRY_RUN_FAIL_MOVE=1 a failing move of the reserved IP
 # to the new VM (an upgrade rolls back), DRY_RUN_FAIL_WAIT=1 a failing state read of the new VM while
-# it boots (an upgrade rolls back), DRY_RUN_NO_ANSWER=1 a relay that doesn't answer in time.
+# it boots (an upgrade rolls back), DRY_RUN_NO_ANSWER=1 a relay that doesn't answer in time,
+# DRY_RUN_TERMINATE=slow|stuck|ignored|rejected a VM termination that is slow, never ends, doesn't
+# take or that the CLI refuses (see dry_instance_state), DRY_RUN_EXISTING_STATE=TERMINATING an
+# existing relay VM that is terminating already, DRY_RUN_WAIT_TIMEOUT=1 deletes whose CLI wait
+# times out (exit 2), DRY_RUN_CLI_LOG=<dir> a file there per OCI call (its arguments).
 set -euo pipefail
 # Plain bash 3.2 (macOS) works: no empty-array expansions under set -u, no GNU-only tools.
 cd "$(dirname "$0")/.."
@@ -171,6 +177,8 @@ check_inputs() {
   fi
   [[ $RELAY_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "RELAY_REPO must be owner/name"
   [[ $RELAY_WAIT_SECONDS =~ ^[0-9]+$ ]] || die "RELAY_WAIT_SECONDS must be a number"
+  TERMINATE_WAIT_SECONDS=${TERMINATE_WAIT_SECONDS:-1200}
+  [[ $TERMINATE_WAIT_SECONDS =~ ^[0-9]+$ ]] || die "TERMINATE_WAIT_SECONDS must be a number"
   [[ $RELAY_OCPUS =~ ^[1-4]$ ]] || die "RELAY_OCPUS must be 1, 2, 3 or 4"
   [[ $RELAY_ALLOW_PAID =~ ^[01]$ ]] || die "RELAY_ALLOW_PAID must be 1 (allow a paid shape) or 0"
   if [[ $action == deploy ]] && ((RELAY_OCPUS > FREE_A1_OCPUS && !RELAY_ALLOW_PAID)); then
@@ -263,22 +271,90 @@ EOF
   )
   [[ -s $WORK/key.pem ]] || die "OCI_PRIVATE_KEY is not a PEM private key (-----BEGIN PRIVATE KEY----- …)"
   export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+  # The key file is the bare PEM block on purpose: no "OCI_API_KEY" label warning on every call.
+  export SUPPRESS_LABEL_WARNING=True
 }
 
 # oci_ <args>: runs the OCI CLI (JSON on stdout) and logs the call. Arguments never hold secrets:
 # the token travels in the user-data file only. In a dry run it answers with stand-in JSON.
+# The CLI exits 2 on a usage error (an option this CLI version doesn't take: nothing was sent to
+# OCI) and on a --wait-for-state that timed out (the request was accepted). It prints a usage error
+# on stdout, where callers expect JSON and often discard it, so both are logged here, and a usage
+# error returns EX_USAGE (64) instead: 2 from oci_ always means a wait that timed out.
+EX_USAGE=64
 oci_() {
   log "+ oci $*" 2>&4
+  local out rc=0
+  out=$(mktemp "$WORK/out.XXXXXX")
   if ((dry_run)); then
-    fake_oci "$@"
-    return $? # explicit: a bare return in a trap handler (rollback) returns the status before the trap
+    if [[ -n ${DRY_RUN_CLI_LOG:-} ]]; then
+      # One file per call, its arguments NUL-separated, for scripts/deploy-relay-oci.test.sh's CLI check.
+      printf '%s\0' "$@" >"$(mktemp "$DRY_RUN_CLI_LOG/call.XXXXXX")"
+    fi
+    fake_oci "$@" >"$out" || rc=$?
+  else
+    oci --config-file "$WORK/config" --output json "$@" >"$out" || rc=$?
   fi
-  oci --config-file "$WORK/config" --output json "$@"
+  if ((rc == 2)) && grep -q '^Usage: ' "$out"; then
+    {
+      sed 's/^/  | /' "$out" | mask
+      log "deploy-relay-oci: error: the OCI CLI ($(oci_version)) rejected this command as invalid (exit 2): nothing was sent to Oracle."
+    } 2>&4 >&4
+    rc=$EX_USAGE
+  else
+    if ((rc == 2)) && [[ " $* " == *" --wait-for-state "* ]]; then
+      log "deploy-relay-oci: the OCI CLI gave up waiting (exit 2) for: oci $1 $2 $3 (the request itself was accepted)." 2>&4
+    fi
+    cat "$out"
+  fi
+  rm -f "$out"
+  return $rc
 }
+oci_version() {
+  if ((dry_run)); then
+    echo "dry run"
+  else
+    printf 'oci-cli %s' "$(oci --version 2>/dev/null || echo '?')"
+  fi
+}
+# pause <seconds>: sleep, except in a dry run (its stand-in states change on every call).
+pause() { ((dry_run)) || sleep "$1"; }
 
 # Stand-in ids: the existing VM (DRY_RUN_EXISTING_SHAPE) and the one a launch creates.
 DRY_OLD=ocid1.instance.oc1.dryrun-existing
 DRY_NEW=ocid1.instance.oc1.dryrun-new
+
+# dry_instance_state <instance id> [peek]: the stand-in lifecycle state. Files in $WORK keep it
+# between calls (each runs in a subshell). DRY_RUN_TERMINATE: slow = TERMINATING for two reads after
+# the terminate, then gone (404); stuck = TERMINATING for good; ignored = the request is accepted but
+# the instance stays RUNNING (its work request FAILED); rejected = the CLI refuses the command (usage
+# error, exit 2). DRY_RUN_EXISTING_STATE=TERMINATING: the existing VM is TERMINATING already (then
+# as DRY_RUN_TERMINATE says, default slow). peek: don't count the read.
+dry_instance_state() {
+  local f="$WORK/dry-${1##*-}" n
+  if [[ $1 == "$DRY_OLD" && ${DRY_RUN_EXISTING_STATE:-} == TERMINATING && ! -e $f.terminated ]]; then
+    touch "$f.terminated"
+    : >"$f.reads"
+  fi
+  if [[ ! -e $f.terminated ]]; then
+    echo RUNNING
+    return 0
+  fi
+  n=0
+  [[ ! -e $f.reads ]] || n=$(($(wc -c <"$f.reads")))
+  if [[ ${2:-} != peek ]]; then
+    printf . >>"$f.reads"
+    n=$((n + 1))
+  fi
+  local mode=${DRY_RUN_TERMINATE:-}
+  [[ $1 != "$DRY_OLD" || ${DRY_RUN_EXISTING_STATE:-} != TERMINATING ]] || mode=${DRY_RUN_TERMINATE:-slow}
+  case $mode in
+  slow) if ((n > 2)); then echo GONE; else echo TERMINATING; fi ;;
+  stuck) echo TERMINATING ;;
+  ignored) echo RUNNING ;;
+  *) echo TERMINATED ;;
+  esac
+}
 
 fake_oci() {
   local cmd="$1 $2 $3" id
@@ -306,9 +382,28 @@ fake_oci() {
     echo "{\"data\":{\"id\":\"$DRY_NEW\",\"lifecycle-state\":\"PROVISIONING\"}}"
     ;;
   "compute instance list")
-    if [[ $action == destroy ]] || [[ -n ${DRY_RUN_EXISTING_SHAPE:-} ]]; then
-      echo "{\"data\":[{\"id\":\"$DRY_OLD\",\"lifecycle-state\":\"RUNNING\",\"freeform-tags\":$TAGS}]}"
+    if [[ $action == destroy || -n ${DRY_RUN_EXISTING_SHAPE:-} || -n ${DRY_RUN_EXISTING_STATE:-} ]]; then
+      local listed
+      listed=$(dry_instance_state "$DRY_OLD" peek)
+      [[ $listed != GONE ]] || listed=TERMINATED # listed for 12 h after it is gone
+      echo "{\"data\":[{\"id\":\"$DRY_OLD\",\"lifecycle-state\":\"$listed\",\"freeform-tags\":$TAGS}]}"
     fi
+    ;;
+  "compute instance terminate")
+    if [[ ${DRY_RUN_TERMINATE:-} == rejected ]]; then
+      # What oci-cli 3.95.0 printed for the old --wait-for-state TERMINATED: a usage error, on stdout.
+      printf '%s\n' "Usage: oci compute instance terminate [OPTIONS]" "" \
+        "Error: Invalid value for '--wait-for-state': invalid choice: TERMINATED. (choose from ACCEPTED, IN_PROGRESS, FAILED, SUCCEEDED)"
+      return 2
+    fi
+    touch "$WORK/dry-${5##*-}.terminated"
+    echo '{"opc-work-request-id":"ocid1.coreservicesworkrequest.oc1.dryrun"}'
+    ;;
+  "work-requests work-request get")
+    echo '{"data":{"status":"FAILED","operation-type":"TerminateInstance","percent-complete":0}}'
+    ;;
+  "work-requests work-request-error list")
+    echo '{"data":[{"code":"InternalError","message":"dry run: the termination failed"}]}'
     ;;
   "iam region-subscription list")
     local home=$OCI_REGION
@@ -319,9 +414,14 @@ fake_oci() {
       '{data: ([$h, $r] | unique | map({"region-name": ., "is-home-region": (. == $h)}))}'
     ;;
   "compute instance get")
-    if [[ " $* " == *" $DRY_OLD "* ]]; then
+    local state
+    state=$(dry_instance_state "$5")
+    if [[ $state == GONE ]]; then
+      echo 'ServiceError: {"code": "NotAuthorizedOrNotFound", "message": "dry run: the instance is gone", "status": 404}' >&2
+      return 1
+    elif [[ " $* " == *" $DRY_OLD "* ]]; then
       local shape=${DRY_RUN_EXISTING_SHAPE:-$MICRO_SHAPE} ocpus=${DRY_RUN_EXISTING_OCPUS:-1}
-      jq -n --arg s "$shape" --argjson o "$ocpus" --argjson t "$TAGS" '{data: {"lifecycle-state": "RUNNING",
+      jq -n --arg s "$shape" --argjson o "$ocpus" --argjson t "$TAGS" --arg st "$state" '{data: {"lifecycle-state": $st,
         "display-name": "webtor-relay", "compartment-id": "ocid1.tenancy.oc1..dryrun",
         "availability-domain": "Xxxx:EU-FRANKFURT-1-AD-1",
         shape: $s, "shape-config": {ocpus: $o, "memory-in-gbs": (if $s | test("Micro") then 1 else $o * 6 end)},
@@ -331,7 +431,7 @@ fake_oci() {
       echo 'ServiceError: {"code": "InternalError", "message": "Simulated failure.", "status": 500}' >&2
       return 1
     else
-      echo '{"data":{"lifecycle-state":"RUNNING"}}'
+      echo "{\"data\":{\"lifecycle-state\":\"$state\"}}"
     fi
     ;;
   "compute instance list-vnics")
@@ -408,6 +508,14 @@ fake_oci() {
     else
       echo '{"data":{"items":[]}}'
     fi
+    ;;
+  *" delete")
+    if [[ ${DRY_RUN_WAIT_TIMEOUT:-} == 1 && " $* " == *" --wait-for-state "* ]]; then
+      echo 'Failed to wait until the resource entered the specified state. Outputting last known resource state' >&2
+      echo "{\"data\":{\"id\":\"$id\",\"lifecycle-state\":\"TERMINATING\"}}"
+      return 2
+    fi
+    echo "{\"data\":{\"id\":\"$id\",\"lifecycle-state\":\"TERMINATED\"}}"
     ;;
   *" list")
     # Deploy: nothing exists yet. Destroy: one of each, so the delete calls show.
@@ -540,9 +648,161 @@ wait_instance() {
   done
 }
 
+# instance_lookup <id>: its lifecycle state, or GONE when OCI no longer knows it (404). Fails, with
+# the CLI's error logged, when it can't be read.
+instance_lookup() {
+  local out
+  if out=$(oci_ compute instance get --instance-id "$1" 2>"$WORK/get-err"); then
+    jq -r '.data["lifecycle-state"] // "?"' <<<"$out"
+    return 0
+  fi
+  if grep -q '"status": 404' "$WORK/get-err"; then
+    echo GONE
+    return 0
+  fi
+  mask <"$WORK/get-err" >&2
+  return 1
+}
+
+TERMINATE_POLL_S=15
+# terminate_instance <id>: terminates the instance with its boot volume and waits for it by polling
+# its state. (The CLI's --wait-for-state can't do that: on `instance terminate` oci-cli 3.x takes
+# work-request states only, and TERMINATED is a usage error that never reaches Oracle.) It logs every
+# outcome. Returns 0 once the instance is TERMINATED or gone; 2 when Oracle accepted the termination
+# but the instance is still TERMINATING after TERMINATE_WAIT_SECONDS (default 1200); 1 when it was
+# not terminated: TERMINATE_STATE holds its state and TERMINATE_WHY the reason. A request that
+# doesn't take (the instance is still not TERMINATING a minute later) is made once more first.
+# An instance already TERMINATING is only waited for. Safe in a condition: it checks every step.
 terminate_instance() {
-  oci_ compute instance terminate --instance-id "$1" --preserve-boot-volume false --force \
-    --wait-for-state TERMINATED --max-wait-seconds 1200 >/dev/null
+  local id=$1 state requests=0 polls=0 since=0 failed=0 unread=0 max
+  max=$(((TERMINATE_WAIT_SECONDS + TERMINATE_POLL_S - 1) / TERMINATE_POLL_S))
+  ((max > 0)) || max=1
+  TERMINATE_STATE="" TERMINATE_WHY="" TERMINATE_WR=""
+  state=$(instance_lookup "$id") || state="?"
+  case $state in
+  TERMINATED | GONE)
+    log "  instance $id is already terminated."
+    return 0
+    ;;
+  TERMINATING)
+    log "  instance $id is already TERMINATING (an earlier run or the OCI Console started it): waiting for it…"
+    ;;
+  *)
+    request_terminate "$id" || failed=1
+    requests=1
+    ;;
+  esac
+  while :; do
+    pause "$TERMINATE_POLL_S"
+    polls=$((polls + 1)) since=$((since + 1))
+    state=$(instance_lookup "$id") || state="?"
+    TERMINATE_STATE=$state
+    [[ $state == "?" ]] || unread=0
+    case $state in
+    TERMINATED | GONE)
+      log "  instance $id is terminated."
+      return 0
+      ;;
+    TERMINATING)
+      if ((polls % 4 == 1)); then
+        log "  instance is TERMINATING, waiting… ($(((max - polls) * TERMINATE_POLL_S / 60)) min left)"
+      fi
+      ;;
+    "?")
+      unread=$((unread + 1))
+      if ((unread >= 8)); then
+        TERMINATE_STATE="in a state that can't be read"
+        if [[ -n $TERMINATE_WR ]]; then
+          log "deploy-relay-oci: Oracle accepted the termination of instance $id, but its state can't be read (see above)."
+          log "  Check it in the OCI Console (Compute → Instances); once it shows Terminated, run the destroy (or deploy) again."
+          return 2
+        fi
+        TERMINATE_WHY="its state can't be read (see above)"
+        terminate_failed "$id" "$TERMINATE_STATE"
+        return 1
+      fi
+      log "  can't read the state of instance $id (see above), retrying…"
+      ;;
+    *)
+      # Oracle normally reports TERMINATING within seconds of an accepted request.
+      if ((failed || since >= 4)); then
+        terminate_diagnose "$id" "$state"
+        if ((requests >= 2)); then
+          terminate_failed "$id" "$state"
+          return 1
+        fi
+        if ((failed)); then
+          log "  instance $id is still $state: requesting its termination once more…"
+        else
+          log "  instance $id is still $state a minute after the terminate request: requesting it once more…"
+        fi
+        failed=0
+        request_terminate "$id" || failed=1
+        requests=$((requests + 1)) since=0
+      else
+        log "  instance is $state, waiting for it to start TERMINATING…"
+      fi
+      ;;
+    esac
+    if ((polls >= max)); then
+      if [[ $state == TERMINATING || $state == "?" ]]; then
+        log "deploy-relay-oci: Oracle accepted the termination of instance $id, but it is still $state after $((max * TERMINATE_POLL_S / 60)) min."
+        log "  It goes on at Oracle: run the destroy (or deploy) again once the OCI Console (Compute → Instances) shows it Terminated."
+        return 2
+      fi
+      terminate_diagnose "$id" "$state"
+      terminate_failed "$id" "$state"
+      return 1
+    fi
+  done
+}
+
+# request_terminate <id>: one terminate request. Logs the outcome; sets TERMINATE_WR (its work
+# request), or TERMINATE_WHY (the CLI's error) and fails. terminate_instance polls the state next.
+request_terminate() {
+  local id=$1 out rc=0 err
+  out=$(oci_ compute instance terminate --instance-id "$id" --preserve-boot-volume false --force 2>"$WORK/term-err") || rc=$?
+  if ((rc == 0)); then
+    TERMINATE_WR=$(jq -r '.["opc-work-request-id"] // empty' <<<"$out" 2>/dev/null || true)
+    log "  Oracle accepted the termination${TERMINATE_WR:+ (work request $TERMINATE_WR)}."
+    return 0
+  fi
+  err=$(mask <"$WORK/term-err")
+  [[ -z $err ]] || log "$err"
+  if ((rc == EX_USAGE)); then
+    TERMINATE_WHY="the OCI CLI ($(oci_version)) rejected the terminate command as invalid, so nothing was sent to Oracle"
+  elif grep -q '"status": 404' <<<"$err"; then
+    TERMINATE_WHY="Oracle answered 404 NotAuthorizedOrNotFound: the API user may lack permission to terminate instances (a policy like \"allow group <the user's group> to manage instance-family in compartment <…>\")"
+  elif grep -q '"status": 409' <<<"$err"; then
+    TERMINATE_WHY="Oracle answered 409 Conflict: another operation is running on the instance"
+  else
+    TERMINATE_WHY="the terminate request failed (exit $rc): $(grep -m1 -oE '"message": "[^"]*"' <<<"$err" | cut -d'"' -f4 || true)"
+  fi
+  log "  the terminate request for instance $id failed: $TERMINATE_WHY."
+  return 1
+}
+
+# terminate_diagnose <id> <state>: logs the instance's state and its terminate work request's
+# status and errors, if there is one. Best effort.
+terminate_diagnose() {
+  local id=$1 state=$2 wr errs
+  log "  instance $id: lifecycle state $state."
+  [[ -n $TERMINATE_WR ]] || return 0
+  if wr=$(oci_ work-requests work-request get --work-request-id "$TERMINATE_WR" 2>/dev/null |
+    jq -r '"\(.data.status // "?") (\(.data["operation-type"] // "?"), \(.data["percent-complete"] // "?") % done)"'); then
+    log "  work request $TERMINATE_WR: $wr"
+  fi
+  if errs=$(oci_ work-requests work-request-error list --work-request-id "$TERMINATE_WR" --all 2>/dev/null |
+    jq -r '.data[]? | "\(.code // "?"): \(.message // "?")"') && [[ -n $errs ]]; then
+    log "  its errors: $(paste -sd ';' - <<<"$errs" | sed 's/;/; /g')"
+    TERMINATE_WHY="Oracle's terminate work request reports: $(first_line <<<"$errs")"
+  fi
+}
+
+terminate_failed() {
+  local id=$1 state=$2
+  [[ -n $TERMINATE_WHY ]] || TERMINATE_WHY="Oracle accepted the request but did not start terminating it"
+  log "deploy-relay-oci: error: instance $id was NOT terminated: it is still $state. Why: $TERMINATE_WHY."
 }
 
 # Newest Ubuntu LTS (even year, .04) image that runs on the shape, not Minimal and not GPU.
@@ -1175,9 +1435,13 @@ retire() {
   [[ -n ${1:-} ]] || return 0
   PENDING_NEW=""
   log "Terminating the old VM $1 ($OLD_DESC) and its boot volume…"
-  terminate_instance "$1" ||
-    die "the new relay serves, but terminating the old VM $1 failed: terminate it in the OCI Console (Compute → Instances), or the next run may pick either VM"
-  log "Old VM terminated."
+  local rc=0
+  terminate_instance "$1" || rc=$?
+  case $rc in
+  0) log "Old VM terminated." ;;
+  2) log "warning: the new relay serves; Oracle is still terminating the old VM $1. Nothing to do: it goes on its own (next runs ignore it)." ;;
+  *) die "the new relay serves, but the old VM $1 was NOT terminated: it is still ${TERMINATE_STATE:-there} ($TERMINATE_WHY). Terminate it in the OCI Console (Compute → Instances), or the next run may pick either VM" ;;
+  esac
 }
 
 # The new VM doesn't answer: with an old VM, that one keeps serving and the new one goes.
@@ -1201,8 +1465,12 @@ rollback() {
     fi
   fi
   log "Terminating the new VM $id…"
-  if ! terminate_instance "$id"; then
-    log "warning: terminating the new VM $id failed: terminate it in the OCI Console (Compute → Instances)."
+  local rc=0
+  terminate_instance "$id" || rc=$?
+  if ((rc == 2)); then
+    log "warning: Oracle is still terminating the new VM $id; it goes on its own."
+  elif ((rc)); then
+    log "warning: the new VM $id was NOT terminated (${TERMINATE_WHY:-see above}): terminate it in the OCI Console (Compute → Instances)."
   fi
 }
 
@@ -1220,6 +1488,7 @@ deploy() {
   best_mbps=$(mbps_of "$A1_SHAPE" "$A1_OCPUS")
 
   check_home_region
+  wait_terminating
   ensure_network
   ids=$(find_instances)
   OLD_ID=$(first_line <<<"$ids")
@@ -1333,30 +1602,80 @@ EOF
   ((ready)) || exit 1
 }
 
-# delete_retry <description> <oci args…>: a subnet stays in use a little while after its instance is gone.
+# delete_retry <description> <oci args…>: a subnet stays in use a little while after its instance is
+# gone. A delete whose wait timed out (exit 2) was accepted: it is noted in STILL_DELETING, not retried.
 delete_retry() {
-  local what=$1 try
+  local what=$1 try rc
   shift
   for try in 1 2 3 4 5 6 7 8 9 10; do
-    if oci_ "$@" --force --wait-for-state TERMINATED >/dev/null; then
+    rc=0
+    oci_ "$@" --force --wait-for-state TERMINATED >/dev/null || rc=$?
+    case $rc in
+    0)
       log "Deleted $what"
       return 0
-    fi
+      ;;
+    2)
+      log "  $what: Oracle goes on deleting it."
+      STILL_DELETING="$STILL_DELETING, $what"
+      return 0
+      ;;
+    "$EX_USAGE") die "could not delete $what: the OCI CLI rejected the command (see above)" ;;
+    esac
     log "  $what is still in use, retrying in 30 s ($try/10)…"
-    sleep 30
+    pause 30
   done
   die "could not delete $what"
 }
 
+# relay_instances <jq state filter>: ids of our instances whose lifecycle state passes the filter.
+relay_instances() {
+  oci_ compute instance list --compartment-id "$COMPARTMENT" --display-name "$NAME" --all |
+    jq -r --arg n "$NAME" '.data[]? | select(.["freeform-tags"]["managed-by"] == $n)
+      | select(.["lifecycle-state"] | '"$1"') | .id'
+}
+
+# A relay VM still TERMINATING (a destroy just before, or one that timed out) still holds its boot
+# volume, which counts against the free storage: a deploy waits until it is gone.
+wait_terminating() {
+  local id rc
+  for id in $(relay_instances '. == "TERMINATING"'); do
+    log "Instance $id (an earlier relay VM) is still TERMINATING: its boot volume counts against the free"
+    log "storage until it is gone, so waiting for it…"
+    rc=0
+    terminate_instance "$id" || rc=$?
+    if ((rc)); then
+      die "the old relay VM $id and its disk are still being deleted at Oracle. Run the deploy again in a few minutes."
+    fi
+  done
+}
+
 destroy() {
-  local id vcn
-  for id in $(find_instances); do
+  local id vcn rc ids
+  STILL_DELETING=""
+  # TERMINATING ones too: a re-run waits for them before it deletes the network they sit in.
+  ids=$(relay_instances '. != "TERMINATED"') || die "can't list the $NAME instances"
+  for id in $ids; do
     log "Terminating instance $id (and its boot volume)…"
-    terminate_instance "$id"
+    rc=0
+    terminate_instance "$id" || rc=$?
+    case $rc in
+    0) ;;
+    2) die "destroy stopped: Oracle is still terminating instance $id (see above). The network and the reserved public IP stay until it is gone: run destroy again once the OCI Console shows the instance Terminated." ;;
+    *) die "destroy stopped: the relay VM $id is still ${TERMINATE_STATE:-there}, it was NOT terminated. Why: $TERMINATE_WHY. Nothing else was deleted; fix that and run destroy again, or terminate the VM in the OCI Console (Compute → Instances)." ;;
+    esac
   done
   for id in $(oci_ network public-ip list --compartment-id "$COMPARTMENT" --scope REGION --lifetime RESERVED --all | managed_ids); do
-    oci_ network public-ip delete --public-ip-id "$id" --force --wait-for-state TERMINATED >/dev/null
-    log "Deleted the reserved public IP $id"
+    rc=0
+    oci_ network public-ip delete --public-ip-id "$id" --force --wait-for-state TERMINATED >/dev/null || rc=$?
+    case $rc in
+    0) log "Deleted the reserved public IP $id" ;;
+    2)
+      log "  the reserved public IP $id: Oracle goes on deleting it."
+      STILL_DELETING="$STILL_DELETING, the reserved public IP $id"
+      ;;
+    *) die "could not delete the reserved public IP $id (see above)" ;;
+    esac
   done
   vcn=$(find_vcn)
   if [[ -z $vcn ]]; then
@@ -1383,6 +1702,11 @@ destroy() {
     done
   done
   delete_retry "VCN $vcn" network vcn delete --vcn-id "$vcn"
+  if [[ -n $STILL_DELETING ]]; then
+    log "Everything $NAME created is deleted or being deleted. Oracle is still deleting: ${STILL_DELETING#, }."
+    log "That finishes on its own; a destroy run later confirms it."
+    return 0
+  fi
   log "Everything $NAME created is gone."
 }
 
