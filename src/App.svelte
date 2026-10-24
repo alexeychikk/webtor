@@ -4,6 +4,7 @@
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Magnet from '@lucide/svelte/icons/magnet';
   import Play from '@lucide/svelte/icons/play';
+  import RotateCcwClock from '@lucide/svelte/icons/rotate-ccw-clock';
   import Waypoints from '@lucide/svelte/icons/waypoints';
   import { onMount } from 'svelte';
   import IconButton from './lib/ui/IconButton.svelte';
@@ -11,6 +12,10 @@
   import Player from './lib/player/Player.svelte';
   import { helpDialog } from './lib/help/help-dialog.svelte';
   import WhyDialog from './lib/help/WhyDialog.svelte';
+  import type { HistoryEntry } from './lib/history/history';
+  import { historyDialog } from './lib/history/history-dialog.svelte';
+  import HistoryDialog from './lib/history/HistoryDialog.svelte';
+  import { loadTorrentFile } from './lib/history/torrent-files';
   import RelayDialog from './lib/torrent/RelayDialog.svelte';
   import { isTorrentFile } from './lib/torrent/files';
   import { checkRelayUrl } from './lib/torrent/relay';
@@ -153,6 +158,28 @@
     else relaySettings.openDialog(relayUrl);
   }
 
+  /**
+   * A watch history entry was picked (docs/decisions/0010): the file open now stays; another file
+   * of the torrent loaded now is a file switch; anything else loads the torrent again, from its
+   * stored .torrent when it was opened from one, else from its magnet. Resume does the rest.
+   */
+  async function openFromHistory(entry: HistoryEntry) {
+    const { source } = entry;
+    const phase = controller.phase;
+    const loaded = phase !== 'idle' && phase !== 'error' && controller.infoHash === entry.infoHash;
+    if (loaded && controller.fileIndex === source.index) return;
+    if (loaded && controller.files.some((f) => f.index === source.index)) {
+      history.pushState(null, '', magnetHash(controller.magnet ?? source.magnet, source.index));
+      void controller.selectFile(source.index);
+      return;
+    }
+    const bytes = source.fromFile ? await loadTorrentFile(entry.infoHash) : null;
+    history.pushState(null, '', magnetHash(source.magnet, source.index));
+    input = bytes ? '' : source.magnet;
+    invalid = false;
+    play(bytes ?? source.magnet, source.index);
+  }
+
   /** Play `current` again on the same file: the one open, else the one asked for (early errors). */
   function replay() {
     if (current) play(current, controller.fileIndex ?? requestedFile);
@@ -255,6 +282,17 @@
       <div class="header-form">{@render torrentForm()}</div>
     {/if}
     <div class="actions">
+      <IconButton
+        id="history-button"
+        testid="history-button"
+        icon={RotateCcwClock}
+        class={historyDialog.open ? 'on' : ''}
+        label="Watch history"
+        shortcut="H"
+        aria-haspopup="dialog"
+        aria-expanded={historyDialog.open}
+        onclick={(e) => historyDialog.show(e.currentTarget as HTMLElement)}
+      />
       <span class="relay">
         <IconButton
           testid="relay-button"
@@ -296,6 +334,7 @@
   {/if}
   <RelayDialog onchange={relayChanged} />
   <WhyDialog />
+  <HistoryDialog {controller} onpick={(entry) => void openFromHistory(entry)} />
 </div>
 
 <style>
