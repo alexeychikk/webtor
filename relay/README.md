@@ -139,7 +139,9 @@ The VM's shape sets the relay's speed: Oracle caps each VM's internet bandwidth 
   relay through upgrades, so its URL stays the same. A relay created before the script reserved IPs
   has an ephemeral one, which can't be kept: its first upgrade prints the new relay URL, and the app's
   relay setting must be updated once. Without a reserved IP (the tenancy's limit is reached) every
-  upgrade does that.
+  upgrade does that. If a new relay's first setup takes longer than the run waits, the VM keeps
+  its launch address for now; run `deploy` again and it moves the reserved IP there (the run prints
+  the final URL).
 - **Update:** run `deploy` again. It reuses everything and reboots the VM, which installs the latest
   release. A new `RELAY_TOKEN` or SSH key applies only to a new VM: run `destroy`, then `deploy`.
 - **Video conversion:** the VM installs Ubuntu's `ffmpeg` (with libx264). It is on with 2 GB of memory

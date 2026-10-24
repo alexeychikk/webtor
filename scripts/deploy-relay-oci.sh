@@ -29,15 +29,17 @@
 #   RELAY_ALLOW_PAID       1 = may launch a paid shape (see above); default: Always Free only
 #   RELAY_REPO             GitHub repo whose latest release is installed (default alexeychikk/webtor)
 #   RELAY_WAIT_SECONDS     how long to wait for https://<host>/ to answer (default 900)
+#                          (a new VM that misses it is kept; the next run gives it the reserved IP)
 # --dry-run needs none of them: it prints the OCI calls it would make (with stand-in responses, as if
 # nothing existed yet) and the rendered cloud-init. The token is never printed: output shows
 # <RELAY_TOKEN> instead. Dry-run knobs: DRY_RUN_NO_A1=1 simulates "Out of host capacity" for the A1
 # shape, DRY_RUN_NOT_HOME=1 a region that isn't the home region, DRY_RUN_USED_GB=<n> an existing
 # boot volume of n GB, DRY_RUN_EXISTING_SHAPE=<shape> (and DRY_RUN_EXISTING_OCPUS=<n>) an existing
-# relay VM (DRY_RUN_EXISTING_RESERVED=1: holding the reserved public IP), DRY_RUN_NO_RESERVED_IP=1
+# relay VM (DRY_RUN_EXISTING_RESERVED=1: holding the reserved public IP; =free: launched for it, but
+# it is still unassigned, as after a first deploy that timed out), DRY_RUN_NO_RESERVED_IP=1
 # an account that can't reserve a public IP, DRY_RUN_FAIL_MOVE=1 a failing move of the reserved IP
 # to the new VM (an upgrade rolls back), DRY_RUN_FAIL_WAIT=1 a failing state read of the new VM while
-# it boots (an upgrade rolls back).
+# it boots (an upgrade rolls back), DRY_RUN_NO_ANSWER=1 a relay that doesn't answer in time.
 set -euo pipefail
 # Plain bash 3.2 (macOS) works: no empty-array expansions under set -u, no GNU-only tools.
 cd "$(dirname "$0")/.."
@@ -320,7 +322,8 @@ fake_oci() {
       local shape=${DRY_RUN_EXISTING_SHAPE:-$MICRO_SHAPE} ocpus=${DRY_RUN_EXISTING_OCPUS:-1}
       jq -n --arg s "$shape" --argjson o "$ocpus" --argjson t "$TAGS" '{data: {"lifecycle-state": "RUNNING",
         shape: $s, "shape-config": {ocpus: $o, "memory-in-gbs": (if $s | test("Micro") then 1 else $o * 6 end)},
-        "freeform-tags": ($t + {config: "dryrun"})}}'
+        "freeform-tags": ($t + {config: "dryrun"} + (if env.DRY_RUN_EXISTING_RESERVED // "" | . == "" then {}
+          else {"reserved-ip": "want"} end))}}'
     elif [[ ${DRY_RUN_FAIL_WAIT:-} == 1 && " $* " == *" $DRY_NEW "* ]]; then
       echo 'ServiceError: {"code": "InternalError", "message": "Simulated failure.", "status": 500}' >&2
       return 1
@@ -331,6 +334,8 @@ fake_oci() {
   "compute instance list-vnics")
     if [[ " $* " == *" $DRY_OLD "* && ${DRY_RUN_EXISTING_RESERVED:-} == 1 ]]; then
       echo '{"data":[{"id":"ocid1.vnic.oc1.dryrun-existing","is-primary":true,"public-ip":"203.0.113.20"}]}'
+    elif [[ " $* " == *" $DRY_OLD "* && ${DRY_RUN_EXISTING_RESERVED:-} == free ]]; then
+      echo '{"data":[{"id":"ocid1.vnic.oc1.dryrun-existing","is-primary":true,"public-ip":"198.51.100.7"}]}'
     elif [[ " $* " == *" $DRY_OLD "* ]]; then
       echo '{"data":[{"id":"ocid1.vnic.oc1.dryrun-existing","is-primary":true,"public-ip":"198.51.100.7"}]}'
     else
@@ -352,6 +357,9 @@ fake_oci() {
       jq -n --argjson t "$TAGS" '{data: [{id: "ocid1.publicip.oc1.dryrun-reserved", "ip-address": "203.0.113.20",
         "lifecycle-state": "ASSIGNED", "display-name": "webtor-relay", "freeform-tags": $t,
         "assigned-entity-id": "ocid1.privateip.oc1.dryrun-existing"}]}'
+    elif [[ ${DRY_RUN_EXISTING_RESERVED:-} == free ]]; then
+      jq -n --argjson t "$TAGS" '{data: [{id: "ocid1.publicip.oc1.dryrun-reserved", "ip-address": "203.0.113.20",
+        "lifecycle-state": "AVAILABLE", "display-name": "webtor-relay", "freeform-tags": $t}]}'
     fi
     ;;
   "network public-ip update")
@@ -661,7 +669,8 @@ check_free_storage() {
 launch_instance() {
   local user_data=$1 config_tag=$2 old=${3:-} min_mbps=${4:-0} tags shape ocpus mem mbps paid image image_name
   local ad out err ads offered cands ssh_args=()
-  tags=$(jq -c --arg c "$config_tag" '. + {"config": $c}' <<<"$TAGS")
+  # reserved-ip: this VM is meant to hold the reserved public IP (VMs from before it keep their address).
+  tags=$(jq -c --arg c "$config_tag" '. + {"config": $c, "reserved-ip": "want"}' <<<"$TAGS")
   if [[ -n $OCI_SSH_PUBLIC_KEY ]]; then
     printf '%s\n' "$OCI_SSH_PUBLIC_KEY" >"$WORK/ssh.pub"
     ssh_args=(--ssh-authorized-keys-file "$WORK/ssh.pub")
@@ -851,6 +860,23 @@ move_reserved_ip() {
     --wait-for-state ASSIGNED >/dev/null
 }
 
+# claim_reserved_ip <instance id> <its public IP>: a VM launched for the reserved public IP that
+# doesn't hold it yet (its first deploy timed out before the move) takes it now, if it is free. The
+# caller reboots the VM afterwards, so that its setup serves the new address. Sets CLAIMED (the IP).
+claim_reserved_ip() {
+  local id=$1 ip=$2 priv
+  ensure_reserved_ip
+  [[ -n $RESERVED_ID && $RESERVED_IP != "$ip" ]] || return 0
+  if [[ $RESERVED_AT != - ]]; then
+    log "The reserved public IP $RESERVED_IP is assigned to something else: this VM keeps $ip."
+    return 0
+  fi
+  log "Moving the reserved public IP $RESERVED_IP to this VM (it still has its launch address $ip)…"
+  priv=$(primary_private_ip "$id")
+  move_reserved_ip "$priv"
+  CLAIMED=$RESERVED_IP
+}
+
 # --- relay checks -------------------------------------------------------------------------------
 
 # curl that keeps the URL (it may hold the token) out of the process list and logs.
@@ -871,6 +897,10 @@ wait_relay() {
   fi
   if ((dry_run)); then
     log "(dry run: would wait up to ${RELAY_WAIT_SECONDS}s for https://$host/${2:+ on $2} to answer)"
+    if [[ ${DRY_RUN_NO_ANSWER:-} == 1 ]]; then
+      log "The relay did not answer at https://$host/ within ${RELAY_WAIT_SECONDS}s (dry run: DRY_RUN_NO_ANSWER)."
+      return 1
+    fi
     return 0
   fi
   if ((${REBOOTED:-0})); then
@@ -916,6 +946,10 @@ wait_setup() {
   fi
   if ((dry_run)); then
     log "(dry run: would wait up to ${RELAY_WAIT_SECONDS}s for http://$RELAY_HOST/ on $ip to redirect to HTTPS)"
+    if [[ ${DRY_RUN_NO_ANSWER:-} == 1 ]]; then
+      log "The new VM did not set up $RELAY_HOST within ${RELAY_WAIT_SECONDS}s (dry run: DRY_RUN_NO_ANSWER)."
+      return 1
+    fi
     return 0
   fi
   log "Waiting for the new VM ($ip) to serve $RELAY_HOST (first boot: 5–10 min)…"
@@ -963,6 +997,8 @@ bring_up() {
   launch_instance "$WORK/user-data" "$CONFIG_TAG" "$old" "$old_mbps"
   ip=$(public_ip_of "$INSTANCE_ID")
   log "Public IP of the new VM: $ip"
+  # The summary needs a host even when the setup doesn't finish in time (a fresh deploy keeps the VM).
+  HOST=$(relay_host "$ip")
   ensure_reserved_ip
   final=$ip
   if [[ -n $RESERVED_ID ]]; then
@@ -971,6 +1007,10 @@ bring_up() {
     fi
     log "Waiting for the new VM's setup on its own address before it takes over $RESERVED_IP…"
     if ! wait_setup "$ip"; then
+      if [[ -z $old ]]; then
+        # Kept (nothing to roll back to): the next run's claim_reserved_ip moves the reserved IP to it.
+        LATER_IP=$RESERVED_IP
+      fi
       abandon
       return 0
     fi
@@ -1110,29 +1150,53 @@ deploy() {
         log "conversion) changed since this instance was created. Those apply only to a new instance:"
         log "run destroy, then deploy, to apply them."
       fi
-      restart_instance "$INSTANCE_ID"
       local ip
       ip=$(public_ip_of "$INSTANCE_ID")
+      if [[ $(jq -r '.data["freeform-tags"]["reserved-ip"] // empty' <<<"$info") == want ]]; then
+        claim_reserved_ip "$INSTANCE_ID" "$ip"
+      fi
+      restart_instance "$INSTANCE_ID"
+      if [[ -n ${CLAIMED:-} ]]; then
+        old_host=$(relay_host "$ip")
+        ip=$CLAIMED
+      fi
       HOST=$(relay_host "$ip")
       log "Public IP: $ip"
-      dns_note "$ip"
-      if wait_relay "$HOST" "$ip"; then
-        ready=1
+      if [[ -n ${CLAIMED:-} && -n $RELAY_HOST ]]; then
+        # The A record still points at the launch address: no certificate before it moves.
+        DNS_MOVE=$ip
+        if wait_setup "$ip"; then
+          ready=1
+        fi
+      else
+        dns_note "$ip"
+        if wait_relay "$HOST" "$ip"; then
+          ready=1
+        fi
       fi
     fi
   fi
 
   local summary changed=""
-  if ((upgraded)) && [[ $old_host != "$HOST" ]]; then
+  if [[ -n $old_host && $old_host != "$HOST" ]]; then
     changed="
 The relay URL CHANGED (it was https://$old_host/<your RELAY_TOKEN>): paste the new one into the
 app's relay setting on every device that uses it."
   fi
   if [[ -n ${DNS_MOVE:-} ]]; then
     changed="
-Move the DNS A record of $RELAY_HOST to $DNS_MOVE NOW: the old VM is gone, and the relay
-answers at https://$RELAY_HOST/ (same relay URL) only once the record points there and the new
-VM got its certificate (Caddy keeps retrying; a few minutes after the DNS change)."
+Move the DNS A record of $RELAY_HOST to $DNS_MOVE NOW: the relay answers at
+https://$RELAY_HOST/ (same relay URL) only once the record points there and the VM got its
+certificate (Caddy keeps retrying; a few minutes after the DNS change)."
+  fi
+  if [[ -n ${LATER_IP:-} ]]; then
+    local later
+    later="The relay URL then becomes https://$(relay_host "$LATER_IP")/<your RELAY_TOKEN>."
+    [[ -z $RELAY_HOST ]] || later="Then point the DNS A record of $RELAY_HOST at $LATER_IP."
+    changed="$changed
+The VM is kept, but its setup did not finish in time. Run the deploy again in a few minutes: it
+moves the reserved public IP $LATER_IP to the VM and reboots it.
+$later"
   fi
   summary=$(
     cat <<EOF
