@@ -159,7 +159,7 @@
   }
 
   /**
-   * A watch history entry was picked (docs/decisions/0010): the file open now stays; another file
+   * A watch history entry was picked (docs/decisions/0011): the file open now stays; another file
    * of the torrent loaded now is a file switch; anything else loads the torrent again, from its
    * stored .torrent when it was opened from one, else from its magnet. Resume does the rest.
    */

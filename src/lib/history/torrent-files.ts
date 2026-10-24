@@ -1,5 +1,5 @@
 /**
- * Opened .torrent files kept for the watch history (docs/decisions/0010): their magnet has no
+ * Opened .torrent files kept for the watch history (docs/decisions/0011): their magnet has no
  * `xs=`, so without a peer it can't get the metadata again. IndexedDB db `webtor`, store
  * `torrent-files`, key = lower-case info hash, value `{ bytes, updated }`; at most
  * `MAX_TORRENT_FILES` and `MAX_TORRENT_FILE_BYTES` (`torrentFilesToEvict`). Every error is

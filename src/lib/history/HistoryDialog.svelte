@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * The watch history popup (docs/decisions/0010): a modal page `<dialog>`, an anchored panel under
+   * The watch history popup (docs/decisions/0011): a modal page `<dialog>`, an anchored panel under
    * the header button on wide viewports and a bottom sheet on phones. One row per video, newest
    * first; picking one reopens it (App does that), the × forgets it (with Undo), Clear history
    * forgets them all (inline confirmation). The rules live in history.ts.

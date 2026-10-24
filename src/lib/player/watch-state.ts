@@ -58,13 +58,13 @@ export interface WatchState {
   /** Element time the user was at, and the video's duration then (s). */
   position?: number;
   duration?: number;
-  /** What the watch history lists and how it reopens the video (ADR 0010). */
+  /** What the watch history lists and how it reopens the video (ADR 0011). */
   source?: WatchSource;
   /** `Date.now()` of the last write, for eviction (and "last watched" in the history). */
   updated: number;
 }
 
-/** How the history names and reopens a video (docs/decisions/0010). */
+/** How the history names and reopens a video (docs/decisions/0011). */
 export interface WatchSource {
   /** Torrent name. */
   name: string;

@@ -1,4 +1,4 @@
-# 0010 — Watch history: on the watch entry, opened .torrent files in IndexedDB
+# 0011 — Watch history: on the watch entry, opened .torrent files in IndexedDB
 
 Date: 2026-10-24 · Status: accepted · Extends 0009 (per-video watch state), 0008 (UI)
 

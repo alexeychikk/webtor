@@ -656,7 +656,7 @@ export class PlayerController {
     for (const type of ['pause', 'seeked', 'ended']) {
       video.addEventListener(type, () => this.savePosition(), { signal });
     }
-    // Listed in the watch history as soon as it plays (docs/decisions/0010).
+    // Listed in the watch history as soon as it plays (docs/decisions/0011).
     video.addEventListener('playing', () => this.savePosition(), { signal, once: true });
     window.addEventListener('pagehide', () => this.savePosition(), { signal });
     document.addEventListener(
@@ -703,7 +703,7 @@ export class PlayerController {
     }
   }
 
-  /** How the watch history names and reopens the file playing (docs/decisions/0010). */
+  /** How the watch history names and reopens the file playing (docs/decisions/0011). */
   private historySource(): WatchSource | null {
     const torrent = this.torrent;
     const index = this.fileIndex;

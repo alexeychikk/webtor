@@ -1,5 +1,5 @@
 /**
- * Watch history (docs/decisions/0010): the videos the user watched, newest first, read from the
+ * Watch history (docs/decisions/0011): the videos the user watched, newest first, read from the
  * per-video watch entries (`webtor:watch:<infohash>:<path>`, watch-state.ts) that carry a
  * `source`. Pure apart from the storage it is given; see history.test.ts. Eviction stays the watch
  * entries' own (200, least recently updated), so history and resume never diverge.

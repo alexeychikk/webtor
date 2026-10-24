@@ -1,5 +1,5 @@
 /**
- * Open state of the watch history popup (docs/decisions/0010): the header button and the `H` key
+ * Open state of the watch history popup (docs/decisions/0011): the header button and the `H` key
  * open it. `returnTo` gets the focus back when it closes.
  */
 class HistoryDialogState {

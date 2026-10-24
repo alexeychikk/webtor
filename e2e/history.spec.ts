@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { FIXTURE_BASE, fixtureMagnet } from './support/fixtures';
 import { openMenu } from './support/player';
 
-// Watch history (docs/decisions/0010). e2e/fixtures/resume = movie.mkv (40 s, the largest, opens
+// Watch history (docs/decisions/0011). e2e/fixtures/resume = movie.mkv (40 s, the largest, opens
 // first) + extra.mkv (sample.mkv, 12 s): a multi-file torrent. sample.mkv alone is single-file.
 
 const video = (page: Page) => page.getByTestId('video');
