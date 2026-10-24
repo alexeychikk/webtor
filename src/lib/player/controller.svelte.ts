@@ -626,6 +626,8 @@ export class PlayerController {
     for (const type of ['pause', 'seeked', 'ended']) {
       video.addEventListener(type, () => this.savePosition(), { signal });
     }
+    // Listed in the watch history as soon as it plays (docs/decisions/0010).
+    video.addEventListener('playing', () => this.savePosition(), { signal, once: true });
     window.addEventListener('pagehide', () => this.savePosition(), { signal });
     document.addEventListener(
       'visibilitychange',
