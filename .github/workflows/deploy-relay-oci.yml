@@ -15,6 +15,18 @@ on:
           - deploy
           - destroy
         default: deploy
+      upgrade:
+        description: >-
+          deploy only: replace a slower relay VM (e.g. the 50 Mbit/s E2.1.Micro) with a faster one; the
+          new VM starts next to the old one, which is terminated once the new one answers
+        type: boolean
+        default: false
+      allow_paid:
+        description: >-
+          Allow billed resources (Pay As You Go): a paid 1 Gbit/s VM.Standard.E4/E5.Flex when A1 has no
+          capacity, RELAY_OCPUS over the free allowance, storage over 200 GB. The cost is logged first
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -48,9 +60,18 @@ jobs:
           OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
           RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
           RELAY_HOST: ${{ vars.RELAY_HOST }}
+          RELAY_OCPUS: ${{ vars.RELAY_OCPUS }}
+          RELAY_ALLOW_PAID: ${{ inputs.allow_paid && '1' || '0' }}
+          UPGRADE: ${{ inputs.upgrade && '1' || '0' }}
         run: |
           case "$ACTION" in
-            deploy) scripts/deploy-relay-oci.sh --deploy ;;
+            deploy)
+              if [ "$UPGRADE" = 1 ]; then
+                scripts/deploy-relay-oci.sh --deploy --upgrade
+              else
+                scripts/deploy-relay-oci.sh --deploy
+              fi
+              ;;
             destroy) scripts/deploy-relay-oci.sh --destroy ;;
             *) echo "unknown action: $ACTION" >&2; exit 2 ;;
           esac

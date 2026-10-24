@@ -76,10 +76,17 @@ is named `webtor-relay` and tagged `managed-by=webtor-relay`; lookups use both, 
 `webtor-relay-setup.service`: iptables, `<ip>.sslip.io` host, Caddyfile, latest release checked
 against `SHA256SUMS`; `webtor-relay.service`). A re-run reboots the VM, which updates the relay.
 User-data can't change after launch: the `config` tag (hash of user-data + SSH key) tells a re-run
-when only destroy + deploy applies new settings. Never print `RELAY_TOKEN`: output masks it as
+when only destroy + deploy applies new settings. Shapes, fastest free first: A1.Flex
+`RELAY_OCPUS` (default 2; 1 Gbit/s per OCPU), then the 50 Mbit/s E2.1.Micro, or with
+`RELAY_ALLOW_PAID=1` the paid E4/E5.Flex (cost logged first) instead. Anything billed needs that flag.
+`--upgrade` launches a faster VM next to a slower one, moves the reserved public IP (`webtor-relay`,
+keeps the URL) to it once it answers, reboots it, then terminates the old one; any failure keeps the
+old VM. Never print `RELAY_TOKEN`: output masks it as
 `<RELAY_TOKEN>`, and URLs holding it go to curl via `-K -`, not argv. Checks without credentials:
 `shellcheck scripts/deploy-relay-oci.sh scripts/deploy-relay-oci/setup.sh`, `--dry-run` (stand-in
-responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity"), `--print-cloud-init` piped to
+responses; `DRY_RUN_NO_A1=1` simulates "Out of host capacity", `DRY_RUN_EXISTING_SHAPE`/`_OCPUS`
+an existing VM, `DRY_RUN_EXISTING_RESERVED=1` it holding the reserved IP, `DRY_RUN_NO_RESERVED_IP=1`
+no reserved IP), `--print-cloud-init` piped to
 `cloud-init schema -c` (cloud-init from its git checkout works), and `actionlint` on the workflow.
 
 ## Relay release (manual, no GitHub Actions)

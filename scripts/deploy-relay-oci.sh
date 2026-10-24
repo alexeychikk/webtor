@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# Deploys webtor-relay to an Oracle Cloud (OCI) Always Free VM, or removes it again, through the OCI
-# API only (the OCI CLI, over HTTPS): no SSH. The VM is set up by cloud-init: firewall, the latest
-# webtor-relay release (checked against SHA256SUMS) as a systemd service, and Caddy for HTTPS with
-# Let's Encrypt at <public-ip-with-dashes>.sslip.io (or RELAY_HOST). Everything it creates is named
-# webtor-relay and tagged managed-by=webtor-relay; a re-run reuses it and never makes duplicates.
-# A re-run on an existing VM reboots it, which installs the latest release. See relay/README.md.
+# Deploys webtor-relay to an Oracle Cloud (OCI) VM, or removes it again, through the OCI API only (the
+# OCI CLI, over HTTPS): no SSH. The VM is set up by cloud-init: firewall, the latest webtor-relay
+# release (checked against SHA256SUMS) as a systemd service, and Caddy for HTTPS with Let's Encrypt
+# at <public-ip-with-dashes>.sslip.io (or RELAY_HOST). Everything it creates is named webtor-relay
+# and tagged managed-by=webtor-relay; a re-run reuses it and never makes duplicates. A re-run on an
+# existing VM reboots it, which installs the latest release. See relay/README.md.
 #
-# Usage: scripts/deploy-relay-oci.sh [--deploy | --destroy] [--dry-run]
+# Shapes, fastest free one first: VM.Standard.A1.Flex with RELAY_OCPUS (1 Gbit/s per OCPU), else
+# VM.Standard.E2.1.Micro (50 Mbit/s to the internet), both Always Free. With RELAY_ALLOW_PAID=1 a
+# paid AMD shape (VM.Standard.E4.Flex, else E5.Flex: 1 OCPU, 1 Gbit/s) replaces the Micro, and an A1
+# beyond the free allowance is allowed; the cost is logged before the launch. A new VM gets the
+# reserved public IP webtor-relay, so its relay URL survives a new VM (when the account can reserve one).
+#
+# Usage: scripts/deploy-relay-oci.sh [--deploy [--upgrade] | --destroy] [--dry-run]
 #        scripts/deploy-relay-oci.sh --print-cloud-init      # rendered user-data, token masked
+#   --upgrade   replace an existing VM that is slower than what the settings launch now (the Micro,
+#               or an A1 with fewer OCPUs): the new VM starts next to it, takes over its address once
+#               it answers, and only then is the old one terminated.
 #
 # Environment (the workflow .github/workflows/deploy-relay-oci.yml maps repo secrets of these names):
 #   OCI_TENANCY_OCID OCI_USER_OCID OCI_FINGERPRINT OCI_REGION   API signing key details (required)
@@ -16,13 +25,17 @@
 #   OCI_COMPARTMENT_OCID   compartment for everything (default: the tenancy's root compartment)
 #   OCI_SSH_PUBLIC_KEY     authorize this key for ssh ubuntu@<ip> and open 22/tcp (default: no SSH)
 #   RELAY_HOST             your own DNS name (A record → the VM's IP) instead of <ip>.sslip.io
+#   RELAY_OCPUS            OCPUs of the A1 VM, 1-4, 6 GB of memory each (default 2: free, 2 Gbit/s)
+#   RELAY_ALLOW_PAID       1 = may launch a paid shape (see above); default: Always Free only
 #   RELAY_REPO             GitHub repo whose latest release is installed (default alexeychikk/webtor)
 #   RELAY_WAIT_SECONDS     how long to wait for https://<host>/ to answer (default 900)
 # --dry-run needs none of them: it prints the OCI calls it would make (with stand-in responses, as if
 # nothing existed yet) and the rendered cloud-init. The token is never printed: output shows
 # <RELAY_TOKEN> instead. Dry-run knobs: DRY_RUN_NO_A1=1 simulates "Out of host capacity" for the A1
 # shape, DRY_RUN_NOT_HOME=1 a region that isn't the home region, DRY_RUN_USED_GB=<n> an existing
-# boot volume of n GB.
+# boot volume of n GB, DRY_RUN_EXISTING_SHAPE=<shape> (and DRY_RUN_EXISTING_OCPUS=<n>) an existing
+# relay VM (DRY_RUN_EXISTING_RESERVED=1: holding the reserved public IP), DRY_RUN_NO_RESERVED_IP=1
+# an account that can't reserve a public IP.
 set -euo pipefail
 # Plain bash 3.2 (macOS) works: no empty-array expansions under set -u, no GNU-only tools.
 cd "$(dirname "$0")/.."
@@ -33,24 +46,41 @@ FILES=scripts/deploy-relay-oci
 VCN_CIDR=10.0.0.0/16
 SUBNET_CIDR=10.0.0.0/24
 A1_SHAPE=VM.Standard.A1.Flex
-A1_OCPUS=1
-A1_MEMORY_GB=6
+A1_MEMORY_PER_OCPU_GB=6
 MICRO_SHAPE=VM.Standard.E2.1.Micro
+# Internet bandwidth: the Micro gets 50 Mbit/s (Always Free page), the flex shapes 1 Gbit/s per
+# OCPU (https://docs.oracle.com/iaas/Content/Compute/References/computeshapes.htm).
+MICRO_MBPS=50
+FLEX_MBPS_PER_OCPU=1000
+# Paid fallback with RELAY_ALLOW_PAID=1, cheapest first: AMD (amd64), 1 OCPU = 2 vCPUs, 1 Gbit/s.
+PAID_SHAPES="VM.Standard.E4.Flex VM.Standard.E5.Flex"
+PAID_OCPUS=1
+PAID_MEMORY_GB=4
+# Pay As You Go list prices in USD (https://www.oracle.com/cloud/price-list/, checked 2026-10-24):
+# per OCPU-hour and per GB-hour of memory; block volume storage + 10 VPUs (balanced) per GB-month.
+PRICE_LIST_URL=https://www.oracle.com/cloud/price-list/
+HOURS_PER_MONTH=730
+BLOCK_GB_MONTH_USD=0.0425
 # 50 GB is the smallest boot volume size the API takes (the Console's 46.6/47 GB default is the
 # image's own size); a fixed size keeps the storage check below exact.
 BOOT_VOLUME_GB=50
-# Always Free allowances (per tenancy, home region only): A1 4 OCPUs + 24 GB in total, two
-# E2.1.Micro, 200 GB of boot and block volumes together.
-FREE_A1_OCPUS=4
-FREE_A1_MEMORY_GB=24
+# Always Free allowances (per tenancy, home region only): two E2.1.Micro, 200 GB of boot and block
+# volumes together, and A1 hours: the Always Free page gives 1,500 OCPU-hours + 9,000 GB-hours a
+# month (= 2 OCPUs + 12 GB around the clock); the price list still bills only past 3,000 + 18,000.
+# The check takes the lower figure. A month of 744 h at 2 OCPUs leaves 12 OCPU-hours, which covers
+# the hour or so an upgrade runs the old A1 next to the new one.
+FREE_A1_OCPUS=2
+FREE_A1_MEMORY_GB=12
 FREE_MICRO_COUNT=2
 FREE_STORAGE_GB=200
 
 action=deploy
 dry_run=0
+upgrade=0
 for arg in "$@"; do
   case $arg in
   --deploy) action=deploy ;;
+  --upgrade) upgrade=1 ;;
   --destroy) action=destroy ;;
   --print-cloud-init) action=print-cloud-init ;;
   --dry-run) dry_run=1 ;;
@@ -64,8 +94,14 @@ for arg in "$@"; do
     ;;
   esac
 done
+if ((upgrade)) && [[ $action != deploy ]]; then
+  echo "deploy-relay-oci: --upgrade goes with --deploy" >&2
+  exit 2
+fi
 
 log() { printf '%s\n' "$*" >&2; }
+# fd 4 = the script's stderr, for the logged OCI calls: callers capture the CLI's own stderr.
+exec 4>&2
 sha256() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi; }
 die() {
   log "deploy-relay-oci: error: $*"
@@ -111,6 +147,8 @@ check_inputs() {
   RELAY_HOST=${RELAY_HOST:-}
   RELAY_WAIT_SECONDS=${RELAY_WAIT_SECONDS:-900}
   OCI_SSH_PUBLIC_KEY=${OCI_SSH_PUBLIC_KEY:-}
+  RELAY_OCPUS=${RELAY_OCPUS:-2}
+  RELAY_ALLOW_PAID=${RELAY_ALLOW_PAID:-0}
 
   [[ $OCI_TENANCY_OCID == ocid1.tenancy.* ]] || die "OCI_TENANCY_OCID must start with ocid1.tenancy."
   [[ $OCI_USER_OCID == ocid1.user.* ]] || die "OCI_USER_OCID must start with ocid1.user."
@@ -128,6 +166,10 @@ check_inputs() {
   fi
   [[ $RELAY_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "RELAY_REPO must be owner/name"
   [[ $RELAY_WAIT_SECONDS =~ ^[0-9]+$ ]] || die "RELAY_WAIT_SECONDS must be a number"
+  [[ $RELAY_OCPUS =~ ^[1-4]$ ]] || die "RELAY_OCPUS must be 1, 2, 3 or 4"
+  [[ $RELAY_ALLOW_PAID =~ ^[01]$ ]] || die "RELAY_ALLOW_PAID must be 1 (allow a paid shape) or 0"
+  A1_OCPUS=$RELAY_OCPUS
+  A1_MEMORY_GB=$((RELAY_OCPUS * A1_MEMORY_PER_OCPU_GB))
 }
 
 # --- cloud-init ---------------------------------------------------------------------------------
@@ -207,7 +249,7 @@ EOF
 # oci_ <args>: runs the OCI CLI (JSON on stdout) and logs the call. Arguments never hold secrets:
 # the token travels in the user-data file only. In a dry run it answers with stand-in JSON.
 oci_() {
-  log "+ oci $*"
+  log "+ oci $*" 2>&4
   if ((dry_run)); then
     fake_oci "$@"
     return
@@ -215,12 +257,20 @@ oci_() {
   oci --config-file "$WORK/config" --output json "$@"
 }
 
+# Stand-in ids: the existing VM (DRY_RUN_EXISTING_SHAPE) and the one a launch creates.
+DRY_OLD=ocid1.instance.oc1.dryrun-existing
+DRY_NEW=ocid1.instance.oc1.dryrun-new
+
 fake_oci() {
   local cmd="$1 $2 $3" id
   id="ocid1.${2//-/}.oc1.dryrun"
   case $cmd in
   "iam availability-domain list")
     echo '{"data":[{"name":"Xxxx:EU-FRANKFURT-1-AD-1"},{"name":"Xxxx:EU-FRANKFURT-1-AD-2"}]}'
+    ;;
+  "compute shape list")
+    jq -n --arg a "$A1_SHAPE" --arg m "$MICRO_SHAPE" '{data: ([$a, $m, "VM.Standard.E4.Flex",
+      "VM.Standard.E5.Flex", "VM.Standard3.Flex"] | map({shape: .}))}'
     ;;
   "compute image list")
     jq -n '{data: [
@@ -234,7 +284,12 @@ fake_oci() {
       echo 'ServiceError: {"code": "InternalError", "message": "Out of host capacity.", "status": 500}' >&2
       return 1
     fi
-    echo "{\"data\":{\"id\":\"$id\",\"lifecycle-state\":\"PROVISIONING\"}}"
+    echo "{\"data\":{\"id\":\"$DRY_NEW\",\"lifecycle-state\":\"PROVISIONING\"}}"
+    ;;
+  "compute instance list")
+    if [[ $action == destroy ]] || [[ -n ${DRY_RUN_EXISTING_SHAPE:-} ]]; then
+      echo "{\"data\":[{\"id\":\"$DRY_OLD\",\"lifecycle-state\":\"RUNNING\",\"freeform-tags\":$TAGS}]}"
+    fi
     ;;
   "iam region-subscription list")
     local home=$OCI_REGION
@@ -244,12 +299,55 @@ fake_oci() {
     jq -n --arg r "$OCI_REGION" --arg h "$home" \
       '{data: ([$h, $r] | unique | map({"region-name": ., "is-home-region": (. == $h)}))}'
     ;;
-  "compute instance get") echo '{"data":{"lifecycle-state":"RUNNING"}}' ;;
-  "compute instance list-vnics") echo '{"data":[{"public-ip":"203.0.113.10"}]}' ;;
+  "compute instance get")
+    if [[ " $* " == *" $DRY_OLD "* ]]; then
+      local shape=${DRY_RUN_EXISTING_SHAPE:-$MICRO_SHAPE} ocpus=${DRY_RUN_EXISTING_OCPUS:-1}
+      jq -n --arg s "$shape" --argjson o "$ocpus" --argjson t "$TAGS" '{data: {"lifecycle-state": "RUNNING",
+        shape: $s, "shape-config": {ocpus: $o, "memory-in-gbs": (if $s | test("Micro") then 1 else $o * 6 end)},
+        "freeform-tags": ($t + {config: "dryrun"})}}'
+    else
+      echo '{"data":{"lifecycle-state":"RUNNING"}}'
+    fi
+    ;;
+  "compute instance list-vnics")
+    if [[ " $* " == *" $DRY_OLD "* && ${DRY_RUN_EXISTING_RESERVED:-} == 1 ]]; then
+      echo '{"data":[{"id":"ocid1.vnic.oc1.dryrun-existing","is-primary":true,"public-ip":"203.0.113.20"}]}'
+    elif [[ " $* " == *" $DRY_OLD "* ]]; then
+      echo '{"data":[{"id":"ocid1.vnic.oc1.dryrun-existing","is-primary":true,"public-ip":"198.51.100.7"}]}'
+    else
+      echo '{"data":[{"id":"ocid1.vnic.oc1.dryrun-new","is-primary":true,"public-ip":"203.0.113.10"}]}'
+    fi
+    ;;
+  "network private-ip list")
+    echo "{\"data\":[{\"id\":\"ocid1.privateip.oc1.dryrun-${5##*-}\",\"is-primary\":true}]}"
+    ;;
+  "network public-ip create")
+    if [[ ${DRY_RUN_NO_RESERVED_IP:-} == 1 ]]; then
+      echo 'ServiceError: {"code": "LimitExceeded", "message": "The following service limits were exceeded: reserved-public-ip-count.", "status": 400}' >&2
+      return 1
+    fi
+    echo '{"data":{"id":"ocid1.publicip.oc1.dryrun-reserved","ip-address":"203.0.113.20","lifecycle-state":"AVAILABLE"}}'
+    ;;
+  "network public-ip list")
+    if [[ $action == destroy || ${DRY_RUN_EXISTING_RESERVED:-} == 1 ]]; then
+      jq -n --argjson t "$TAGS" '{data: [{id: "ocid1.publicip.oc1.dryrun-reserved", "ip-address": "203.0.113.20",
+        "lifecycle-state": "ASSIGNED", "display-name": "webtor-relay", "freeform-tags": $t,
+        "assigned-entity-id": "ocid1.privateip.oc1.dryrun-existing"}]}'
+    fi
+    ;;
+  "network public-ip get")
+    echo '{"data":{"id":"ocid1.publicip.oc1.dryrun-ephemeral","ip-address":"203.0.113.10","lifetime":"EPHEMERAL"}}'
+    ;;
   "bv boot-volume get") echo "{\"data\":{\"size-in-gbs\":${DRY_RUN_USED_GB:-0}}}" ;;
   "search resource structured-search")
-    if [[ -n ${DRY_RUN_USED_GB:-} && " $* " == *" query bootvolume, volume "* ]]; then
-      echo '{"data":{"items":[{"identifier":"ocid1.bootvolume.oc1.dryrun","resource-type":"BootVolume"}]}}'
+    if [[ " $* " == *" query bootvolume, volume "* ]]; then
+      if [[ -n ${DRY_RUN_USED_GB:-} ]]; then
+        echo '{"data":{"items":[{"identifier":"ocid1.bootvolume.oc1.dryrun","resource-type":"BootVolume"}]}}'
+      else
+        echo '{"data":{"items":[]}}'
+      fi
+    elif [[ -n ${DRY_RUN_EXISTING_SHAPE:-} ]]; then
+      echo "{\"data\":{\"items\":[{\"identifier\":\"$DRY_OLD\",\"resource-type\":\"Instance\"}]}}"
     else
       echo '{"data":{"items":[]}}'
     fi
@@ -257,7 +355,7 @@ fake_oci() {
   *" list")
     # Deploy: nothing exists yet. Destroy: one of each, so the delete calls show.
     if [[ $action == destroy ]]; then
-      echo "{\"data\":[{\"id\":\"$id\",\"lifecycle-state\":\"AVAILABLE\",\"freeform-tags\":$TAGS}]}"
+      echo "{\"data\":[{\"id\":\"$id\",\"lifecycle-state\":\"AVAILABLE\",\"display-name\":\"$NAME\",\"freeform-tags\":$TAGS}]}"
     fi
     ;;
   *) echo "{\"data\":{\"id\":\"$id\",\"lifecycle-state\":\"AVAILABLE\"}}" ;;
@@ -385,6 +483,11 @@ wait_instance() {
   done
 }
 
+terminate_instance() {
+  oci_ compute instance terminate --instance-id "$1" --preserve-boot-volume false --force \
+    --wait-for-state TERMINATED --max-wait-seconds 1200 >/dev/null
+}
+
 # Newest Ubuntu LTS (even year, .04) image that runs on the shape, not Minimal and not GPU.
 latest_ubuntu_lts() {
   oci_ compute image list --compartment-id "$COMPARTMENT" --operating-system "Canonical Ubuntu" \
@@ -396,32 +499,71 @@ latest_ubuntu_lts() {
       | last // empty | "\(.id) \(.["display-name"])"'
 }
 
-# Does one more instance of this shape fit the Always Free allowance next to the tenancy's other
-# instances (any compartment, stopped ones included)? A Pay As You Go account would be billed beyond it.
+# mbps_of <shape> <ocpus>: internet bandwidth in Mbit/s (0: a shape this script doesn't launch).
+mbps_of() {
+  case $1 in
+  "$MICRO_SHAPE") echo "$MICRO_MBPS" ;;
+  "$A1_SHAPE" | VM.Standard.E[0-9]*.Flex)
+    awk -v o="$2" -v p="$FLEX_MBPS_PER_OCPU" 'BEGIN { printf "%d\n", o * p }'
+    ;;
+  *) echo 0 ;;
+  esac
+}
+# describe <shape> <ocpus> <memory-GB>: "shape, 2 OCPU, 12 GB, 2 Gbit/s" (the Micro: its fixed size).
+describe() {
+  case $1 in
+  "$MICRO_SHAPE") echo "$1, 1/8 OCPU, 1 GB, $(rate "$MICRO_MBPS")" ;;
+  *) echo "$1, $2 OCPU, $3 GB, $(rate "$(mbps_of "$1" "$2")")" ;;
+  esac
+}
+rate() { awk -v m="$1" 'BEGIN { if (m >= 1000) printf "%g Gbit/s\n", m / 1000; else printf "%d Mbit/s\n", m }'; }
+
+# What a launch tries, in order, as "shape OCPUs memory-GB" lines.
+candidates() {
+  local s
+  echo "$A1_SHAPE $A1_OCPUS $A1_MEMORY_GB"
+  if ((RELAY_ALLOW_PAID)); then
+    for s in $PAID_SHAPES; do
+      echo "$s $PAID_OCPUS $PAID_MEMORY_GB"
+    done
+  else
+    echo "$MICRO_SHAPE 1 1"
+  fi
+}
+
+# fits_free_tier <shape> <ocpus> <memory-GB> [<instance to leave out>]: does one more instance of
+# this shape fit the Always Free allowance next to the tenancy's other instances (any compartment,
+# stopped ones included; an upgrade leaves out the VM it replaces)? A Pay As You Go account would be
+# billed beyond it. Sets A1_USED_OCPUS and A1_USED_MEMORY_GB.
 fits_free_tier() {
-  local shape=$1 ids id info a1_ocpus=0 a1_mem=0 micros=0
+  local shape=$1 ocpus=$2 mem=$3 skip=${4:-} ids id info micros=0
+  A1_USED_OCPUS=0 A1_USED_MEMORY_GB=0
+  if [[ $shape != "$A1_SHAPE" && $shape != "$MICRO_SHAPE" ]]; then
+    return 1
+  fi
   ids=$(oci_ search resource structured-search \
     --query-text "query instance resources where lifecycleState != 'TERMINATED' && lifecycleState != 'TERMINATING'" |
     jq -r '.data.items[]?.identifier') ||
     die "can't list the tenancy's instances to check the Always Free allowance (the user needs permission to inspect instances)"
   for id in $ids; do
+    [[ $id != "$skip" ]] || continue
     info=$(oci_ compute instance get --instance-id "$id" |
       jq -r '[.data.shape, (.data["shape-config"].ocpus // 0), (.data["shape-config"]["memory-in-gbs"] // 0)] | @tsv') ||
       die "can't read instance $id to check the Always Free allowance"
     case $info in
     "$A1_SHAPE"*)
-      a1_ocpus=$(awk -v a="$a1_ocpus" -v b="$(cut -f2 <<<"$info")" 'BEGIN { print a + b }')
-      a1_mem=$(awk -v a="$a1_mem" -v b="$(cut -f3 <<<"$info")" 'BEGIN { print a + b }')
+      A1_USED_OCPUS=$(awk -v a="$A1_USED_OCPUS" -v b="$(cut -f2 <<<"$info")" 'BEGIN { print a + b }')
+      A1_USED_MEMORY_GB=$(awk -v a="$A1_USED_MEMORY_GB" -v b="$(cut -f3 <<<"$info")" 'BEGIN { print a + b }')
       ;;
     "$MICRO_SHAPE"*) micros=$((micros + 1)) ;;
     esac
   done
   if [[ $shape == "$A1_SHAPE" ]]; then
-    if awk -v o="$a1_ocpus" -v m="$a1_mem" -v fo=$FREE_A1_OCPUS -v fm=$FREE_A1_MEMORY_GB \
-      -v no=$A1_OCPUS -v nm=$A1_MEMORY_GB 'BEGIN { exit !(o + no <= fo && m + nm <= fm) }'; then
+    if awk -v o="$A1_USED_OCPUS" -v m="$A1_USED_MEMORY_GB" -v fo=$FREE_A1_OCPUS -v fm=$FREE_A1_MEMORY_GB \
+      -v no="$ocpus" -v nm="$mem" 'BEGIN { exit !(o + no <= fo && m + nm <= fm) }'; then
       return 0
     fi
-    log "Other instances already use $a1_ocpus of $FREE_A1_OCPUS free A1 OCPUs and $a1_mem of $FREE_A1_MEMORY_GB GB."
+    log "Other instances use $A1_USED_OCPUS of $FREE_A1_OCPUS free A1 OCPUs and $A1_USED_MEMORY_GB of $FREE_A1_MEMORY_GB GB; $ocpus OCPUs and $mem GB more would not be free."
     return 1
   fi
   if ((micros < FREE_MICRO_COUNT)); then
@@ -431,10 +573,28 @@ fits_free_tier() {
   return 1
 }
 
+# monthly_usd <shape> <ocpus> <memory-GB>: list price of a month of it, whole dollars. A1: only the
+# part past the free allowance, given what fits_free_tier found the other instances use.
+monthly_usd() {
+  local ocpu_h gb_h
+  case $1 in
+  "$A1_SHAPE") ocpu_h=0.01 gb_h=0.0015 ;;
+  VM.Standard.E4.Flex) ocpu_h=0.025 gb_h=0.0015 ;;
+  VM.Standard.E5.Flex) ocpu_h=0.03 gb_h=0.002 ;;
+  *) die "no price for $1" ;;
+  esac
+  awk -v s="$1" -v a1="$A1_SHAPE" -v o="$2" -v m="$3" -v uo="$A1_USED_OCPUS" -v um="$A1_USED_MEMORY_GB" \
+    -v fo=$FREE_A1_OCPUS -v fm=$FREE_A1_MEMORY_GB -v po="$ocpu_h" -v pm="$gb_h" -v h=$HOURS_PER_MONTH '
+    function over(new, used, free, x) { x = used + new - free; return x < 0 ? 0 : (x > new ? new : x) }
+    BEGIN { if (s == a1) { o = over(o, uo, fo); m = over(m, um, fm) }; printf "%.0f\n", (o * po + m * pm) * h }'
+}
+
 # Always Free covers 200 GB of boot and block volumes in total, across the tenancy (detached and
-# preserved boot volumes included). Dies when one more boot volume would go over it.
+# preserved boot volumes included). Past it, a new boot volume is billed: allowed with
+# RELAY_ALLOW_PAID=1 (logged), else it dies. An upgrade counts the old VM's volume too: both exist
+# until the old VM is terminated.
 check_free_storage() {
-  local items id type size used=0
+  local items id type size used=0 total over
   items=$(oci_ search resource structured-search \
     --query-text "query bootvolume, volume resources where lifecycleState != 'TERMINATED' && lifecycleState != 'TERMINATING'" |
     jq -r '.data.items[]? | "\(.identifier) \(.["resource-type"])"') ||
@@ -448,14 +608,29 @@ check_free_storage() {
     [[ $size =~ ^[0-9]+$ ]] || die "volume $id has no size (got '$size')"
     used=$((used + size))
   done <<<"$items"
-  if ((used + BOOT_VOLUME_GB > FREE_STORAGE_GB)); then
-    die "the tenancy's boot and block volumes already take $used of the $FREE_STORAGE_GB GB Always Free storage; the relay's $BOOT_VOLUME_GB GB boot volume would be billed. Free up space (delete unused volumes) first."
+  total=$((used + BOOT_VOLUME_GB))
+  local during=""
+  if [[ -n ${OLD_ID:-} ]]; then
+    during=", counting the old VM's boot volume until the upgrade terminates it"
   fi
-  log "Storage: $used GB used, $BOOT_VOLUME_GB GB more stays within the $FREE_STORAGE_GB GB Always Free allowance."
+  if ((total <= FREE_STORAGE_GB)); then
+    log "Storage: $used GB used, $BOOT_VOLUME_GB GB more stays within the $FREE_STORAGE_GB GB Always Free allowance$during."
+    return 0
+  fi
+  over=$((total - FREE_STORAGE_GB))
+  if ((RELAY_ALLOW_PAID)); then
+    log "Storage: $used GB used; the relay's $BOOT_VOLUME_GB GB boot volume makes it $total GB$during, $over GB over the $FREE_STORAGE_GB GB Always Free storage. That part is billed: about \$$(awk -v g=$over -v p=$BLOCK_GB_MONTH_USD 'BEGIN { printf "%.2f", g * p }') a month, by the hour ($PRICE_LIST_URL)."
+    return 0
+  fi
+  die "the tenancy's boot and block volumes already take $used of the $FREE_STORAGE_GB GB Always Free storage; the relay's $BOOT_VOLUME_GB GB boot volume would go $over GB over it$during, which is billed. Free up space (delete unused volumes) first, or set RELAY_ALLOW_PAID=1 to accept the cost."
 }
 
+# launch_instance <user-data> <config tag> [<VM it replaces> <its Mbit/s>]: launches the first
+# candidate shape that is faster than the VM it replaces, offered in the region, free (or
+# RELAY_ALLOW_PAID=1), and has capacity in some availability domain. Sets INSTANCE_ID, LAUNCHED.
 launch_instance() {
-  local user_data=$1 config_tag=$2 tags shape image image_name ad out err ads ssh_args=()
+  local user_data=$1 config_tag=$2 old=${3:-} min_mbps=${4:-0} tags shape ocpus mem mbps paid image image_name
+  local ad out err ads offered cands ssh_args=()
   tags=$(jq -c --arg c "$config_tag" '. + {"config": $c}' <<<"$TAGS")
   if [[ -n $OCI_SSH_PUBLIC_KEY ]]; then
     printf '%s\n' "$OCI_SSH_PUBLIC_KEY" >"$WORK/ssh.pub"
@@ -463,18 +638,35 @@ launch_instance() {
   fi
   ads=$(oci_ iam availability-domain list --compartment-id "$OCI_TENANCY_OCID" | jq -r '.data[].name')
   [[ -n $ads ]] || die "no availability domains in $OCI_REGION"
+  offered=$(oci_ compute shape list --compartment-id "$COMPARTMENT" --all | jq -r '.data[]?.shape' | sort -u)
   check_free_storage
 
-  for shape in "$A1_SHAPE" "$MICRO_SHAPE"; do
+  cands=$(candidates)
+  # fd 3: the loop body runs commands that could read stdin.
+  while read -r shape ocpus mem <&3; do
     local shape_args=()
-    if [[ $shape == "$A1_SHAPE" ]]; then
-      shape_args=(--shape-config "{\"ocpus\":$A1_OCPUS,\"memoryInGBs\":$A1_MEMORY_GB}")
-    else
-      log "Falling back to $MICRO_SHAPE (Always Free, amd64, 1 GB RAM: slower, but the relay runs)."
-    fi
-    if ! fits_free_tier "$shape"; then
-      log "Skipping $shape: it would not be free."
+    paid=0
+    mbps=$(mbps_of "$shape" "$ocpus")
+    if ((mbps <= min_mbps)); then
+      log "Skipping $shape: $(rate "$mbps") is not faster than the VM it would replace."
       continue
+    fi
+    if ! grep -qxF "$shape" <<<"$offered"; then
+      log "Skipping $shape: not offered in $OCI_REGION."
+      continue
+    fi
+    if [[ $shape == "$MICRO_SHAPE" ]]; then
+      log "Falling back to $MICRO_SHAPE (Always Free, amd64, 1 GB RAM): the relay runs, but Oracle caps"
+      log "its internet bandwidth at $(rate "$MICRO_MBPS") (about 6 MB/s). RELAY_ALLOW_PAID=1 takes a 1 Gbit/s paid shape instead."
+    else
+      shape_args=(--shape-config "{\"ocpus\":$ocpus,\"memoryInGBs\":$mem}")
+    fi
+    if ! fits_free_tier "$shape" "$ocpus" "$mem" "$old"; then
+      if ((!RELAY_ALLOW_PAID)); then
+        log "Skipping $shape: it would not be free (RELAY_ALLOW_PAID=1 allows it)."
+        continue
+      fi
+      paid=1
     fi
     read -r image image_name < <(latest_ubuntu_lts "$shape") || true
     if [[ -z ${image:-} ]]; then
@@ -482,6 +674,12 @@ launch_instance() {
       continue
     fi
     log "Image for $shape: $image_name"
+    if ((paid)); then
+      log "Paid shape: $(describe "$shape" "$ocpus" "$mem") to the internet: about \$$(monthly_usd "$shape" "$ocpus" "$mem") a month at"
+      log "  list price, billed per second while it runs ($PRICE_LIST_URL). Outbound data is free up to 10 TB a month."
+    else
+      log "Always Free shape: $(describe "$shape" "$ocpus" "$mem") to the internet."
+    fi
     for ad in $ads; do
       log "Launching $shape in $ad…"
       if out=$(oci_ compute instance launch --compartment-id "$COMPARTMENT" --availability-domain "$ad" \
@@ -491,7 +689,9 @@ launch_instance() {
         --freeform-tags "$tags" 2>"$WORK/err"); then
         INSTANCE_ID=$(data_id <<<"$out")
         if wait_instance "$INSTANCE_ID" RUNNING; then
-          log "Instance: created $INSTANCE_ID ($shape)"
+          LAUNCHED=$(describe "$shape" "$ocpus" "$mem")
+          ((!paid)) || LAUNCHED="$LAUNCHED, paid"
+          log "Instance: created $INSTANCE_ID ($LAUNCHED)"
           return 0
         fi
         log "  the launch in $ad failed (instance terminated), trying the next one."
@@ -509,8 +709,15 @@ launch_instance() {
         die "launching the instance failed"
       fi
     done
-  done
-  die "no Always Free capacity in any availability domain of $OCI_REGION right now. Oracle frees capacity over time: run the deploy again later (the network is kept, a re-run only retries the instance)."
+  done 3<<<"$cands"
+  local paid_hint=""
+  if ((!RELAY_ALLOW_PAID)); then
+    paid_hint=", or allow a paid 1 Gbit/s shape with RELAY_ALLOW_PAID=1 (the workflow's allow_paid)"
+  fi
+  if [[ -n $old ]]; then
+    die "no faster shape could be launched in $OCI_REGION right now. The current relay VM keeps running unchanged. Oracle frees capacity over time: run the upgrade again later$paid_hint."
+  fi
+  die "no capacity for a relay VM in any availability domain of $OCI_REGION right now. Oracle frees capacity over time: run the deploy again later (the network is kept, a re-run only retries the instance)$paid_hint."
 }
 
 public_ip_of() {
@@ -549,6 +756,62 @@ restart_instance() {
   wait_instance "$id" RUNNING || die "instance $id terminated"
 }
 
+# --- reserved public IP -------------------------------------------------------------------------
+
+# A reserved public IP outlives instances, so the <ip>.sslip.io relay URL (or RELAY_HOST's A record)
+# stays when a new VM replaces the old one. Oracle doesn't charge for public IPs (no price list
+# entry); Pay As You Go allows 50 per region. Sets RESERVED_ID, RESERVED_IP and RESERVED_AT (the
+# private IP it is assigned to, or -). Returns 1 when the account can't reserve one.
+ensure_reserved_ip() {
+  local found
+  found=$(oci_ network public-ip list --compartment-id "$COMPARTMENT" --scope REGION --lifetime RESERVED --all |
+    jq -r '[.data[]? | select(.["freeform-tags"]["managed-by"] == "webtor-relay")
+      | select(.["lifecycle-state"] | IN("TERMINATED", "TERMINATING") | not)][0] // empty
+      | "\(.id) \(.["ip-address"]) \(.["assigned-entity-id"] // .["private-ip-id"] // "-")"')
+  if [[ -n $found ]]; then
+    read -r RESERVED_ID RESERVED_IP RESERVED_AT <<<"$found"
+    log "Reserved public IP: reusing $RESERVED_IP"
+    return 0
+  fi
+  if ! found=$(oci_ network public-ip create --compartment-id "$COMPARTMENT" --lifetime RESERVED \
+    --display-name "$NAME" --freeform-tags "$TAGS" --wait-for-state AVAILABLE 2>"$WORK/err"); then
+    mask <"$WORK/err" >&2
+    log "Can't reserve a public IP: the new VM keeps the address it launched with, so the relay URL"
+    log "changes whenever a new VM replaces it."
+    return 1
+  fi
+  RESERVED_ID=$(data_id <<<"$found")
+  RESERVED_IP=$(jq -r '.data["ip-address"]' <<<"$found")
+  RESERVED_AT=-
+  log "Reserved public IP: created $RESERVED_IP"
+}
+
+primary_private_ip() {
+  local vnic ip
+  vnic=$(oci_ compute instance list-vnics --instance-id "$1" | jq -r '[.data[]? | select(.["is-primary"])][0].id // empty')
+  [[ -n $vnic ]] || die "instance $1 has no primary VNIC"
+  ip=$(oci_ network private-ip list --vnic-id "$vnic" --all | jq -r '[.data[]? | select(.["is-primary"])][0].id // empty')
+  [[ -n $ip ]] || die "instance $1 has no primary private IP"
+  printf '%s\n' "$ip"
+}
+
+# move_reserved_ip <private IP id>: assigns the reserved IP there (taking it from where it was).
+# A private IP holds one public IP, so the ephemeral one a VM launched with goes first.
+move_reserved_ip() {
+  local eph
+  # None assigned: the CLI fails with NotFound.
+  if eph=$(oci_ network public-ip get --private-ip-id "$1" 2>/dev/null); then
+    eph=$(jq -r 'select(.data.lifetime == "EPHEMERAL") | .data.id' <<<"$eph")
+  else
+    eph=
+  fi
+  if [[ -n $eph ]]; then
+    oci_ network public-ip delete --public-ip-id "$eph" --force --wait-for-state TERMINATED >/dev/null
+  fi
+  oci_ network public-ip update --public-ip-id "$RESERVED_ID" --private-ip-id "$1" \
+    --wait-for-state ASSIGNED >/dev/null
+}
+
 # --- relay checks -------------------------------------------------------------------------------
 
 # curl that keeps the URL (it may hold the token) out of the process list and logs.
@@ -557,6 +820,8 @@ curl_url() {
   shift
   printf 'url = "%s"\n' "$url" | curl -fsS --max-time 15 "$@" -K -
 }
+
+relay_host() { printf '%s\n' "${RELAY_HOST:-${1//./-}.sslip.io}"; }
 
 wait_relay() {
   local host=$1 deadline=$((SECONDS + RELAY_WAIT_SECONDS)) next_note=0
@@ -595,6 +860,34 @@ wait_relay() {
   fi
 }
 
+# wait_setup <ip>: has a new VM finished its first-boot setup? With sslip.io: its relay answers on
+# its own address. With RELAY_HOST (DNS still points at the old address, so no certificate yet):
+# Caddy on port 80 redirects that name to HTTPS, which it does once setup wrote the Caddyfile.
+wait_setup() {
+  local ip=$1 deadline=$((SECONDS + RELAY_WAIT_SECONDS)) code
+  if [[ -z $RELAY_HOST ]]; then
+    wait_relay "$(relay_host "$ip")"
+    return
+  fi
+  if ((dry_run)); then
+    log "(dry run: would wait up to ${RELAY_WAIT_SECONDS}s for http://$RELAY_HOST/ on $ip to redirect to HTTPS)"
+    return 0
+  fi
+  log "Waiting for the new VM ($ip) to serve $RELAY_HOST (first boot: 5–10 min)…"
+  while :; do
+    code=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code} %{redirect_url}' \
+      --resolve "$RELAY_HOST:80:$ip" "http://$RELAY_HOST/" 2>/dev/null || true)
+    if [[ $code == 30[178]" https://$RELAY_HOST"* ]]; then
+      return 0
+    fi
+    if ((SECONDS > deadline)); then
+      log "The new VM did not set up $RELAY_HOST within ${RELAY_WAIT_SECONDS}s."
+      return 1
+    fi
+    sleep 10
+  done
+}
+
 # --- actions ------------------------------------------------------------------------------------
 
 # Always Free resources exist only in the tenancy's home region: anywhere else the VM would be billed.
@@ -610,6 +903,75 @@ check_home_region() {
   log "Region: $OCI_REGION (home region)"
 }
 
+# bring_up [<old VM id> <its Mbit/s>]: launches a new VM and makes it the relay. It first answers on
+# the address it launched with; then (when the account has a reserved public IP) it takes over the
+# reserved one and reboots, so its setup serves that. With an old VM, the old one is terminated only
+# once the new one answers; if the new one fails, the old one keeps (or gets back) the address and
+# the new one is terminated. Sets HOST; returns 1 when the relay doesn't answer.
+bring_up() {
+  local old=${1:-} old_mbps=${2:-0} old_private="" ip
+  launch_instance "$WORK/user-data" "$CONFIG_TAG" "$old" "$old_mbps"
+  ip=$(public_ip_of "$INSTANCE_ID")
+  log "Public IP of the new VM: $ip"
+  if ! ensure_reserved_ip; then
+    HOST=$(relay_host "$ip")
+    dns_note "$ip"
+    if wait_relay "$HOST"; then
+      retire "$old"
+      return 0
+    fi
+    abandon "$old"
+    return 1
+  fi
+  if [[ -n $old && $RESERVED_AT != - ]]; then
+    old_private=$RESERVED_AT
+  fi
+  log "Waiting for the new VM's setup on its own address before it takes over $RESERVED_IP…"
+  if ! wait_setup "$ip"; then
+    abandon "$old"
+    return 1
+  fi
+  log "Moving the reserved public IP $RESERVED_IP to the new VM…"
+  move_reserved_ip "$(primary_private_ip "$INSTANCE_ID")"
+  log "Rebooting the new VM so that its setup serves $RESERVED_IP…"
+  oci_ compute instance action --instance-id "$INSTANCE_ID" --action SOFTRESET >/dev/null
+  REBOOTED=1
+  wait_instance "$INSTANCE_ID" RUNNING || die "the new instance $INSTANCE_ID terminated"
+  HOST=$(relay_host "$RESERVED_IP")
+  dns_note "$RESERVED_IP"
+  if wait_relay "$HOST"; then
+    retire "$old"
+    return 0
+  fi
+  if [[ -n $old_private ]]; then
+    log "Giving the reserved public IP back to the old VM…"
+    move_reserved_ip "$old_private"
+  fi
+  abandon "$old"
+  return 1
+}
+
+dns_note() {
+  if [[ -n $RELAY_HOST ]]; then
+    log "RELAY_HOST is $RELAY_HOST: its DNS A record must point at $1 for the certificate."
+  fi
+}
+
+# The upgrade worked: the old VM goes (and with it its boot volume and allowance).
+retire() {
+  [[ -n ${1:-} ]] || return 0
+  log "Terminating the old VM $1 ($OLD_DESC) and its boot volume…"
+  terminate_instance "$1"
+  log "Old VM terminated."
+}
+
+# The new VM doesn't answer: with an old VM, that one keeps serving and the new one goes.
+abandon() {
+  [[ -n ${1:-} ]] || return 0
+  log "The new VM did not come up: terminating it ($INSTANCE_ID). The old VM keeps serving."
+  terminate_instance "$INSTANCE_ID"
+}
+
 deploy() {
   render_cloud_init >"$WORK/user-data"
   if ((dry_run)); then
@@ -617,48 +979,81 @@ deploy() {
     mask <"$WORK/user-data" >&2
     log "--- end of user-data ---"
   fi
-  local config_tag ids
+  local ids best_mbps ready=0 upgraded=0 old_host=""
   # Fingerprint of everything that only applies at launch, to tell when a re-run can't apply it.
-  config_tag=$({ cat "$WORK/user-data"; printf '%s\n' "$OCI_SSH_PUBLIC_KEY"; } | sha256 | cut -c1-16)
+  CONFIG_TAG=$({ cat "$WORK/user-data"; printf '%s\n' "$OCI_SSH_PUBLIC_KEY"; } | sha256 | cut -c1-16)
+  # The fastest VM the settings launch: the A1 with RELAY_OCPUS (paid shapes get 1 OCPU, 1 Gbit/s).
+  best_mbps=$(mbps_of "$A1_SHAPE" "$A1_OCPUS")
 
   check_home_region
   ensure_network
   ids=$(find_instances)
-  INSTANCE_ID=$(first_line <<<"$ids")
-  if [[ -n $INSTANCE_ID ]]; then
-    if (($(wc -l <<<"$ids") > 1)); then
-      log "warning: several $NAME instances exist, using $INSTANCE_ID"
-    fi
-    log "Instance: reusing $INSTANCE_ID"
-    local tag
-    tag=$(oci_ compute instance get --instance-id "$INSTANCE_ID" | jq -r '.data["freeform-tags"].config // empty')
-    if [[ $tag != "$config_tag" ]]; then
-      log "Note: RELAY_TOKEN, RELAY_HOST, OCI_SSH_PUBLIC_KEY or the VM setup (e.g. ffmpeg for video"
-      log "conversion) changed since this instance was created. Those apply only to a new instance:"
-      log "run destroy, then deploy, to apply them."
-    fi
-    restart_instance "$INSTANCE_ID"
+  OLD_ID=$(first_line <<<"$ids")
+  if [[ -z $OLD_ID ]]; then
+    bring_up && ready=1
   else
-    launch_instance "$WORK/user-data" "$config_tag"
+    if (($(wc -l <<<"$ids") > 1)); then
+      log "warning: several $NAME instances exist, using $OLD_ID"
+    fi
+    local info tag shape ocpus mem old_mbps
+    info=$(oci_ compute instance get --instance-id "$OLD_ID")
+    tag=$(jq -r '.data["freeform-tags"].config // empty' <<<"$info")
+    shape=$(jq -r '.data.shape // empty' <<<"$info")
+    ocpus=$(jq -r '.data["shape-config"].ocpus // 0' <<<"$info")
+    mem=$(jq -r '.data["shape-config"]["memory-in-gbs"] // 0' <<<"$info")
+    old_mbps=$(mbps_of "$shape" "$ocpus")
+    OLD_DESC=$(describe "$shape" "$ocpus" "$mem")
+    [[ $old_mbps != 0 ]] || OLD_DESC="$shape"
+    log "Instance: found $OLD_ID ($OLD_DESC)"
+    if ((old_mbps > 0 && old_mbps < best_mbps)); then
+      if ((upgrade)); then
+        log "Upgrade: replacing it with a faster VM (up to $(rate "$best_mbps"): $A1_SHAPE with $A1_OCPUS OCPUs$( ((RELAY_ALLOW_PAID)) && printf ', else a paid 1 Gbit/s shape'))."
+        old_host=$(relay_host "$(public_ip_of "$OLD_ID")")
+        upgraded=1
+        bring_up "$OLD_ID" "$old_mbps" && ready=1
+        if ((!ready)); then
+          die "the upgrade did not finish; the old relay keeps serving at https://$old_host/. Run it again later."
+        fi
+      else
+        log "Upgrade available: deploy --upgrade (the workflow's \"upgrade\" box) replaces this $(rate "$old_mbps")"
+        log "VM with $A1_SHAPE, $A1_OCPUS OCPUs ($(rate "$best_mbps")) without downtime: the new VM"
+        log "starts next to it and takes over once it answers. The relay URL changes once, unless this VM"
+        log "already has the reserved public IP $NAME; later upgrades keep it."
+      fi
+    elif ((upgrade)); then
+      log "Nothing to upgrade: this VM is not slower than what the settings launch ($(rate "$best_mbps"))."
+    fi
+    if ((!upgraded)); then
+      INSTANCE_ID=$OLD_ID
+      log "Instance: reusing $INSTANCE_ID"
+      if [[ $tag != "$CONFIG_TAG" ]]; then
+        log "Note: RELAY_TOKEN, RELAY_HOST, OCI_SSH_PUBLIC_KEY or the VM setup (e.g. ffmpeg for video"
+        log "conversion) changed since this instance was created. Those apply only to a new instance:"
+        log "run destroy, then deploy, to apply them."
+      fi
+      restart_instance "$INSTANCE_ID"
+      local ip
+      ip=$(public_ip_of "$INSTANCE_ID")
+      HOST=$(relay_host "$ip")
+      log "Public IP: $ip"
+      dns_note "$ip"
+      wait_relay "$HOST" && ready=1
+    fi
   fi
 
-  local ip host
-  ip=$(public_ip_of "$INSTANCE_ID")
-  host=${RELAY_HOST:-${ip//./-}.sslip.io}
-  log "Public IP: $ip"
-  if [[ -n $RELAY_HOST ]]; then
-    log "RELAY_HOST is $RELAY_HOST: its DNS A record must point at $ip for the certificate."
+  local summary changed=""
+  if ((upgraded)) && [[ $old_host != "$HOST" ]]; then
+    changed="
+The relay URL CHANGED (it was https://$old_host/<your RELAY_TOKEN>): paste the new one into the
+app's relay setting on every device that uses it."
   fi
-  local ready=0
-  wait_relay "$host" && ready=1
-
-  local summary
   summary=$(
     cat <<EOF
-Host:      $host
-Relay URL: https://$host/<your RELAY_TOKEN>
-Open https://$host/ (the app, served by the relay) or the hosted app, and paste the relay URL
-into its relay setting (the "Relay" button).
+Host:      $HOST${LAUNCHED:+
+VM:        $LAUNCHED}
+Relay URL: https://$HOST/<your RELAY_TOKEN>
+Open https://$HOST/ (the app, served by the relay) or the hosted app, and paste the relay URL
+into its relay setting (the "Relay" button).$changed
 EOF
   )
   printf '\n%s\n' "$summary"
@@ -688,8 +1083,11 @@ destroy() {
   local id vcn
   for id in $(find_instances); do
     log "Terminating instance $id (and its boot volume)…"
-    oci_ compute instance terminate --instance-id "$id" --preserve-boot-volume false --force \
-      --wait-for-state TERMINATED --max-wait-seconds 1200 >/dev/null
+    terminate_instance "$id"
+  done
+  for id in $(oci_ network public-ip list --compartment-id "$COMPARTMENT" --scope REGION --lifetime RESERVED --all | managed_ids); do
+    oci_ network public-ip delete --public-ip-id "$id" --force --wait-for-state TERMINATED >/dev/null
+    log "Deleted the reserved public IP $id"
   done
   vcn=$(find_vcn)
   if [[ -z $vcn ]]; then
