@@ -119,8 +119,8 @@
         <strong>Safari</strong> on macOS and iPad shows HDR10 and HLG on HDR displays.
       </li>
       <li>
-        <strong>Dolby Vision</strong> never shows as such: profiles 7 and 8 play their HDR10/HLG
-        fallback, but profile 5 has none and can’t play in a browser. Look for an HDR10 or SDR release.
+        <strong>Dolby Vision</strong> never shows as such: profiles 7 and 8 play their HDR10/HLG fallback,
+        but profile 5 has none and can’t play in a browser. Look for an HDR10 or SDR release.
       </li>
     </ul>
   </section>
