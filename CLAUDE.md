@@ -289,7 +289,8 @@ docs/decisions/                ADRs
   10 s or in the last 5 % (≤ 60 s); toast `resume-toast` with `start-over`.
   **Watch history (ADR 0010)** is every watch entry with a `source` (`WatchSource`: torrent name, file,
   index, magnet, `fromFile`), newest `updated` first; no store of its own, so it is evicted with the watch
-  entries. `controller.forget()` stops writing the open file's entry (after a removal or Clear). Opened
+  entries. `controller.forget()` stops writing the open file's entry (after a removal or Clear; reopens keep it
+  forgotten), `controller.remember(key)` (Undo) resumes it. Opened
   .torrent bytes: IndexedDB `webtor`/`torrent-files` (≤ 20, ≤ 16 MB), every IDB error ignored (magnet
   fallback). Hooks: `history-button` (header, `H`), `history-dialog` (`data-state` `list|empty|unavailable`),
   `history-close`, `history-list`, `history-entry` (`data-key` = `<infohash>:<path>`, `data-state`

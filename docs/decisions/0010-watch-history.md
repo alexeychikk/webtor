@@ -28,7 +28,8 @@ torrent and file at the position it stopped. Positions are already kept per vide
 - **Remove = instant with Undo (8 s), Clear = inline confirmation.** Both forget the whole watch
   state (`webtor:watch:*`, `webtor:watch-upload:*`) and nothing else (relay URL, language
   preferences stay). Removing the file open now calls `controller.forget()`, so its next position
-  save doesn't bring it back during this open.
+  save doesn't bring it back during this open (a stuck-seek reopen of the same file included);
+  its Undo calls `controller.remember(key)`, which saves it again from the current position.
 - **UI**: header button (`rotate-ccw-clock`, shortcut `H`, also while idle) opening a modal page
   `<dialog>` (`HistoryDialog.svelte`): an anchored panel under the button, a bottom sheet at
   ≤ 40rem. Picking the file open now does nothing, another file of the loaded torrent is a

@@ -208,3 +208,42 @@ test.describe('phone', () => {
     await expect(dialog(page)).toBeHidden();
   });
 });
+
+test('removing the video playing stops saving it, and Undo saves it again', async ({ page }) => {
+  await watchMovieTo20(page);
+  const saved = () =>
+    page.evaluate(() => {
+      const key = Object.keys(localStorage).find(
+        (k) => k.startsWith('webtor:watch:') && k.endsWith(':resume/movie.mkv'),
+      );
+      return key
+        ? (JSON.parse(localStorage.getItem(key)!) as { position?: number }).position
+        : null;
+    });
+  const watchTo = async (t: number) => {
+    await seekTo(page, t);
+    await video(page).evaluate((v: HTMLVideoElement) => v.play());
+    await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(t + 0.2);
+    // The pause saves the position (when it is remembered).
+    await video(page).evaluate((v: HTMLVideoElement) => v.pause());
+  };
+
+  // Remove → Undo: the row keeps following the playhead.
+  await openHistory(page);
+  await expect(entries(page).first()).toHaveAttribute('data-state', 'playing');
+  await page.getByTestId('history-remove').first().click();
+  await page.getByTestId('history-undo').click();
+  await expect(entries(page)).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await watchTo(30);
+  await expect.poll(saved).toBeGreaterThan(30);
+
+  // Remove for good: nothing is written for the rest of this open.
+  await openHistory(page);
+  await page.getByTestId('history-remove').first().click();
+  await page.keyboard.press('Escape');
+  await watchTo(10);
+  expect(await saved()).toBeNull();
+  await openHistory(page);
+  await expect(dialog(page)).toHaveAttribute('data-state', 'empty');
+});

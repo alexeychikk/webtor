@@ -138,6 +138,11 @@ export class PlayerController {
   private relayStats: RelayStats | null = null;
   /** Watch-state key (watch-state.ts) of the file playing; null when none. */
   private watch: string | null = null;
+  /**
+   * Watch-state key the user removed from the history while it was open (`forget`): a reopen of
+   * the same file (`reopenFile`) doesn't write it again. Cleared by `load`/`selectFile`.
+   */
+  private forgotten: string | null = null;
   private positionSavedAt = 0;
   /** The history `source` last written for the file playing (JSON), so it is written once. */
   private sourceSaved: string | null = null;
@@ -180,6 +185,7 @@ export class PlayerController {
     if (index === this.fileIndex) return;
     const run = ++this.run;
     this.closeFile();
+    this.forgotten = null;
     this.phase = 'metadata';
     this.starvedFor = 0;
     this.lastDownloaded = torrent.downloaded;
@@ -194,6 +200,7 @@ export class PlayerController {
   ): Promise<void> {
     await this.stop();
     const run = ++this.run;
+    this.forgotten = null;
     this.input = input;
     this.video = video;
     this.subtitles.attach(video);
@@ -279,7 +286,8 @@ export class PlayerController {
     this.fileName = file.name;
     // What the user picked for this video last time, and where they were (watch-state.ts).
     const watch = watchKey(torrent.infoHash, file.path);
-    this.watch = watch;
+    // Removed from the history during this open: a reopen (stuck seek) keeps it forgotten.
+    this.watch = watch === this.forgotten ? null : watch;
     const stored = readWatch(watch);
     this.subtitles.restore(stored?.subtitle, stored?.delay);
     if (stored?.subtitle?.kind === 'upload') {
@@ -592,8 +600,30 @@ export class PlayerController {
    * written for the rest of this open, so the next position save doesn't bring it back.
    */
   forget() {
+    // Also between the files of a reopen, where `watch` is null for a moment.
+    const key = this.watch ?? this.openKey();
+    if (key) this.forgotten = key;
     this.watch = null;
     this.sourceSaved = null;
+  }
+
+  /**
+   * Undo of a removal (`forget`): when `key` is the file still open, its watch state is written
+   * again from now on (position, tracks), starting with the current position.
+   */
+  remember(key: string) {
+    if (this.forgotten !== key || this.watch !== null || this.openKey() !== key) return;
+    this.forgotten = null;
+    this.watch = key;
+    this.sourceSaved = null;
+    this.savePosition();
+  }
+
+  /** Watch-state key of the file open (or being reopened); null when none. */
+  private openKey(): string | null {
+    const torrent = this.torrent;
+    const file = this.fileIndex === null ? undefined : torrent?.files?.[this.fileIndex];
+    return torrent && file ? watchKey(torrent.infoHash, file.path) : null;
   }
 
   /** "Start over" on the resume toast. */

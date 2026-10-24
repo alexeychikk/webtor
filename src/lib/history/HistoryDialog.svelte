@@ -185,6 +185,8 @@
     clearTimeout(undoTimer);
     undo = null;
     undoRemove(u.removed);
+    // The row of the file open: its position and track choices are saved again.
+    controller.remember(u.removed.key);
     reload();
     await tick();
     focusEntry(u.removed.key);
