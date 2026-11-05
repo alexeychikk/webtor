@@ -22,7 +22,6 @@
   import IconButton from '../ui/IconButton.svelte';
   import Menu from '../ui/Menu.svelte';
   import { menuPresentation } from '../ui/menu';
-  import { SUBTITLE_EXTENSIONS } from '../subtitles/parse';
   import { subtitleTrackText } from '../subtitles/tracks';
   import { tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
@@ -800,7 +799,6 @@
       type="file"
       tabindex="-1"
       aria-hidden="true"
-      accept={SUBTITLE_EXTENSIONS.join(',')}
       data-testid="subtitle-upload"
       onchange={onSubtitleUpload}
     />
