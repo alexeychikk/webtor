@@ -91,6 +91,25 @@ test('an uploaded SRT is selected and shown; Off hides it, re-selecting shows it
   await expect.poll(() => shownCues(page)).toEqual(['Uploaded <i>cue</i>']);
 });
 
+test('the subtitle picker has no type filter; a picked non-subtitle file shows a toast', async ({
+  page,
+}) => {
+  await playFixture(page, 'sample.mkv');
+  const upload = page.getByTestId('subtitle-upload');
+  // iOS greys out .srt/.ass/.ssa for an `accept` list (no system type for them).
+  await expect(upload).not.toHaveAttribute('accept', /./);
+  await upload.setInputFiles({
+    name: 'movie.mkv.torrent',
+    mimeType: 'application/x-bittorrent',
+    buffer: Buffer.from('d4:infodee'),
+  });
+  const toast = page.locator('[data-testid="notice"][data-code="subtitle-failed"]');
+  await expect(toast).toBeAttached();
+  await expect(toast).toContainText('movie.mkv.torrent');
+  await expect(page.getByTestId('subtitles')).toHaveAttribute('data-value', '');
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});
+
 test('a subtitle file dropped on the player is decoded (windows-1251) and shown', async ({
   page,
 }) => {

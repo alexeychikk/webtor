@@ -7,7 +7,6 @@ import { parseVtt } from './vtt';
 export type SubtitleFormat = 'srt' | 'vtt' | 'ass' | 'ssa';
 
 const FORMATS: readonly SubtitleFormat[] = ['srt', 'vtt', 'ass', 'ssa'];
-export const SUBTITLE_EXTENSIONS = FORMATS.map((f) => `.${f}`);
 
 export function subtitleFormatOf(name: string): SubtitleFormat | null {
   const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();

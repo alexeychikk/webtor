@@ -17,7 +17,7 @@
   import HistoryDialog from './lib/history/HistoryDialog.svelte';
   import { loadTorrentFile } from './lib/history/torrent-files';
   import RelayDialog from './lib/torrent/RelayDialog.svelte';
-  import { isTorrentFile } from './lib/torrent/files';
+  import { isTorrentFile, readTorrentFile } from './lib/torrent/files';
   import { checkRelayUrl } from './lib/torrent/relay';
   import { relaySettings } from './lib/torrent/relay-settings.svelte';
   import { isTorrentId } from './lib/torrent/trackers';
@@ -37,14 +37,19 @@
   let requestedFile: number | null = null;
   let draggingTorrent = $state(false);
   const valid = $derived(isTorrentId(input));
-  /** An invalid value was submitted: danger border and helper until the field changes. */
-  let invalid = $state(false);
+  /**
+   * An invalid value was submitted (`id`) or a picked file isn't a .torrent (`file`): danger
+   * border and helper until the field changes or something else opens.
+   */
+  let problem = $state<'id' | 'file' | null>(null);
+  const invalid = $derived(problem !== null);
   /** The empty page (ADR 0008 §1): wordmark, tagline, input; the player appears once something loads. */
   const hero = $derived(controller.phase === 'idle');
 
   function play(torrentId: TorrentInput, fileIndex: number | null = null) {
     current = torrentId;
     requestedFile = fileIndex;
+    problem = null;
     if (video) void controller.load(torrentId, video, fileIndex);
   }
 
@@ -58,7 +63,7 @@
   function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!valid) {
-      invalid = true;
+      problem = 'id';
       return;
     }
     start(input);
@@ -68,7 +73,7 @@
   function onInputKey(event: KeyboardEvent) {
     if (event.key !== 'Enter' || valid) return;
     event.preventDefault();
-    invalid = input.trim() !== '';
+    problem = input.trim() !== '' ? 'id' : null;
   }
 
   /** Pasting a magnet or info hash into the empty field plays it at once. */
@@ -78,7 +83,6 @@
     if (!isTorrentId(text)) return;
     event.preventDefault();
     input = text;
-    invalid = false;
     start(text);
   }
 
@@ -92,15 +96,24 @@
     current = null;
     requestedFile = null;
     input = '';
-    invalid = false;
+    problem = null;
     void controller.stop();
   }
 
-  /** A .torrent from the file picker or a drop. Its magnet goes into the hash once it is parsed. */
+  /**
+   * A .torrent from the file picker or a drop, judged by its bytes: the picker can't filter by
+   * type (iOS greys out every .torrent for an `accept` list). Its magnet goes into the hash once
+   * it is parsed.
+   */
   async function openTorrentFile(file: File) {
+    const bytes = await readTorrentFile(file);
+    if (!bytes) {
+      problem = 'file';
+      return;
+    }
     input = '';
     history.pushState(null, '', `${location.pathname}${location.search}`);
-    play(new Uint8Array(await file.arrayBuffer()));
+    play(bytes);
   }
 
   function onTorrentPicked(event: Event) {
@@ -176,7 +189,6 @@
     const bytes = source.fromFile ? await loadTorrentFile(entry.infoHash) : null;
     history.pushState(null, '', magnetHash(source.magnet, source.index));
     input = bytes ? '' : source.magnet;
-    invalid = false;
     play(bytes ?? source.magnet, source.index);
   }
 
@@ -245,11 +257,11 @@
       autocomplete="off"
       spellcheck="false"
       aria-label="Magnet link or info hash"
-      aria-invalid={invalid ? 'true' : undefined}
-      aria-describedby={invalid ? 'torrent-id-problem' : undefined}
+      aria-invalid={problem === 'id' ? 'true' : undefined}
+      aria-describedby={problem === 'id' ? 'torrent-id-problem' : undefined}
       placeholder="Paste a magnet link or info hash"
       bind:value={input}
-      oninput={() => (invalid = false)}
+      oninput={() => (problem = null)}
       onkeydown={onInputKey}
       onpaste={onPaste}
     />
@@ -258,16 +270,19 @@
       <input
         class="sr-only"
         type="file"
-        accept=".torrent,application/x-bittorrent"
         aria-label="Open .torrent file"
+        aria-invalid={problem === 'file' ? 'true' : undefined}
+        aria-describedby={problem === 'file' ? 'torrent-file-problem' : undefined}
         data-testid="torrent-file"
         onchange={onTorrentPicked}
       />
     </label>
     <IconButton class="go" type="submit" icon={Play} label="Play" disabled={!valid} />
   </form>
-  {#if invalid}
+  {#if problem === 'id'}
     <p class="problem" id="torrent-id-problem">Not a magnet link or info hash</p>
+  {:else if problem === 'file'}
+    <p class="problem" id="torrent-file-problem" role="alert">Not a .torrent file</p>
   {/if}
 {/snippet}
 

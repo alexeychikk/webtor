@@ -93,6 +93,83 @@ export function isTorrentFile(file: { name: string; type: string }): boolean {
   return extensionOf(file.name) === 'torrent' || file.type === 'application/x-bittorrent';
 }
 
+const BENCODE = { d: 0x64, e: 0x65, i: 0x69, l: 0x6c, colon: 0x3a, minus: 0x2d } as const;
+const MAX_BENCODE_DEPTH = 64;
+const isDigit = (byte: number | undefined) => byte !== undefined && byte >= 0x30 && byte <= 0x39;
+
+/** End of the bencoded string at `pos` and where its bytes start, or null when malformed. */
+function bencodeString(bytes: Uint8Array, pos: number): { start: number; end: number } | null {
+  let length = 0;
+  let at = pos;
+  if (!isDigit(bytes[at])) return null;
+  while (isDigit(bytes[at])) length = length * 10 + bytes[at++]! - 0x30;
+  if (bytes[at] !== BENCODE.colon || at + 1 + length > bytes.length) return null;
+  return { start: at + 1, end: at + 1 + length };
+}
+
+/** Position after the bencoded value at `pos`, or -1 when it is malformed or nested too deep. */
+function skipBencode(bytes: Uint8Array, pos: number, depth: number): number {
+  if (depth > MAX_BENCODE_DEPTH) return -1;
+  const type = bytes[pos];
+  if (type === BENCODE.i) {
+    let at = pos + 1;
+    if (bytes[at] === BENCODE.minus) at++;
+    if (!isDigit(bytes[at])) return -1;
+    while (isDigit(bytes[at])) at++;
+    return bytes[at] === BENCODE.e ? at + 1 : -1;
+  }
+  if (type === BENCODE.l || type === BENCODE.d) {
+    let at = pos + 1;
+    while (at < bytes.length && bytes[at] !== BENCODE.e) {
+      if (type === BENCODE.d) {
+        const key = bencodeString(bytes, at);
+        if (!key) return -1;
+        at = key.end;
+      }
+      at = skipBencode(bytes, at, depth + 1);
+      if (at < 0) return -1;
+    }
+    return bytes[at] === BENCODE.e ? at + 1 : -1;
+  }
+  return bencodeString(bytes, pos)?.end ?? -1;
+}
+
+const INFO_KEY = 'info';
+
+/** The bytes are a .torrent: a well-formed bencoded dictionary with an `info` dictionary. */
+export function isTorrentBytes(bytes: Uint8Array): boolean {
+  if (bytes[0] !== BENCODE.d) return false;
+  let at = 1;
+  let hasInfo = false;
+  while (at < bytes.length && bytes[at] !== BENCODE.e) {
+    const key = bencodeString(bytes, at);
+    if (!key) return false;
+    const isInfo =
+      key.end - key.start === INFO_KEY.length &&
+      String.fromCharCode(...bytes.subarray(key.start, key.end)) === INFO_KEY;
+    if (isInfo) hasInfo = bytes[key.end] === BENCODE.d;
+    at = skipBencode(bytes, key.end, 1);
+    if (at < 0) return false;
+  }
+  return bytes[at] === BENCODE.e && hasInfo;
+}
+
+/** Larger than any real .torrent (a few MB at most): such a pick is never read whole. */
+export const MAX_TORRENT_FILE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The bytes of a picked or dropped file when it is a .torrent, judged by its content alone (iOS
+ * can save one without its extension), else null. Anything not starting a dictionary is rejected
+ * after one byte.
+ */
+export async function readTorrentFile(file: Blob): Promise<Uint8Array | null> {
+  if (file.size === 0 || file.size > MAX_TORRENT_FILE_BYTES) return null;
+  const first = new Uint8Array(await file.slice(0, 1).arrayBuffer());
+  if (first[0] !== BENCODE.d) return null;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return isTorrentBytes(bytes) ? bytes : null;
+}
+
 const SUBTITLE_FORMATS = new Set<SubtitleFileEntry['format']>(['srt', 'vtt', 'ass', 'ssa']);
 
 const stem = (name: string) => name.replace(/\.[^.]*$/, '').toLowerCase();

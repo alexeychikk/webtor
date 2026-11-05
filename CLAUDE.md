@@ -253,6 +253,11 @@ docs/decisions/                ADRs
   destroys the MsePlayer and subtitle sources and opens a new one on the same torrent; after a fatal
   error it reloads the torrent on that file. An opened/dropped `.torrent` (`TorrentInput` =
   `Uint8Array`) goes straight to WebTorrent (no relay); its `magnetURI` then goes into the hash.
+- **File inputs carry no `accept`.** iOS/iPadOS turns an `accept` list into UTIs and greys out
+  every file that matches none; `.torrent`, `.srt`, `.ass`, `.ssa` have no system UTI there, so a
+  filter made them unpickable. Validate after picking instead: `readTorrentFile` (files.ts: a
+  bencoded dictionary with an `info` dictionary, whatever the name) or the inline "Not a .torrent
+  file"; subtitles go through `SubtitleManager.addFile` (else the `subtitle-failed` toast).
 - **Switching torrents** (`controller.load` while one plays): `teardown()` runs synchronously before
   any await (saves the position, bumps `run`, releases player, timers, relay polling, listeners),
   so the phase goes straight to `connecting`, never `idle` (the landing view). Never await a

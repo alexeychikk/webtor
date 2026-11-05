@@ -164,18 +164,64 @@ test('a .torrent file dropped on the page plays', async ({ page }) => {
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
 });
 
-test('a file that is not a torrent shows a clear error', async ({ page }) => {
+test('the .torrent picker has no type filter (iOS greys out every .torrent for one)', async ({
+  page,
+}) => {
+  await page.goto('./');
+  await expect(page.getByTestId('torrent-file')).not.toHaveAttribute('accept', /./);
+});
+
+test('a picked file that is not a torrent shows a message under the field and starts nothing', async ({
+  page,
+}) => {
+  await page.goto('./');
+  const message = page.getByText('Not a .torrent file');
+  for (const file of [
+    { name: 'broken.torrent', mimeType: 'application/x-bittorrent', text: 'this is not bencoded' },
+    { name: 'notes.txt', mimeType: 'text/plain', text: 'hello' },
+  ]) {
+    await page.getByTestId('torrent-file').setInputFiles({
+      name: file.name,
+      mimeType: file.mimeType,
+      buffer: Buffer.from(file.text),
+    });
+    await expect(message).toBeVisible();
+    await expect(page.getByTestId('torrent-file')).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.getByTestId('screen')).toBeHidden();
+    await expect(page.getByTestId('error')).toHaveCount(0);
+    await expect(page).toHaveURL(/\/$/);
+  }
+  // Typing into the field clears it.
+  await page.getByLabel('Magnet link or info hash').fill('x');
+  await expect(message).toHaveCount(0);
+});
+
+test('playing a magnet after a wrong file clears the message', async ({ page }) => {
+  await page.goto('./');
+  await page.getByLabel('Magnet link or info hash').fill(await fixtureMagnet('sample.mkv'));
+  await page.getByTestId('torrent-file').setInputFiles({
+    name: 'notes.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('hello'),
+  });
+  const message = page.getByText('Not a .torrent file');
+  await expect(message).toBeVisible();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(page.getByTestId('status')).toContainText('sample.mkv');
+  await expect(message).toHaveCount(0);
+  await expect(page.getByTestId('torrent-file')).not.toHaveAttribute('aria-invalid', /./);
+});
+
+test('a .torrent saved without its extension still opens by its content', async ({ page }) => {
   await page.goto('./');
   await page.getByTestId('torrent-file').setInputFiles({
-    name: 'broken.torrent',
-    mimeType: 'application/x-bittorrent',
-    buffer: Buffer.from('this is not bencoded'),
+    name: 'download',
+    mimeType: 'application/octet-stream',
+    buffer: await torrentBytes('sample.mkv'),
   });
-  const error = page.getByTestId('error');
-  await expect(error).toHaveAttribute('data-code', 'invalid-input');
-  await expect(error).toContainText('Not a torrent');
-  // Retrying the same bytes can't help.
-  await expect(error.getByTestId('retry')).toHaveCount(0);
+  await expect(page.getByTestId('status')).toContainText('sample.mkv');
+  await expect(page.getByText('Not a .torrent file')).toHaveCount(0);
+  await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(1);
 });
 
 test('switching files drops the embedded subtitles of the previous file', async ({ page }) => {
