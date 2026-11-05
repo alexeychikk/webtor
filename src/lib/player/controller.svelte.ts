@@ -422,6 +422,7 @@ export class PlayerController {
           this.subtitles.embeddedFailed();
         },
       },
+      once,
     );
     this.embedded = scan;
     const headers = new Map<string, string>();

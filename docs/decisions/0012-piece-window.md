@@ -45,7 +45,8 @@ after a seek.
   - **Reads in flight are always inside** (`trackedSource` pins a read until its promise settles or
     its stream delivered its bytes, ends or is cancelled). Every read of the playing file goes
     through the window: the pipelines' (`demux`), the subtitle scan's (`scan`, via
-    `MsePlayer.windowed`) and the Matroska header and font attachment reads (`once`, pinned only). WebTorrent drops a stream's selection once its pieces are
+    `MsePlayer.windowed`; its Cluster reads only, the Cues it looks up go through a `once` source)
+    and the Matroska header and font attachment reads (`once`, pinned only). WebTorrent drops a stream's selection once its pieces are
     all in, and a `done` file reads straight from the store without one; a piece missing from the
     store then destroys the stream.
 - **Eviction.** The controller's 1 s `tick` (`TICK_MS`) calls `evictPieces(torrent, keep)` (`client.ts`). For

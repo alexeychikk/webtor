@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
+import { ByteWindow, trackedSource } from '../../player/byte-window';
 import type { ByteSource } from '../../player/types';
 import type { SubtitleCue } from '../cue';
 import { assBlockText } from './blocks';
@@ -184,6 +185,29 @@ describe('cluster scan on sample.mkv', () => {
     await expect(
       new ClusterScanner(source, header, () => {}).scan(0, 5, abort.signal),
     ).rejects.toThrow();
+  });
+});
+
+describe('cluster scan through the piece window (docs/decisions/0012)', () => {
+  it('keeps the window end at the clusters it read, not at the Cues near the end', async () => {
+    const { source } = memorySource(fixture);
+    const header = (await readMkvHeader(new ByteReader(source)))!;
+    expect(header.cuesPosition).toBeGreaterThan(fixture.length / 2);
+    const window = new ByteWindow(0);
+    const scanner = new ClusterScanner(
+      trackedSource(source, window, 'scan'),
+      header,
+      () => {},
+      trackedSource(source, window, 'once'),
+    );
+    const points = await readCuePoints(new ByteReader(source), header);
+    window.read(0, header.firstCluster!)();
+    // Far ahead first: the Cues are read before the clusters at 0–3 s.
+    await scanner.scan(0, 3);
+    const end = window.keep(0)!.end;
+    expect(end).toBeLessThan(header.cuesPosition!);
+    expect(end).toBeGreaterThan(points[1]!.cluster);
+    expect(end).toBeLessThanOrEqual(points[3]!.cluster + 512 * 1024);
   });
 });
 

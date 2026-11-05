@@ -244,7 +244,8 @@ docs/decisions/                ADRs
   re-downloads); reads in flight (`trackedSource`) and `_selections` are never evicted: a `done` file
   reads the store with no selection, and a missing piece destroys the stream. Every read of the
   playing file goes through the window: other readers (subtitle scan, MKV header, fonts) use
-  `MsePlayer.windowed(source, 'scan' | 'once')`; the scan's reach since the last seek stays kept.
+  `MsePlayer.windowed(source, 'scan' | 'once')`; the scan's Cluster reach since the last seek stays kept
+  (its Cues lookup, often near EOF, reads a separate `once` source: else the window keeps everything).
   Budget `windowBudget(navigator.deviceMemory)` caps the buffer-ahead (`aheadWithin`, ≥ 20 s).
   `torrent.downloaded`/`progress` drop on eviction: the starvation watchdog uses `verifiedBytes` (client.ts; `received` counts a failing web seed's protocol bytes). Small fixtures
   are read whole by Mediabunny's cache, so `e2e/piece-window.spec.ts` (chromium + webkit) sets
