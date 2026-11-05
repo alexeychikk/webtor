@@ -4,6 +4,8 @@
  * dropped from the piece store and downloaded again when a seek goes back there.
  */
 
+import type { ByteSource } from './types';
+
 /** Media kept behind the playhead (s), for short seeks back without a download. */
 export const KEEP_BEHIND_S = 10;
 /**
@@ -12,13 +14,18 @@ export const KEEP_BEHIND_S = 10;
  */
 export const READ_AHEAD_SLACK = 16 * 1024 * 1024;
 
-import type { ByteSource } from './types';
-
 export interface ByteRange {
   start: number;
   /** Exclusive. */
   end: number;
 }
+
+/**
+ * Who reads: `demux` = the pipelines' demuxer (moves the frontier); `scan` = the embedded-subtitle
+ * cluster scan (its reach counts in the end until the next seek); `once` = a one-off read
+ * (Matroska header, font attachments), only pinned while it runs.
+ */
+export type ReadRole = 'demux' | 'scan' | 'once';
 
 interface Sample {
   /** Element time of a fragment the pipelines produced. */
@@ -35,15 +42,19 @@ export class ByteWindow {
   private cursor = 0;
   /** The furthest sample of this run; 0 = none. */
   private sampled = 0;
+  /** The furthest scan read since the last seek; 0 = none. */
+  private scanned = 0;
   /** Reads not finished yet: their pieces must stay, whatever the playhead. */
   private readonly pending = new Set<ByteRange>();
 
   constructor(private readonly slack = READ_AHEAD_SLACK) {}
 
-  /** A demuxer read of `[start, end)` begins; call the returned function once it ended. */
-  read(start: number, end: number): () => void {
-    this.cursor = end;
-    if (end > this.frontier) this.frontier = end;
+  /** A read of `[start, end)` begins; call the returned function once it ended. */
+  read(start: number, end: number, role: ReadRole = 'demux'): () => void {
+    if (role === 'demux') {
+      this.cursor = end;
+      if (end > this.frontier) this.frontier = end;
+    } else if (role === 'scan' && end > this.scanned) this.scanned = end;
     const range = { start, end };
     this.pending.add(range);
     return () => this.pending.delete(range);
@@ -54,6 +65,7 @@ export class ByteWindow {
     this.frontier = 0;
     this.cursor = 0;
     this.sampled = 0;
+    this.scanned = 0;
   }
 
   /** The pipelines produced media up to element time `time` (the furthest of them). */
@@ -69,12 +81,12 @@ export class ByteWindow {
 
   /**
    * Bytes to keep with the playhead at element time `t`; null = keep everything. The start comes
-   * from a fragment at least `KEEP_BEHIND_S` before `t`, lowered by the slack; the end from the
-   * reads since the last seek: the furthest fragment's (or the latest read) plus the slack (a one-off
-   * read further on,
-   * like Matroska Cues at the end of the file, doesn't count), or the furthest read before any.
-   * Reads still running are always inside: WebTorrent reads a piece it has from the store with no
-   * selection left on it, and a missing piece destroys the stream.
+   * from a fragment at least `KEEP_BEHIND_S` before `t`, lowered by the slack. The end comes from
+   * the demuxer's reads since the last seek: the furthest fragment's (or the latest read) plus the
+   * slack, or the furthest read before any fragment. A one-off read further on, like Matroska Cues
+   * at the end of the file, doesn't count. The subtitle scan's reach since the last seek does: the
+   * pipelines read those bytes soon. Reads still running are always inside: WebTorrent reads a
+   * piece it has from the store with no selection left on it, and a missing piece ends the stream.
    */
   keep(t: number): ByteRange | null {
     const behind = t - KEEP_BEHIND_S;
@@ -87,6 +99,7 @@ export class ByteWindow {
     if (this.sampled)
       end = Math.min(this.frontier, Math.max(this.sampled, this.cursor) + this.slack);
     else if (this.frontier) end = this.frontier;
+    end = Math.max(end, this.scanned);
     for (const r of this.pending) {
       start = Math.min(start, r.start);
       end = Math.max(end, r.end);
@@ -96,15 +109,23 @@ export class ByteWindow {
   }
 }
 
-/** `source` with every read reported to `window` while it runs (a stream until it ends or is cancelled). */
-export function trackedSource(source: ByteSource, window: ByteWindow): ByteSource {
+/**
+ * `source` with every read reported to `window` while it runs: a stream until it delivered its
+ * bytes, ends or is cancelled.
+ */
+export function trackedSource(
+  source: ByteSource,
+  window: ByteWindow,
+  role: ReadRole = 'demux',
+): ByteSource {
   return {
     size: source.size,
     read(start, end) {
-      const done = window.read(start, end);
+      const done = window.read(start, end, role);
       const result = source.read(start, end);
       if (!(result instanceof ReadableStream)) return result.finally(done);
       const reader = result.getReader();
+      let delivered = 0;
       return new ReadableStream<Uint8Array>({
         async pull(controller) {
           try {
@@ -112,7 +133,11 @@ export function trackedSource(source: ByteSource, window: ByteWindow): ByteSourc
             if (ended) {
               done();
               controller.close();
-            } else controller.enqueue(value);
+              return;
+            }
+            delivered += value.length;
+            if (delivered >= end - start) done();
+            controller.enqueue(value);
           } catch (err) {
             done();
             controller.error(err);

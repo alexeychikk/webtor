@@ -136,7 +136,7 @@ export function destroyTorrent(torrent: Torrent, timeoutMs = DESTROY_TIMEOUT_MS)
   return done;
 }
 
-/** WebTorrent internals the eviction relies on (webtorrent 2.x, `Torrent`). */
+/** WebTorrent internals the eviction relies on (checked against webtorrent 3.0.21, `Torrent`). */
 interface TorrentInternals {
   _selections?: Iterable<{ from: number; to: number }>;
   _critical?: unknown[];

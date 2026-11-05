@@ -43,10 +43,12 @@ after a seek.
     window. Before the first sample, the end is the furthest read.
   - **Reset.** A seek (`restartAt`) resets the run.
   - **Reads in flight are always inside** (`trackedSource` pins a read until its promise settles or
-    its stream ends or is cancelled). WebTorrent drops a stream's selection once its pieces are
+    its stream delivered its bytes, ends or is cancelled). Every read of the playing file goes
+    through the window: the pipelines' (`demux`), the subtitle scan's (`scan`, via
+    `MsePlayer.windowed`) and the Matroska header and font attachment reads (`once`, pinned only). WebTorrent drops a stream's selection once its pieces are
     all in, and a `done` file reads straight from the store without one; a piece missing from the
     store then destroys the stream.
-- **Eviction.** The controller's 2 s `tick` calls `evictPieces(torrent, keep)` (`client.ts`). For
+- **Eviction.** The controller's 1 s `tick` (`TICK_MS`) calls `evictPieces(torrent, keep)` (`client.ts`). For
   every stored piece outside the window (`piecesToEvict`, `src/lib/torrent/piece-window.ts`):
   - it deletes the piece from the store;
   - `_markUnverified(i)` clears the bitfield bit, makes a fresh `Piece` and resets `file.done`;
@@ -55,7 +57,9 @@ after a seek.
     restarts the trackers.
 
   The effects:
-  - An evicted piece is not "have" and is never uploaded: requests fail while `pieces[i]` is set.
+  - An evicted piece is not "have" and is never uploaded. WebTorrent drops a peer's request for
+    it without an answer while `pieces[i]` is set (`if (this.pieces[index]) return`, `torrent.js`),
+    so the peer's request times out.
   - A seek back downloads it again.
   - **Pieces under a selection are never evicted** either: what a `file.stream` still waits for.
 
@@ -79,7 +83,7 @@ after a seek.
   is slower than before.
 - Nothing is kept across reloads. Resume (ADR 0009) downloads from the saved position.
 - **WebTorrent internals.** `_markUnverified`, `_critical`, `_selections` and `_checkDone` are
-  webtorrent 2.x internals. `client.test.ts` covers `evictPieces` against a fake torrent;
+  internals of webtorrent 3.0.21, the version they were checked against. `client.test.ts` covers `evictPieces` against a fake torrent;
   `e2e/piece-window.spec.ts` covers the real one.
   - When upgrading WebTorrent, keep that e2e green.
   - Without `_markUnverified`, nothing is evicted.

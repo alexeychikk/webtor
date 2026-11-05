@@ -46,7 +46,7 @@ import {
   type TranscodeTarget,
 } from './codecs';
 import { aheadWithin } from '../torrent/piece-window';
-import { ByteWindow, trackedSource, type ByteRange } from './byte-window';
+import { ByteWindow, trackedSource, type ByteRange, type ReadRole } from './byte-window';
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readMkvHeader } from '../subtitles/mkv/header';
@@ -556,6 +556,14 @@ export class MsePlayer {
    */
   keepRange(): ByteRange | null {
     return this.destroyed ? null : this.bytes.keep(this.video.currentTime);
+  }
+
+  /**
+   * `file` (the playing file's source) with its reads in the piece window, for readers beside the
+   * pipelines: pinned while they run, and a `scan`'s reach kept until the next seek (ADR 0012).
+   */
+  windowed(file: ByteSource, role: Exclude<ReadRole, 'demux'>): ByteSource {
+    return trackedSource(file, this.bytes, role);
   }
 
   private noteProduced() {

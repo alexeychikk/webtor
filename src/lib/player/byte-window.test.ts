@@ -72,6 +72,27 @@ describe('ByteWindow', () => {
     w.read(42 * MiB, 80 * MiB)();
     expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 80 * MiB });
   });
+
+  it('keeps up to the subtitle scan reach until the next seek', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 20);
+    w.read(42 * MiB, 62 * MiB, 'scan')();
+    expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 62 * MiB });
+    w.restart();
+    play(w, 30, 35);
+    expect(w.keep(35)).toEqual({ start: 42 * MiB, end: 72 * MiB });
+  });
+
+  it('pins a one-off read only while it runs', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 20);
+    const header = w.read(0, 1 * MiB, 'once');
+    const fonts = w.read(900 * MiB, 901 * MiB, 'once');
+    expect(w.keep(20)).toEqual({ start: 0, end: 901 * MiB });
+    header();
+    fonts();
+    expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 42 * MiB });
+  });
 });
 
 describe('trackedSource', () => {
@@ -85,6 +106,21 @@ describe('trackedSource', () => {
     expect(w.keep(40)?.start).toBe(0);
     expect(new Uint8Array(await new Response(stream).arrayBuffer())).toEqual(bytes);
     expect(w.keep(40)?.start).toBe(62 * MiB);
+  });
+
+  it('unpins a stream once it delivered its bytes, read to the end or not', async () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 50);
+    const source = trackedSource(
+      { size: 1000 * MiB, read: () => new Blob([bytes]).stream() },
+      w,
+      'scan',
+    );
+    const reader = (source.read(0, 4) as ReadableStream<Uint8Array>).getReader();
+    expect(w.keep(40)).toEqual({ start: 0, end: 102 * MiB });
+    expect((await reader.read()).value).toEqual(bytes);
+    reader.releaseLock();
+    expect(w.keep(40)).toEqual({ start: 62 * MiB, end: 102 * MiB });
   });
 
   it('unpins a cancelled stream and a settled promise', async () => {
