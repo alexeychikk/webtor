@@ -141,6 +141,25 @@ const START_GATE_MAX_MS = 5000;
 /** The longest a seek waits for the element to end (`holdSeek`); the rest is at most `EOS_AHEAD_S`. */
 const HELD_SEEK_MAX_MS = 1000;
 
+/** e2e: 0 lets the small fixtures exercise the piece window (ADR 0012). */
+function readSlackBytes(): number | undefined {
+  try {
+    const value = localStorage.getItem('webtor:read-slack-bytes');
+    return value === null ? undefined : Number(value);
+  } catch {
+    return undefined;
+  }
+}
+
+/** e2e: a small demuxer cache without prefetch, so the small fixtures are read piece by piece. */
+function readCacheBytes(): number | undefined {
+  try {
+    return Number(localStorage.getItem('webtor:read-cache-bytes')) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** e2e uses a few seconds so the 12 s fixture exercises back-pressure and seek restarts. */
 function bufferAheadSeconds(): number {
   try {
@@ -331,7 +350,8 @@ export class MsePlayer {
     const mb = await import('mediabunny');
     const { AVI_FORMAT_NAME, createAviFormat } = await import('./avi/demuxer');
     const { aviVideoFormatName } = await import('./avi/fourcc');
-    const bytes = new ByteWindow();
+    const bytes = new ByteWindow(readSlackBytes());
+    const readCache = readCacheBytes();
     const source: ByteSource = {
       size: file.size,
       read: (start, end) => {
@@ -346,7 +366,9 @@ export class MsePlayer {
       source: new mb.CustomSource({
         getSize: () => source.size,
         read: (start, end) => source.read(start, end),
-        prefetchProfile: 'network',
+        ...(readCache
+          ? { maxCacheSize: readCache, prefetchProfile: 'none' }
+          : { prefetchProfile: 'network' }),
       }),
     });
     try {

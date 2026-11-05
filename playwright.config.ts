@@ -36,7 +36,13 @@ export default defineConfig({
     },
     {
       name: 'webkit',
-      testMatch: ['smoke.spec.ts', 'seek-end.spec.ts', 'seek-tail.spec.ts', 'start-stress.spec.ts'],
+      testMatch: [
+        'smoke.spec.ts',
+        'seek-end.spec.ts',
+        'seek-tail.spec.ts',
+        'start-stress.spec.ts',
+        'piece-window.spec.ts',
+      ],
       use: { ...devices['Desktop Safari'] },
     },
   ],
