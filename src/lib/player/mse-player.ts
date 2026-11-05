@@ -45,6 +45,8 @@ import {
   type SilencePlan,
   type TranscodeTarget,
 } from './codecs';
+import { aheadWithin } from '../torrent/piece-window';
+import { ByteWindow, type ByteRange } from './byte-window';
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readMkvHeader } from '../subtitles/mkv/header';
@@ -239,6 +241,11 @@ export interface MsePlayerOptions {
    * owner opens the file again at `t` in a new MsePlayer. Asked at most once per player.
    */
   onStuckSeek?(t: number): void;
+  /**
+   * Bytes the piece store may hold (ADR 0012): the ahead target shrinks so that much media at the
+   * file's mean rate fits (`aheadWithin`).
+   */
+  windowBytes?: number;
 }
 
 export class MsePlayer {
@@ -255,7 +262,7 @@ export class MsePlayer {
   private stuckSeekTimer: ReturnType<typeof setTimeout> | undefined | null;
   private seekGen = 0;
   private readonly abort = new AbortController();
-  private readonly bufferAhead = bufferAheadSeconds();
+  private readonly bufferAhead: number;
   private switchGen = 0;
   private slowNoticed = false;
   /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
@@ -297,7 +304,12 @@ export class MsePlayer {
     notices: PlaybackErrorCode[],
     private readonly opts: MsePlayerOptions,
     private readonly remote: RemoteVideo | null,
+    private readonly bytes: ByteWindow,
+    fileSize: number,
   ) {
+    this.bufferAhead = opts.windowBytes
+      ? aheadWithin(bufferAheadSeconds(), opts.windowBytes, fileSize / duration)
+      : bufferAheadSeconds();
     this.audioTracks = audioTracks;
     this.notices = notices;
   }
@@ -308,7 +320,7 @@ export class MsePlayer {
    */
   static async open(
     video: HTMLVideoElement,
-    source: ByteSource,
+    file: ByteSource,
     opts: MsePlayerOptions,
   ): Promise<MsePlayer> {
     const msc = mediaSourceClass();
@@ -319,6 +331,14 @@ export class MsePlayer {
     const mb = await import('mediabunny');
     const { AVI_FORMAT_NAME, createAviFormat } = await import('./avi/demuxer');
     const { aviVideoFormatName } = await import('./avi/fourcc');
+    const bytes = new ByteWindow();
+    const source: ByteSource = {
+      size: file.size,
+      read: (start, end) => {
+        bytes.read(start, end);
+        return file.read(start, end);
+      },
+    };
     const aviFormat = createAviFormat(mb, source);
     const input = new mb.Input({
       // Our AVI demuxer (ADR 0007) on Mediabunny's internals; Mediabunny is pinned for it.
@@ -475,6 +495,8 @@ export class MsePlayer {
         notices,
         opts,
         remote,
+        bytes,
+        source.size,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
       player.hdr = hdr;
@@ -510,6 +532,20 @@ export class MsePlayer {
       if (!input.disposed) input.dispose();
       throw err instanceof PlaybackError ? err : new PlaybackError('playback-failed', String(err));
     }
+  }
+
+  /**
+   * Bytes of the file playback needs now (ADR 0012): from `KEEP_BEHIND_S` behind the playhead to
+   * the furthest read since the last seek; null = keep everything.
+   */
+  keepRange(): ByteRange | null {
+    return this.destroyed ? null : this.bytes.keep(this.video.currentTime);
+  }
+
+  private noteProduced() {
+    let furthest = -Infinity;
+    for (const p of this.pipelines) if (!p.remote) furthest = Math.max(furthest, p.writtenTo);
+    this.bytes.produced(furthest);
   }
 
   /** Source time of element time 0 (the file's first video timestamp). */
@@ -991,6 +1027,7 @@ export class MsePlayer {
   /** `t` is element time; the keyframe lookup and trim work in source time. */
   private async restartAt(t: number) {
     const gen = ++this.seekGen;
+    this.bytes.restart();
     // Stop the old pipelines first so their reads stop competing with the keyframe lookup.
     const stopped = this.pipelines.map((p) => ({ p, ...this.stopPipeline(p) }));
     try {
@@ -1047,6 +1084,7 @@ export class MsePlayer {
         onMoof: (_data, _pos, timestamp) => {
           if (gen !== p.gen) return;
           p.writtenTo = offset + timestamp;
+          this.noteProduced();
           // Every fragment starts on a keyframe (Mediabunny's fragmented MP4).
           if (p.kind === 'video') {
             p.keyframes.push(p.writtenTo);
@@ -1160,7 +1198,9 @@ export class MsePlayer {
           fastStart: 'fragmented',
           minimumFragmentDuration: 1,
           onMoof: (_data, _pos, timestamp) => {
-            if (gen === p.gen) p.writtenTo = from + timestamp;
+            if (gen !== p.gen) return;
+            p.writtenTo = from + timestamp;
+            this.noteProduced();
           },
         }),
         target: new mb.AppendOnlyStreamTarget(

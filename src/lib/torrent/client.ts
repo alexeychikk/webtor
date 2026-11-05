@@ -4,15 +4,15 @@
  */
 import type WebTorrentType from 'webtorrent/dist/webtorrent.min.js';
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
-import { canWriteOpfs, MemoryChunkStore } from './memory-store';
+import { clearOpfs, MemoryChunkStore, storeOf } from './memory-store';
+import { piecesToEvict } from './piece-window';
 import { announceList, prepareTorrentId } from './trackers';
 
 let clientPromise: Promise<WebTorrentType> | null = null;
-/** Pieces go to OPFS (WebTorrent's default) unless this tab can't write there. */
-let memoryOnly: Promise<boolean> | null = null;
 
 function getClient(): Promise<WebTorrentType> {
   clientPromise ??= import('webtorrent/dist/webtorrent.min.js').then(({ default: WebTorrent }) => {
+    void clearOpfs();
     const client = new WebTorrent();
     // Per-torrent errors arrive on the torrent; the rest (e.g. a tracker going away) is not fatal.
     client.on('error', (err) => console.warn('webtorrent:', err));
@@ -75,15 +75,15 @@ async function addTorrentId(
   maxWebConns?: number,
   isStale?: IsStale,
 ): Promise<Torrent | null> {
-  memoryOnly ??= canWriteOpfs().then((ok) => !ok);
-  const [client, inMemory] = await Promise.all([getClient(), memoryOnly]);
+  const client = await getClient();
   // Also the ones a switch already destroys: re-adding the same torrent (A → B → A) must not
   // race the deletion of its store.
   await Promise.all([...client.torrents.map((t) => destroyTorrent(t)), ...destroying]);
   if (isStale?.()) return null;
   return client.add(torrentId, {
-    // Already in memory: no extra piece cache in front of it.
-    ...(inMemory ? { store: MemoryChunkStore, storeCacheSlots: 0 } : {}),
+    // The bounded window (ADR 0012), already in memory: no extra piece cache in front of it.
+    store: MemoryChunkStore,
+    storeCacheSlots: 0,
     announce,
     ...(urlList.length ? { urlList } : {}),
     ...(maxWebConns ? { maxWebConns } : {}),
@@ -95,8 +95,9 @@ async function addTorrentId(
 
 /**
  * How long a destroy may take before the next torrent goes ahead anyway. WebTorrent calls back only
- * once its store and trackers are closed, and an OPFS store whose cleanup throws (a piece write in
- * flight) never calls back at all; waiting for it left a switch on the landing view for good.
+ * once its store and trackers are closed, and a store whose cleanup throws (OPFS with a piece write
+ * in flight, before ADR 0012) never calls back at all; waiting for it left a switch on the landing
+ * view for good.
  */
 export const DESTROY_TIMEOUT_MS = 3000;
 
@@ -105,7 +106,7 @@ const destroying = new Set<Promise<void>>();
 const destroys = new WeakMap<Torrent, Promise<void>>();
 
 /**
- * Stops the torrent, drops it from the client and frees its OPFS/memory store. Resolves once that
+ * Stops the torrent, drops it from the client and frees its piece store. Resolves once that
  * is done or `timeoutMs` passed; calling it again for the same torrent returns the same promise
  * (WebTorrent never calls a second `destroy()` back).
  */
@@ -133,4 +134,44 @@ export function destroyTorrent(torrent: Torrent, timeoutMs = DESTROY_TIMEOUT_MS)
   destroying.add(settled);
   destroys.set(torrent, done);
   return done;
+}
+
+/** WebTorrent internals the eviction relies on (webtorrent 2.x, `Torrent`). */
+interface TorrentInternals {
+  _selections?: Iterable<{ from: number; to: number }>;
+  _critical?: unknown[];
+  _markUnverified?(index: number): void;
+  _checkDone?(): void;
+  done: boolean;
+}
+
+/**
+ * Drops the stored pieces outside `keep` (torrent bytes, exclusive end; ADR 0012) and marks them
+ * missing, so they are no longer "have", never served, and a read there downloads them again.
+ * Pieces under a selection (a stream reading or waiting for them) stay. Returns how many went.
+ */
+export function evictPieces(torrent: Torrent, keep: { start: number; end: number } | null): number {
+  const store = storeOf(torrent);
+  const bitfield = torrent.bitfield;
+  const internals = torrent as unknown as TorrentInternals;
+  if (!store || !bitfield || torrent.destroyed || !internals._markUnverified) return 0;
+  const evict = piecesToEvict({
+    held: store.indices().filter((i) => bitfield.get(i)),
+    pieceLength: torrent.pieceLength,
+    keep,
+    pinned: [...(internals._selections ?? [])].map(({ from, to }) => ({ from, to })),
+  });
+  for (const i of evict) {
+    store.delete(i);
+    internals._markUnverified(i);
+    if (internals._critical) internals._critical[i] = false;
+  }
+  // A "done" torrent ignores new peers; `_checkDone` clears it and restarts the trackers.
+  if (evict.length && internals.done) internals._checkDone?.();
+  return evict.length;
+}
+
+/** Bytes the torrent's piece store holds. */
+export function storedBytes(torrent: Torrent): number {
+  return storeOf(torrent)?.bytes ?? 0;
 }
