@@ -67,8 +67,9 @@ after a seek.
   `navigator.storage.estimate()` doesn't apply, because nothing goes to disk. The buffer-ahead
   target (60 s) is cut so the window fits the budget at the file's mean byte rate (`aheadWithin`),
   but never below 20 s (`MIN_AHEAD_S`).
-- **The watchdog counts `torrent.received`.** `downloaded` now drops when pieces are evicted;
-  `received` only grows.
+- **The watchdog counts `verifiedBytes`** (`client.ts`: `downloaded` plus the evicted bytes, only
+  grows). `downloaded` now drops when pieces are evicted, and `received` is no substitute: it also
+  counts protocol bytes, which a failing web seed's retries keep adding.
 
 ## Consequences
 

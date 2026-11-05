@@ -12,6 +12,7 @@ import {
   destroyTorrent,
   evictPieces,
   storedBytes,
+  verifiedBytes,
 } from '../torrent/client';
 import { windowBudget } from '../torrent/piece-window';
 import {
@@ -208,7 +209,7 @@ export class PlayerController {
     this.forgotten = null;
     this.phase = 'metadata';
     this.starvedFor = 0;
-    this.lastDownloaded = torrent.received;
+    this.lastDownloaded = verifiedBytes(torrent);
     await this.openFile(run, torrent, index);
   }
 
@@ -269,7 +270,7 @@ export class PlayerController {
     this.torrent = torrent;
     this.startedAt = performance.now();
     this.starvedFor = 0;
-    this.lastDownloaded = torrent.received;
+    this.lastDownloaded = verifiedBytes(torrent);
     torrent.on('error', (err) => {
       if (torrent !== this.torrent) return;
       // WebTorrent's word for a .torrent file it cannot parse.
@@ -830,11 +831,11 @@ export class PlayerController {
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';
     this.starvedFor = nextStarvedFor(this.starvedFor, {
       waiting: waitingForData,
-      downloaded: t.received,
+      downloaded: verifiedBytes(t),
       lastDownloaded: this.lastDownloaded,
       dt: TICK_MS,
     });
-    this.lastDownloaded = t.received;
+    this.lastDownloaded = verifiedBytes(t);
     const notice = watchdogNotice({
       elapsed: performance.now() - this.startedAt,
       hasMetadata: Boolean(t.files?.length),

@@ -68,12 +68,13 @@ export class MemoryChunkStore {
     return [...this.chunks.keys()];
   }
 
-  /** Drops a chunk (eviction); a later `get` of it is "not found". */
-  delete(index: number) {
+  /** Drops a chunk (eviction); a later `get` of it is "not found". Returns the bytes freed. */
+  delete(index: number): number {
     const buf = this.chunks.get(index);
-    if (!buf) return;
+    if (!buf) return 0;
     this.chunks.delete(index);
     this.bytes -= buf.length;
+    return buf.length;
   }
 
   close(cb: Callback = () => {}) {

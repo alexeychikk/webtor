@@ -162,13 +162,23 @@ export function evictPieces(torrent: Torrent, keep: { start: number; end: number
     pinned: [...(internals._selections ?? [])].map(({ from, to }) => ({ from, to })),
   });
   for (const i of evict) {
-    store.delete(i);
+    evicted.set(torrent, (evicted.get(torrent) ?? 0) + store.delete(i));
     internals._markUnverified(i);
     if (internals._critical) internals._critical[i] = false;
   }
   // A "done" torrent ignores new peers; `_checkDone` clears it and restarts the trackers.
   if (evict.length && internals.done) internals._checkDone?.();
   return evict.length;
+}
+
+const evicted = new WeakMap<Torrent, number>();
+
+/**
+ * Payload bytes verified so far, evicted ones included: only grows. `torrent.downloaded` drops on
+ * eviction, and `torrent.received` also counts protocol bytes (a failing web seed's retries).
+ */
+export function verifiedBytes(torrent: Torrent): number {
+  return torrent.downloaded + (evicted.get(torrent) ?? 0);
 }
 
 /** Bytes the torrent's piece store holds. */

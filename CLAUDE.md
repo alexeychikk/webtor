@@ -244,7 +244,7 @@ docs/decisions/                ADRs
   re-downloads); reads in flight (`trackedSource`) and `_selections` are never evicted: a `done` file
   reads the store with no selection, and a missing piece destroys the stream.
   Budget `windowBudget(navigator.deviceMemory)` caps the buffer-ahead (`aheadWithin`, ≥ 20 s).
-  `torrent.downloaded`/`progress` drop on eviction: the starvation watchdog uses `torrent.received`. Small fixtures
+  `torrent.downloaded`/`progress` drop on eviction: the starvation watchdog uses `verifiedBytes` (client.ts; `received` counts a failing web seed's protocol bytes). Small fixtures
   are read whole by Mediabunny's cache, so `e2e/piece-window.spec.ts` (chromium + webkit) sets
   `localStorage['webtor:read-cache-bytes']` (small `maxCacheSize`, no prefetch) and
   `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes`.
@@ -274,7 +274,7 @@ docs/decisions/                ADRs
   never when a store's cleanup throws (OPFS did). `destroyTorrent` (client.ts) is deduplicated and
   settles after `DESTROY_TIMEOUT_MS`; adds wait for pending destroys and skip a superseded load
   (`isStale`). `tick` ignores a destroyed torrent (it has no files and no peers). e2e:
-  `e2e/switch.spec.ts` (a hanging `removeEntry` stands in for a stuck store).
+  `e2e/switch.spec.ts`; the destroy timeout: `client.test.ts`.
 - UI test hooks: `data-testid` `torrent-file` (the .torrent input), `video`, `status` (sr-only live
   region "<phase> · <file name>", with `data-phase`), `error` and `notice` (with `data-code` = the
   `PlaybackErrorCode`), `subtitle-upload` (hidden file input, always in the screen), `screen` (the

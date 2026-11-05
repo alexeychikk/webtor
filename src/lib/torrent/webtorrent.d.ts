@@ -54,8 +54,6 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     readonly uploadSpeed: number;
     /** Payload bytes of the pieces held now (verified or partly downloaded); drops on eviction. */
     readonly downloaded: number;
-    /** Payload bytes received since the torrent was added (only grows). */
-    readonly received: number;
     readonly progress: number;
     readonly pieceLength: number;
     /** Verified pieces (`get(i)`); null until the torrent's info is known. */

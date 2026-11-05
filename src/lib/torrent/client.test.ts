@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
-import { destroyTorrent, evictPieces, storedBytes } from './client';
+import { destroyTorrent, evictPieces, storedBytes, verifiedBytes } from './client';
 import { MemoryChunkStore } from './memory-store';
 
 /** A torrent whose `destroy` calls back after `after` ms, or never (`null`), like WebTorrent's. */
@@ -74,6 +74,9 @@ async function windowTorrent() {
     pieceLength: 4,
     done: true,
     bitfield: { get: (i: number) => bits.has(i) },
+    get downloaded() {
+      return bits.size * 4;
+    },
     _selections: [{ from: 6, to: 7, offset: 0 }],
     _critical: [] as boolean[],
     _markUnverified: vi.fn((i: number) => bits.delete(i)),
@@ -98,6 +101,8 @@ describe('evictPieces', () => {
     expect(t._critical[0]).toBe(false);
     expect(t._critical[2]).toBe(true);
     expect(storedBytes(torrent)).toBe(20);
+    expect(torrent.downloaded).toBe(20);
+    expect(verifiedBytes(torrent)).toBe(40);
     expect(t._checkDone).toHaveBeenCalledOnce();
     expect(t.done).toBe(false);
   });
