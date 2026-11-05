@@ -52,7 +52,7 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     readonly numPeers: number;
     readonly downloadSpeed: number;
     readonly uploadSpeed: number;
-    /** Payload bytes received so far (all pieces, finished or not). */
+    /** Payload bytes of the pieces held now (verified or partly downloaded); drops on eviction. */
     readonly downloaded: number;
     readonly progress: number;
     readonly pieceLength: number;
@@ -80,11 +80,14 @@ declare module 'webtorrent/dist/webtorrent.min.js' {
     urlList?: string[];
     /** 'sequential' (default) or 'rarest'. */
     strategy?: 'sequential' | 'rarest';
-    /** Free the OPFS / memory chunk store when the torrent is destroyed. */
+    /** Free the chunk store when the torrent is destroyed. */
     destroyStoreOnDestroy?: boolean;
     deselect?: boolean;
-    /** Chunk store constructor (abstract-chunk-store); default OPFS where `createWritable` exists. */
-    store?: new (chunkLength: number, opts: { length?: number }) => unknown;
+    /**
+     * Chunk store constructor (abstract-chunk-store); default OPFS where `createWritable` exists.
+     * WebTorrent passes the torrent itself as `opts.torrent`.
+     */
+    store?: new (chunkLength: number, opts: { length?: number; torrent?: object }) => unknown;
     /** Pieces cached in memory in front of the store (default 20; 0 = none). */
     storeCacheSlots?: number;
     /**

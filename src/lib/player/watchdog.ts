@@ -26,9 +26,9 @@ export function watchdogNotice(s: WatchdogSample): WatchdogNotice {
 export interface StarvationSample {
   /** The player is waiting for data (opening the file or buffering). */
   waiting: boolean;
-  /** `torrent.downloaded` now. */
+  /** `verifiedBytes(torrent)` now (only grows; `downloaded` drops when pieces are evicted). */
   downloaded: number;
-  /** `torrent.downloaded` at the previous sample. */
+  /** `verifiedBytes(torrent)` at the previous sample. */
   lastDownloaded: number;
   /** ms since the previous sample. */
   dt: number;

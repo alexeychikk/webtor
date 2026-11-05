@@ -33,6 +33,8 @@ export class ClusterScanner {
     private readonly source: ByteSource,
     private readonly header: MkvHeader,
     private readonly sink: CueSink,
+    /** Source of the Cues (often near the end of the file); `source` serves only Cluster reads. */
+    private readonly index: ByteSource = source,
   ) {
     this.tracks = new Map(header.subtitleTracks.filter((t) => t.format).map((t) => [t.number, t]));
   }
@@ -43,7 +45,7 @@ export class ClusterScanner {
 
   /** File offset of the Cluster to start from for `time` (seconds, source timeline). */
   private async clusterAt(time: number, signal?: AbortSignal): Promise<number | null> {
-    this.cuePoints ??= readCuePoints(new ByteReader(this.source, 0, signal), this.header).catch(
+    this.cuePoints ??= readCuePoints(new ByteReader(this.index, 0, signal), this.header).catch(
       (err: unknown) => {
         this.cuePoints = null;
         throw err;

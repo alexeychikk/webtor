@@ -127,15 +127,22 @@ export class EmbeddedSubtitleScan {
     /** Source time of element time 0 (`Timeline.startTime`). */
     private readonly startTime: number,
     private readonly handlers: EmbeddedScanEvents,
+    /** Source of the Cues; `source` serves only Cluster reads. */
+    index: ByteSource = source,
   ) {
-    this.scanner = new ClusterScanner(source, header, (track, cues) => {
-      // A read still in flight when the file closed must not feed the next file's tracks.
-      if (this.destroyed) return;
-      const shifted = cues
-        .map((c) => ({ ...c, start: c.start - startTime, end: c.end - startTime }))
-        .filter((c) => c.end > 0);
-      if (shifted.length) handlers.onCues(embeddedKey(track), shifted);
-    });
+    this.scanner = new ClusterScanner(
+      source,
+      header,
+      (track, cues) => {
+        // A read still in flight when the file closed must not feed the next file's tracks.
+        if (this.destroyed) return;
+        const shifted = cues
+          .map((c) => ({ ...c, start: c.start - startTime, end: c.end - startTime }))
+          .filter((c) => c.end > 0);
+        if (shifted.length) handlers.onCues(embeddedKey(track), shifted);
+      },
+      index,
+    );
     const { signal } = this.events;
     video.addEventListener('timeupdate', () => void this.pump(), { signal });
     video.addEventListener('seeking', () => this.onSeeking(), { signal });

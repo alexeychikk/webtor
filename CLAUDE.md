@@ -30,7 +30,8 @@ media pipeline, 0004 subtitles, 0005 manual CI & release, 0006 regular-peers rel
 playback: own demuxer on Mediabunny internals, relay-side video conversion with ffmpeg, 0008 UI
 design system: dark, Lucide icons, every player control inside the player, 0009 per-video watch
 state: remembered tracks and resume, 0010 HDR video: what the remux keeps, where it shows, 0011
-watch history: on the watch entry, .torrent bytes in IndexedDB).
+watch history: on the watch entry, .torrent bytes in IndexedDB, 0012 piece storage: a bounded window
+around the playhead, in memory).
 
 ## Commands
 
@@ -42,6 +43,7 @@ pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
                     #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail + start-stress
+                    #   + piece-window
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -142,7 +144,8 @@ relay-v<version> --cleanup-tag` first.
 src/App.svelte                 shell: hero (phase idle: mark, tagline, pill input) → watch (64 px header, player);
                                paste-to-play, page-wide .torrent drop, wordmark = home (stops, clears the hash)
 src/styles/tokens.css          design tokens (colour, type, space, radius, motion, player z-layers), ADR 0008
-src/lib/torrent/               WebTorrent client, trackers, file classification; memory-store.ts (when OPFS can't write)
+src/lib/torrent/               WebTorrent client, trackers, file classification; memory-store.ts (the only piece store),
+                               piece-window.ts (budget, which pieces to evict; ADR 0012)
   files.ts FileList.svelte     video file list (playable / greyed-out unsupported), pick, picker UI
   webtorrent.d.ts              typings for the WebTorrent API subset we use; extend as needed
 src/lib/player/                MSE session, Mediabunny conversions, codec decisions
@@ -234,6 +237,20 @@ docs/decisions/                ADRs
   with zero peers (`xs=` .torrent + `ws=` web seed). For real WebRTC, seed from a second page with
   `client.seed(...)` announcing to `ws://127.0.0.1:8000`. Every file in `e2e/fixtures/` is served
   this way automatically.
+- **Piece window (ADR 0012).** Pieces live only in memory (`MemoryChunkStore`; OPFS is cleared at
+  start, never written). Every `tick` evicts the stored pieces outside `MsePlayer.keepRange()`
+  (`ByteWindow`, `byte-window.ts`: 10 s behind the playhead to the reads since the last seek, ±16 MiB
+  slack) with `evictPieces` (client.ts: `_markUnverified`, so they're not "have" and a seek back
+  re-downloads); reads in flight (`trackedSource`) and `_selections` are never evicted: a `done` file
+  reads the store with no selection, and a missing piece destroys the stream. Every read of the
+  playing file goes through the window: other readers (subtitle scan, MKV header, fonts) use
+  `MsePlayer.windowed(source, 'scan' | 'once')`; the scan's Cluster reach since the last seek stays kept
+  (its Cues lookup, often near EOF, reads a separate `once` source: else the window keeps everything).
+  Budget `windowBudget(navigator.deviceMemory)` caps the buffer-ahead (`aheadWithin`, ≥ 20 s).
+  `torrent.downloaded`/`progress` drop on eviction: the starvation watchdog uses `verifiedBytes` (client.ts; `received` counts a failing web seed's protocol bytes). Small fixtures
+  are read whole by Mediabunny's cache, so `e2e/piece-window.spec.ts` (chromium + webkit) sets
+  `localStorage['webtor:read-cache-bytes']` (small `maxCacheSize`, no prefetch) and
+  `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes`.
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
   `localStorage['webtor:sb-quota-bytes']` gives every SourceBuffer a Safari-like byte quota
@@ -262,10 +279,10 @@ docs/decisions/                ADRs
   any await (saves the position, bumps `run`, releases player, timers, relay polling, listeners),
   so the phase goes straight to `connecting`, never `idle` (the landing view). Never await a
   torrent's destroy unbounded: WebTorrent calls back only after its store and trackers closed, and
-  never when the OPFS store's cleanup throws. `destroyTorrent` (client.ts) is deduplicated and
+  never when a store's cleanup throws (OPFS did). `destroyTorrent` (client.ts) is deduplicated and
   settles after `DESTROY_TIMEOUT_MS`; adds wait for pending destroys and skip a superseded load
   (`isStale`). `tick` ignores a destroyed torrent (it has no files and no peers). e2e:
-  `e2e/switch.spec.ts` (a hanging `removeEntry` stands in for a stuck store).
+  `e2e/switch.spec.ts`; the destroy timeout: `client.test.ts`.
 - UI test hooks: `data-testid` `torrent-file` (the .torrent input), `video`, `status` (sr-only live
   region "<phase> · <file name>", with `data-phase`), `error` and `notice` (with `data-code` = the
   `PlaybackErrorCode`), `subtitle-upload` (hidden file input, always in the screen), `screen` (the

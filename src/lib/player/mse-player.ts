@@ -45,6 +45,8 @@ import {
   type SilencePlan,
   type TranscodeTarget,
 } from './codecs';
+import { aheadWithin } from '../torrent/piece-window';
+import { ByteWindow, trackedSource, type ByteRange, type ReadRole } from './byte-window';
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readMkvHeader } from '../subtitles/mkv/header';
@@ -138,6 +140,25 @@ const START_STUCK_SEEK_MS = 1500;
 const START_GATE_MAX_MS = 5000;
 /** The longest a seek waits for the element to end (`holdSeek`); the rest is at most `EOS_AHEAD_S`. */
 const HELD_SEEK_MAX_MS = 1000;
+
+/** e2e: 0 lets the small fixtures exercise the piece window (ADR 0012). */
+function readSlackBytes(): number | undefined {
+  try {
+    const value = localStorage.getItem('webtor:read-slack-bytes');
+    return value === null ? undefined : Number(value);
+  } catch {
+    return undefined;
+  }
+}
+
+/** e2e: a small demuxer cache without prefetch, so the small fixtures are read piece by piece. */
+function readCacheBytes(): number | undefined {
+  try {
+    return Number(localStorage.getItem('webtor:read-cache-bytes')) || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** e2e uses a few seconds so the 12 s fixture exercises back-pressure and seek restarts. */
 function bufferAheadSeconds(): number {
@@ -239,6 +260,11 @@ export interface MsePlayerOptions {
    * owner opens the file again at `t` in a new MsePlayer. Asked at most once per player.
    */
   onStuckSeek?(t: number): void;
+  /**
+   * Bytes the piece store may hold (ADR 0012): the ahead target shrinks so that much media at the
+   * file's mean rate fits (`aheadWithin`).
+   */
+  windowBytes?: number;
 }
 
 export class MsePlayer {
@@ -255,7 +281,7 @@ export class MsePlayer {
   private stuckSeekTimer: ReturnType<typeof setTimeout> | undefined | null;
   private seekGen = 0;
   private readonly abort = new AbortController();
-  private readonly bufferAhead = bufferAheadSeconds();
+  private readonly bufferAhead: number;
   private switchGen = 0;
   private slowNoticed = false;
   /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
@@ -297,7 +323,12 @@ export class MsePlayer {
     notices: PlaybackErrorCode[],
     private readonly opts: MsePlayerOptions,
     private readonly remote: RemoteVideo | null,
+    private readonly bytes: ByteWindow,
+    fileSize: number,
   ) {
+    this.bufferAhead = opts.windowBytes
+      ? aheadWithin(bufferAheadSeconds(), opts.windowBytes, fileSize / duration)
+      : bufferAheadSeconds();
     this.audioTracks = audioTracks;
     this.notices = notices;
   }
@@ -308,7 +339,7 @@ export class MsePlayer {
    */
   static async open(
     video: HTMLVideoElement,
-    source: ByteSource,
+    file: ByteSource,
     opts: MsePlayerOptions,
   ): Promise<MsePlayer> {
     const msc = mediaSourceClass();
@@ -319,6 +350,9 @@ export class MsePlayer {
     const mb = await import('mediabunny');
     const { AVI_FORMAT_NAME, createAviFormat } = await import('./avi/demuxer');
     const { aviVideoFormatName } = await import('./avi/fourcc');
+    const bytes = new ByteWindow(readSlackBytes());
+    const readCache = readCacheBytes();
+    const source = trackedSource(file, bytes);
     const aviFormat = createAviFormat(mb, source);
     const input = new mb.Input({
       // Our AVI demuxer (ADR 0007) on Mediabunny's internals; Mediabunny is pinned for it.
@@ -326,7 +360,9 @@ export class MsePlayer {
       source: new mb.CustomSource({
         getSize: () => source.size,
         read: (start, end) => source.read(start, end),
-        prefetchProfile: 'network',
+        ...(readCache
+          ? { maxCacheSize: readCache, prefetchProfile: 'none' }
+          : { prefetchProfile: 'network' }),
       }),
     });
     try {
@@ -475,6 +511,8 @@ export class MsePlayer {
         notices,
         opts,
         remote,
+        bytes,
+        source.size,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
       player.hdr = hdr;
@@ -510,6 +548,28 @@ export class MsePlayer {
       if (!input.disposed) input.dispose();
       throw err instanceof PlaybackError ? err : new PlaybackError('playback-failed', String(err));
     }
+  }
+
+  /**
+   * Bytes of the file playback needs now (ADR 0012): from `KEEP_BEHIND_S` behind the playhead to
+   * the furthest read since the last seek; null = keep everything.
+   */
+  keepRange(): ByteRange | null {
+    return this.destroyed ? null : this.bytes.keep(this.video.currentTime);
+  }
+
+  /**
+   * `file` (the playing file's source) with its reads in the piece window, for readers beside the
+   * pipelines: pinned while they run, and a `scan`'s reach kept until the next seek (ADR 0012).
+   */
+  windowed(file: ByteSource, role: Exclude<ReadRole, 'demux'>): ByteSource {
+    return trackedSource(file, this.bytes, role);
+  }
+
+  private noteProduced() {
+    let furthest = -Infinity;
+    for (const p of this.pipelines) if (!p.remote) furthest = Math.max(furthest, p.writtenTo);
+    this.bytes.produced(furthest);
   }
 
   /** Source time of element time 0 (the file's first video timestamp). */
@@ -991,6 +1051,7 @@ export class MsePlayer {
   /** `t` is element time; the keyframe lookup and trim work in source time. */
   private async restartAt(t: number) {
     const gen = ++this.seekGen;
+    this.bytes.restart();
     // Stop the old pipelines first so their reads stop competing with the keyframe lookup.
     const stopped = this.pipelines.map((p) => ({ p, ...this.stopPipeline(p) }));
     try {
@@ -1047,6 +1108,7 @@ export class MsePlayer {
         onMoof: (_data, _pos, timestamp) => {
           if (gen !== p.gen) return;
           p.writtenTo = offset + timestamp;
+          this.noteProduced();
           // Every fragment starts on a keyframe (Mediabunny's fragmented MP4).
           if (p.kind === 'video') {
             p.keyframes.push(p.writtenTo);
@@ -1160,7 +1222,9 @@ export class MsePlayer {
           fastStart: 'fragmented',
           minimumFragmentDuration: 1,
           onMoof: (_data, _pos, timestamp) => {
-            if (gen === p.gen) p.writtenTo = from + timestamp;
+            if (gen !== p.gen) return;
+            p.writtenTo = from + timestamp;
+            this.noteProduced();
           },
         }),
         target: new mb.AppendOnlyStreamTarget(

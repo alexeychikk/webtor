@@ -5,7 +5,16 @@
  */
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
 import { torrentByteSource } from '../torrent/byte-source';
-import { addRelayTorrent, addTorrent, addTorrentFile, destroyTorrent } from '../torrent/client';
+import {
+  addRelayTorrent,
+  addTorrent,
+  addTorrentFile,
+  destroyTorrent,
+  evictPieces,
+  storedBytes,
+  verifiedBytes,
+} from '../torrent/client';
+import { windowBudget } from '../torrent/piece-window';
 import {
   listSubtitleFiles,
   listVideoFiles,
@@ -71,6 +80,15 @@ export type Phase =
   'idle' | 'connecting' | 'metadata' | 'buffering' | 'playing' | 'paused' | 'error';
 
 const TICK_MS = 1000;
+/** What the piece store may hold (ADR 0012); `deviceMemory` exists in Chromium only. */
+const WINDOW_BYTES = windowBudget(
+  (globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined)?.deviceMemory,
+);
+
+declare global {
+  /** e2e: bytes the piece store held at the last tick (ADR 0012). */
+  var __webtorStoredBytes: number | undefined;
+}
 const RELAY_STATS_MS = 2000;
 const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
 const HAVE_FUTURE_DATA = 3;
@@ -191,7 +209,7 @@ export class PlayerController {
     this.forgotten = null;
     this.phase = 'metadata';
     this.starvedFor = 0;
-    this.lastDownloaded = torrent.downloaded;
+    this.lastDownloaded = verifiedBytes(torrent);
     await this.openFile(run, torrent, index);
   }
 
@@ -252,7 +270,7 @@ export class PlayerController {
     this.torrent = torrent;
     this.startedAt = performance.now();
     this.starvedFor = 0;
-    this.lastDownloaded = torrent.downloaded;
+    this.lastDownloaded = verifiedBytes(torrent);
     torrent.on('error', (err) => {
       if (torrent !== this.torrent) return;
       // WebTorrent's word for a .torrent file it cannot parse.
@@ -317,6 +335,7 @@ export class PlayerController {
     let player: MsePlayer;
     try {
       player = await MsePlayer.open(video, source, {
+        windowBytes: WINDOW_BYTES,
         onError: (err) => {
           if (run === this.run) this.fail(err);
         },
@@ -362,7 +381,7 @@ export class PlayerController {
     this.hdr = player.hdr;
     this.watchDisplay();
     if (reopen) this.watchRecovery(video, () => (recovered = true));
-    void this.listEmbeddedSubtitles(run, source, video, player.startTime);
+    void this.listEmbeddedSubtitles(run, source, player, video);
     if (reopen && !reopen.play) return this.updatePhase();
     video.play().catch((err: unknown) => {
       // Autoplay blocked (no user gesture, e.g. #magnet= on page load): wait for the play button.
@@ -376,13 +395,14 @@ export class PlayerController {
    */
   private async listEmbeddedSubtitles(
     run: number,
-    source: ByteSource,
+    file: ByteSource,
+    player: MsePlayer,
     video: HTMLVideoElement,
-    startTime: number,
   ) {
+    const once = player.windowed(file, 'once');
     let header;
     try {
-      header = await readEmbeddedHeader(source);
+      header = await readEmbeddedHeader(once);
     } catch (err) {
       console.warn('subtitles: no embedded tracks:', err);
       if (run === this.run) this.subtitles.listingDone();
@@ -390,13 +410,20 @@ export class PlayerController {
     }
     if (run !== this.run) return;
     if (!header || header.subtitleTracks.length === 0) return this.subtitles.listingDone();
-    const scan = new EmbeddedSubtitleScan(source, header, video, startTime, {
-      onCues: (key, cues) => this.subtitles.appendCues(key, cues),
-      onError: (err) => {
-        console.warn('subtitles: embedded scan failed:', err);
-        this.subtitles.embeddedFailed();
+    const scan = new EmbeddedSubtitleScan(
+      player.windowed(file, 'scan'),
+      header,
+      video,
+      player.startTime,
+      {
+        onCues: (key, cues) => this.subtitles.appendCues(key, cues),
+        onError: (err) => {
+          console.warn('subtitles: embedded scan failed:', err);
+          this.subtitles.embeddedFailed();
+        },
       },
-    });
+      once,
+    );
     this.embedded = scan;
     const headers = new Map<string, string>();
     for (const track of header.subtitleTracks) {
@@ -407,7 +434,7 @@ export class PlayerController {
     this.subtitles.addEmbedded(
       header.subtitleTracks.map(embeddedTrackInfo),
       (key) => scan.setActive(key !== null),
-      { headers, fonts: () => (fonts ??= readFontAttachments(source, header)) },
+      { headers, fonts: () => (fonts ??= readFontAttachments(once, header)) },
     );
     this.subtitles.listingDone();
   }
@@ -782,6 +809,16 @@ export class PlayerController {
     if (!sameRanges(next, this.downloaded)) this.downloaded = next;
   }
 
+  /** Drops the pieces playback no longer needs (ADR 0012). */
+  private evictOutsideWindow(t: Torrent) {
+    const file = this.fileIndex === null ? undefined : t.files?.[this.fileIndex];
+    const keep = file && this.player?.keepRange();
+    if (file && keep) {
+      evictPieces(t, { start: file.offset + keep.start, end: file.offset + keep.end });
+    }
+    globalThis.__webtorStoredBytes = storedBytes(t);
+  }
+
   private tick() {
     const t = this.torrent;
     // A destroyed torrent has no files and no peers: never judge the playback by it (no-peers).
@@ -796,16 +833,17 @@ export class PlayerController {
     };
     const webSeeds = t.wires.filter((w) => w.type === 'webSeed').length;
     this.stats = mergeRelayStats(stats, webSeeds, this.relayStats);
+    this.evictOutsideWindow(t);
     this.updateDownloaded(t);
     this.buffer = this.player?.bufferInfo() ?? null;
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';
     this.starvedFor = nextStarvedFor(this.starvedFor, {
       waiting: waitingForData,
-      downloaded: t.downloaded,
+      downloaded: verifiedBytes(t),
       lastDownloaded: this.lastDownloaded,
       dt: TICK_MS,
     });
-    this.lastDownloaded = t.downloaded;
+    this.lastDownloaded = verifiedBytes(t);
     const notice = watchdogNotice({
       elapsed: performance.now() - this.startedAt,
       hasMetadata: Boolean(t.files?.length),

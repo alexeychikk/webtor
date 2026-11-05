@@ -8,23 +8,6 @@ const video = (page: Page) => page.getByTestId('video');
 const currentTime = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.currentTime);
 const status = (page: Page) => page.getByTestId('status');
 
-/**
- * A chunk store whose deletion never finishes once `window.__webtorStuckStore` is set (OPFS
- * `removeEntry` hangs): WebTorrent then never calls a torrent's `destroy()` back, which used to
- * leave a switch on the landing view and the next load stuck on "Still searching…".
- */
-const stuckStore = () => {
-  const w = window as unknown as { __webtorStuckStore?: boolean; __webtorStuckCalls?: number };
-  const proto = globalThis.FileSystemDirectoryHandle?.prototype;
-  if (!proto) return;
-  const removeEntry = proto.removeEntry;
-  proto.removeEntry = function (this: FileSystemDirectoryHandle, ...args) {
-    if (!w.__webtorStuckStore) return removeEntry.apply(this, args);
-    w.__webtorStuckCalls = (w.__webtorStuckCalls ?? 0) + 1;
-    return new Promise<void>(() => {});
-  };
-};
-
 /** Records every `data-phase` the status takes from now on. */
 const recordPhases = (page: Page) =>
   page.evaluate(() => {
@@ -51,21 +34,15 @@ async function expectPlaying(page: Page, name: string) {
   await expect(page.locator('[data-testid="notice"][data-code="no-peers"]')).toHaveCount(0);
 }
 
-test('another magnet replaces the playing one in place, A → B → A, even when a destroy hangs', async ({
-  page,
-}) => {
+test('another magnet replaces the playing one in place, A → B → A', async ({ page }) => {
   test.setTimeout(120_000);
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(String(err)));
-  await page.addInitScript(stuckStore);
   const a = await fixtureMagnet('sample.mkv');
   const b = await fixtureMagnet('offset.ts');
   await page.goto(`./#magnet=${encodeURIComponent(a)}`);
   await expectPlaying(page, 'sample.mkv');
 
-  await page.evaluate(() => {
-    (window as unknown as { __webtorStuckStore: boolean }).__webtorStuckStore = true;
-  });
   await recordPhases(page);
 
   // Playing → B.
@@ -86,12 +63,6 @@ test('another magnet replaces the playing one in place, A → B → A, even when
   expect(await phases(page)).not.toContain('idle');
   await expect(page.locator('.hero-body')).toHaveCount(0);
   expect(errors).toEqual([]);
-  // The stuck store was really in the way (else this test proves nothing about a hanging destroy).
-  expect(
-    await page.evaluate(
-      () => (window as unknown as { __webtorStuckCalls?: number }).__webtorStuckCalls,
-    ),
-  ).toBeGreaterThan(0);
 });
 
 test('with a relay: relay magnet → opened .torrent → relay magnet, in place', async ({ page }) => {
