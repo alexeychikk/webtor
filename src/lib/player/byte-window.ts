@@ -12,6 +12,8 @@ export const KEEP_BEHIND_S = 10;
  */
 export const READ_AHEAD_SLACK = 16 * 1024 * 1024;
 
+import type { ByteSource } from './types';
+
 export interface ByteRange {
   start: number;
   /** Exclusive. */
@@ -33,13 +35,18 @@ export class ByteWindow {
   private cursor = 0;
   /** The furthest sample of this run; 0 = none. */
   private sampled = 0;
+  /** Reads not finished yet: their pieces must stay, whatever the playhead. */
+  private readonly pending = new Set<ByteRange>();
 
   constructor(private readonly slack = READ_AHEAD_SLACK) {}
 
-  /** A demuxer read of `[start, end)`. */
-  read(_start: number, end: number) {
+  /** A demuxer read of `[start, end)` begins; call the returned function once it ended. */
+  read(start: number, end: number): () => void {
     this.cursor = end;
     if (end > this.frontier) this.frontier = end;
+    const range = { start, end };
+    this.pending.add(range);
+    return () => this.pending.delete(range);
   }
 
   /** A seek restarted the pipelines: what they read before says nothing about the reads ahead. */
@@ -63,8 +70,11 @@ export class ByteWindow {
   /**
    * Bytes to keep with the playhead at element time `t`; null = keep everything. The start comes
    * from a fragment at least `KEEP_BEHIND_S` before `t`, lowered by the slack; the end from the
-   * reads since the last seek: the furthest fragment's plus the slack (a one-off read further on,
+   * reads since the last seek: the furthest fragment's (or the latest read) plus the slack (a one-off
+   * read further on,
    * like Matroska Cues at the end of the file, doesn't count), or the furthest read before any.
+   * Reads still running are always inside: WebTorrent reads a piece it has from the store with no
+   * selection left on it, and a missing piece destroys the stream.
    */
   keep(t: number): ByteRange | null {
     const behind = t - KEEP_BEHIND_S;
@@ -74,9 +84,45 @@ export class ByteWindow {
       start = Math.max(0, s.byte - this.slack);
     }
     let end = Infinity;
-    if (this.sampled) end = Math.min(this.frontier, this.sampled + this.slack);
+    if (this.sampled)
+      end = Math.min(this.frontier, Math.max(this.sampled, this.cursor) + this.slack);
     else if (this.frontier) end = this.frontier;
+    for (const r of this.pending) {
+      start = Math.min(start, r.start);
+      end = Math.max(end, r.end);
+    }
     if (start === 0 && end === Infinity) return null;
     return { start: Math.min(start, end), end };
   }
+}
+
+/** `source` with every read reported to `window` while it runs (a stream until it ends or is cancelled). */
+export function trackedSource(source: ByteSource, window: ByteWindow): ByteSource {
+  return {
+    size: source.size,
+    read(start, end) {
+      const done = window.read(start, end);
+      const result = source.read(start, end);
+      if (!(result instanceof ReadableStream)) return result.finally(done);
+      const reader = result.getReader();
+      return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { value, done: ended } = await reader.read();
+            if (ended) {
+              done();
+              controller.close();
+            } else controller.enqueue(value);
+          } catch (err) {
+            done();
+            controller.error(err);
+          }
+        },
+        cancel(reason) {
+          done();
+          return reader.cancel(reason);
+        },
+      });
+    },
+  };
 }

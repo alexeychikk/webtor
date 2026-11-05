@@ -46,7 +46,7 @@ import {
   type TranscodeTarget,
 } from './codecs';
 import { aheadWithin } from '../torrent/piece-window';
-import { ByteWindow, type ByteRange } from './byte-window';
+import { ByteWindow, trackedSource, type ByteRange } from './byte-window';
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readMkvHeader } from '../subtitles/mkv/header';
@@ -352,13 +352,7 @@ export class MsePlayer {
     const { aviVideoFormatName } = await import('./avi/fourcc');
     const bytes = new ByteWindow(readSlackBytes());
     const readCache = readCacheBytes();
-    const source: ByteSource = {
-      size: file.size,
-      read: (start, end) => {
-        bytes.read(start, end);
-        return file.read(start, end);
-      },
-    };
+    const source = trackedSource(file, bytes);
     const aviFormat = createAviFormat(mb, source);
     const input = new mb.Input({
       // Our AVI demuxer (ADR 0007) on Mediabunny's internals; Mediabunny is pinned for it.
