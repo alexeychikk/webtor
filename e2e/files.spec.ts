@@ -196,6 +196,22 @@ test('a picked file that is not a torrent shows a message under the field and st
   await expect(message).toHaveCount(0);
 });
 
+test('playing a magnet after a wrong file clears the message', async ({ page }) => {
+  await page.goto('./');
+  await page.getByLabel('Magnet link or info hash').fill(await fixtureMagnet('sample.mkv'));
+  await page.getByTestId('torrent-file').setInputFiles({
+    name: 'notes.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('hello'),
+  });
+  const message = page.getByText('Not a .torrent file');
+  await expect(message).toBeVisible();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(page.getByTestId('status')).toContainText('sample.mkv');
+  await expect(message).toHaveCount(0);
+  await expect(page.getByTestId('torrent-file')).not.toHaveAttribute('aria-invalid', /./);
+});
+
 test('a .torrent saved without its extension still opens by its content', async ({ page }) => {
   await page.goto('./');
   await page.getByTestId('torrent-file').setInputFiles({

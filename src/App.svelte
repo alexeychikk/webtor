@@ -49,6 +49,7 @@
   function play(torrentId: TorrentInput, fileIndex: number | null = null) {
     current = torrentId;
     requestedFile = fileIndex;
+    problem = null;
     if (video) void controller.load(torrentId, video, fileIndex);
   }
 
@@ -82,7 +83,6 @@
     if (!isTorrentId(text)) return;
     event.preventDefault();
     input = text;
-    problem = null;
     start(text);
   }
 
@@ -112,7 +112,6 @@
       return;
     }
     input = '';
-    problem = null;
     history.pushState(null, '', `${location.pathname}${location.search}`);
     play(bytes);
   }
@@ -190,7 +189,6 @@
     const bytes = source.fromFile ? await loadTorrentFile(entry.infoHash) : null;
     history.pushState(null, '', magnetHash(source.magnet, source.index));
     input = bytes ? '' : source.magnet;
-    problem = null;
     play(bytes ?? source.magnet, source.index);
   }
 
