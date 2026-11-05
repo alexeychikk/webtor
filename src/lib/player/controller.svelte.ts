@@ -350,6 +350,9 @@ export class PlayerController {
         },
         restoreAudio: (tracks) => matchAudioTrack(tracks, stored?.audio),
         startAt: (duration) => (reopen ? reopen.at : resumePoint(stored?.position, duration)),
+        onLostEnd: (t, play) => {
+          if (run === this.run) void this.reopenFile(t, 0, play);
+        },
         onStuckSeek: (t) => {
           if (run !== this.run) return;
           const count = nextReopen(reopen?.count ?? 0, recovered);
@@ -442,14 +445,15 @@ export class PlayerController {
   /**
    * A seek got stuck in the browser (`onStuckSeek`, WebKit): the same file again in a new
    * MsePlayer, at `t`, playing if it was. `count` reopens in a row: after `MAX_REOPENS` a stuck
-   * seek fails the open (an error with Retry, never an endless spinner).
+   * seek fails the open (an error with Retry, never an endless spinner). Also after the element
+   * lost its end (`onLostEnd`), at the seek's target, playing if `play`.
    */
-  private async reopenFile(t: number, count: number) {
+  private async reopenFile(t: number, count: number, play?: boolean) {
     const torrent = this.torrent;
     const index = this.fileIndex;
     const video = this.video;
     if (!torrent || index === null || !video) return;
-    const play = !video.paused;
+    play ??= !video.paused;
     const run = ++this.run;
     this.closeFile();
     this.phase = 'buffering';

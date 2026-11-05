@@ -20,6 +20,7 @@ import {
   aheadOf,
   atBufferedEnd,
   BUFFER_AHEAD_S,
+  endLost,
   endSnap,
   endOfStreamIn,
   bufferedToEnd,
@@ -260,6 +261,11 @@ export interface MsePlayerOptions {
    * owner opens the file again at `t` in a new MsePlayer. Asked at most once per player.
    */
   onStuckSeek?(t: number): void;
+  /**
+   * The element lost its end (`endLost`, WebKit's GStreamer backend) and the user seeks to `t` or
+   * plays (from 0): it can do neither, so the owner opens the file again at `t` in a new MsePlayer.
+   */
+  onLostEnd?(t: number, play: boolean): void;
   /**
    * Bytes the piece store may hold (ADR 0012): the ahead target shrinks so that much media at the
    * file's mean rate fits (`aheadWithin`).
@@ -709,6 +715,10 @@ export class MsePlayer {
   /** A seek held until the element ends (`holdSeek`): its target, and whether to play on. */
   private heldSeek: { t: number; play: boolean } | null = null;
   private heldSeekTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Where the element ended, until the next seek or play (`endLost`). */
+  private endedAt: number | null = null;
+  /** A seek or play on an element that lost its end, sent to `onLostEnd` in a microtask. */
+  private lostEndRequest: { t: number; play: boolean } | null = null;
 
   /**
    * Every `currentTime` write (ours, the app's, any script's) goes through `holdSeek` and
@@ -717,27 +727,76 @@ export class MsePlayer {
    * removed on `destroy` unless a newer player replaced it.
    */
   private interceptSeeks() {
-    const native = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
-    if (!native?.get || !native.set) return;
+    const proto = HTMLMediaElement.prototype;
+    const native = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+    const nativeEnded = Object.getOwnPropertyDescriptor(proto, 'ended')?.get;
+    if (!native?.get || !native.set || !nativeEnded) return;
     const { get, set } = native;
     const video = this.video;
-    this.seekTo = (t) => set.call(video, t);
-    const own: PropertyDescriptor = {
+    const nativePlay = proto.play;
+    this.seekTo = (t) => {
+      this.endedAt = null;
+      set.call(video, t);
+    };
+    const lost = () =>
+      endLost(this.endedAt, nativeEnded.call(video) as boolean, get.call(video) as number);
+    const time: PropertyDescriptor = {
       configurable: true,
       enumerable: true,
-      get: () => get.call(video) as number,
+      get: () => (lost() ? this.endedAt! : (get.call(video) as number)),
       set: (t: number) => {
+        if (lost()) return this.recoverLostEnd(t, false);
         if (this.holdSeek(t)) return;
         this.reopen();
         this.seekTo(t);
       },
     };
-    Object.defineProperty(video, 'currentTime', own);
-    this.releaseSeeks = () => {
-      if (Object.getOwnPropertyDescriptor(video, 'currentTime')?.set === own.set) {
-        delete (video as unknown as { currentTime?: number }).currentTime;
-      }
+    const ended: PropertyDescriptor = {
+      configurable: true,
+      enumerable: true,
+      get: () => lost() || (nativeEnded.call(video) as boolean),
     };
+    const play = () => {
+      if (lost()) {
+        this.recoverLostEnd(0, true);
+        return Promise.resolve();
+      }
+      this.endedAt = null;
+      return nativePlay.call(video);
+    };
+    Object.defineProperty(video, 'currentTime', time);
+    Object.defineProperty(video, 'ended', ended);
+    Object.defineProperty(video, 'play', { configurable: true, writable: true, value: play });
+    this.releaseSeeks = () => {
+      const own = video as unknown as Record<string, unknown>;
+      if (Object.getOwnPropertyDescriptor(video, 'currentTime')?.set !== time.set) return;
+      delete own.currentTime;
+      delete own.ended;
+      delete own.play;
+    };
+  }
+
+  /**
+   * A seek to `t` (or a play, from 0) on an element that lost its end (`endLost`): it would error
+   * or hang, so the owner opens the file again there (`onLostEnd`). A seek and a play in the same
+   * task (`currentTime = 0; play()`) make one request; a seek to the end stays ended.
+   */
+  private recoverLostEnd(t: number, play: boolean) {
+    if (this.destroyed || !this.opts.onLostEnd) return;
+    const pending = this.lostEndRequest;
+    if (pending) {
+      if (!play) pending.t = t;
+      pending.play ||= play;
+      return;
+    }
+    if (!play && t >= this.endedAt! - 0.001) return;
+    const request = { t, play };
+    this.lostEndRequest = request;
+    queueMicrotask(() => {
+      if (this.destroyed) return;
+      const at = request.t >= this.endedAt! - 0.001 && request.play ? 0 : request.t;
+      this.opts.onLostEnd?.(at, request.play);
+    });
   }
 
   /**
@@ -781,6 +840,9 @@ export class MsePlayer {
     this.interceptSeeks();
     const { signal } = this.abort;
     this.video.addEventListener('seeking', () => this.onSeeking(), { signal });
+    for (const ev of ['seeking', 'emptied']) {
+      this.video.addEventListener(ev, () => (this.endedAt = null), { signal });
+    }
     this.video.addEventListener('seeking', () => this.armStuckSeek(), { signal });
     this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
     this.video.addEventListener('loadedmetadata', () => this.jumpGap(), { signal });
@@ -799,6 +861,7 @@ export class MsePlayer {
     this.video.addEventListener(
       'ended',
       () => {
+        this.endedAt = this.video.currentTime;
         this.ending = false;
         this.releaseSeek();
       },

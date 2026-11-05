@@ -438,6 +438,15 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     `HELD_SEEK_MAX_MS`), then runs it and plays on if it was playing (`releaseSeek`). Any other
     seek on an ended MediaSource reopens it first (`reopen`: `remove()` of nothing past the end);
     the stream ends again at the end.
+  - **The lost end.** At the end of the stream, GStreamer MSE tears down its pipeline
+    (`didEnd` → `tearDown`). The element keeps showing its cached position until something
+    refreshes it. With `ManagedMediaSource`, that is `startstreaming` once time 0 isn't buffered,
+    0.5–4 s later or never. From then on it reads `currentTime` 0, `ended` false and
+    `readyState` 1, with no event. A seek then errors ("media error"); a `play()` waits forever.
+    `MsePlayer` keeps where the element ended (`endedAt`, cleared by any seek or play). Once the
+    element no longer reports it (`endLost`), its own `currentTime`/`ended` getters return the end,
+    and a seek or `play()` (= from 0) opens the file again there in a new MsePlayer
+    (`onLostEnd` → `reopenFile`).
   - **A track that ends early** (audio shorter than the video; `e2e/seek-tail.spec.ts`,
     `short-audio.mkv`). A conversion trimmed past its track's last packet outputs media the browser
     rejects, which emptied the element: a (re)start past it begins 1 s before the track's end
