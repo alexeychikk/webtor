@@ -37,7 +37,7 @@ export function checkRelayUrl(input: string, pageProtocol: string): RelayUrlChec
 
 export interface RelayEndpoints {
   /**
-   * `GET` → `{name: 'webtor-relay', version, api: 3, uploadLimit, transcode: {available, ffmpeg, …}}`
+   * `GET` → `{name: 'webtor-relay', version, api: 4, uploadLimit, transcode: {available, ffmpeg, …}}`
    * (`uploadLimit` since api 3: bytes/s to peers, 0 = unlimited, -1 = no upload).
    */
   info: string;
@@ -62,7 +62,16 @@ export interface RelayEndpoints {
    * `transcode-busy`, 422 `transcode-failed`.
    */
   transcode(fileIndex: number, start: number): string;
+  /**
+   * `GET` → the relay's bounded event logs and counter snapshots for this torrent (api 4,
+   * `RELAY_DIAGNOSTICS_API`): `{version, api, uptimeS, config, torrents: [{infoHash, name, events,
+   * snapshots}], global, torrentMissing?}`. Peer addresses are masked, trackers reduced to hosts.
+   */
+  diagnostics: string;
 }
+
+/** The first relay API with `GET /v1/diagnostics`. */
+export const RELAY_DIAGNOSTICS_API = 4;
 
 /**
  * Relay URLs for one torrent. `magnetQuery` is the magnet's query string (after `magnet:?`), passed
@@ -83,6 +92,9 @@ export function relayEndpoints(
     // Millisecond precision is plenty for ffmpeg's `-ss` and keeps the URL readable.
     transcode: (fileIndex, start) =>
       `${t}/transcode/${fileIndex}?start=${Math.max(0, Math.round(start * 1000) / 1000)}`,
+    diagnostics: infoHashHex
+      ? `${base}/v1/diagnostics?ih=${infoHashHex.toLowerCase()}`
+      : `${base}/v1/diagnostics`,
   };
 }
 

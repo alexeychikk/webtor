@@ -262,7 +262,29 @@ with `docker cp webtor-relay:/licenses/ffmpeg .`). The pinned version and checks
   your connection is the limit.
 - The BitTorrent library logs at warning level and above. Read errors that are part of normal
   streaming (a seek aborts a web seed read, the stall workaround above) are left out, so an
-  `error` line on stderr is worth a look.
+  `error` line on stderr is worth a look. Output stays small at any uptime: no line per piece or
+  request, a repeated line (same message, or same status and route) at most once a minute with a
+  `suppressed=<n>` count, and a one-line summary per open torrent every 5 minutes. The relay writes
+  no log files. On the Oracle Cloud VM the journal is capped at 50 MB.
+- **Diagnostics.** When a stream stalls, open the relay dialog in the app ("Relay: on" in the
+  header) and click **Copy diagnostics**, then paste the text into your bug report. It holds the
+  page's playback state and, from `GET {relay URL}/v1/diagnostics[?ih=<infohash>]`, the relay's
+  version, uptime and settings plus its recent events for that torrent: torrent added and metadata
+  received (how long it took), tracker announces (result, peers returned), peer connections
+  (source, network, how long they lasted, when they unchoked the relay), metadata timeouts, the
+  readahead window moving, stall re-requests, slow or incomplete web seed reads (wanted range,
+  missing pieces, time to first byte), video conversions starting and ending. Every 10 s it also
+  records counters: peers known by source (tracker, DHT, PEX…), connected, half-open, seeders,
+  peers that have the wanted pieces, rates, dial outcomes by network. All of it is kept in memory
+  only, in bounded logs (about 500 events and 90 snapshots per torrent, at most 256 kB each, the
+  oldest dropped first), and a torrent's log goes when the torrent is dropped. It never holds the
+  token, the public URL or tracker passkeys: peer addresses are shown as `203.0.x.x#a1b2c3` (the
+  network prefix plus a tag that tells peers apart within one run), and trackers by scheme and
+  host only, also in the relay's console output. A tracker login in a magnet or .torrent
+  (`http://user:pass@host/announce`) is removed before announcing, because the BitTorrent library
+  can't send it; a passkey in the tracker's path or query still goes to that tracker. Tracker URLs
+  the library can't use (unknown scheme, malformed) are skipped. A relay older than 0.4.0 (API 4) has no diagnostics: the app then copies its own side and
+  says the relay is too old to report.
 - SIGINT/SIGTERM shut down gracefully: in-flight requests get 3 s, then torrents are dropped and
   their data deleted. A second Ctrl-C kills the process.
 - **Video conversion** (optional, needs ffmpeg with libx264). Browsers can't decode DivX/Xvid, so

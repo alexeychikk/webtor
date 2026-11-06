@@ -1,7 +1,7 @@
 #!/bin/bash
 # webtor-relay-setup: runs as root on every boot of the Oracle Cloud VM (webtor-relay-setup.service),
 # before webtor-relay and Caddy. scripts/deploy-relay-oci.sh embeds it in the instance's cloud-init.
-# Idempotent: opens the firewall ports, works out the host name, writes the Caddyfile and the relay's
+# Idempotent: opens the firewall ports, caps the journal, works out the host name, writes the Caddyfile and the relay's
 # public URL, sets video conversion for this VM's size, and installs the latest webtor-relay release
 # (checked against SHA256SUMS).
 # Reads /etc/webtor-relay/deploy.conf: RELAY_REPO (owner/name), RELAY_HOST (empty = <ip>.sslip.io).
@@ -82,6 +82,25 @@ CADDY
   fi
 }
 
+# The journal (the relay's and Caddy's output) stays under 50 MB whatever the uptime; the relay
+# keeps its details in memory (/v1/diagnostics) and writes no files.
+cap_journal() {
+  local dir=/etc/systemd/journald.conf.d conf tmp
+  conf=$dir/webtor-relay.conf
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.webtor-relay.XXXXXX")
+  printf '%s\n' '# Written by webtor-relay-setup on every boot.' '[Journal]' 'SystemMaxUse=50M' \
+    'SystemMaxFileSize=10M' 'RuntimeMaxUse=20M' 'MaxRetentionSec=14day' >"$tmp"
+  chmod 0644 "$tmp"
+  if cmp -s "$tmp" "$conf"; then
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$conf"
+    log "journal capped at 50 MB"
+    systemctl --no-block restart systemd-journald.service || true
+  fi
+}
+
 # Video conversion (ffmpeg, ADR 0007 §3) for what this VM can do in realtime. Off below 2 GB of
 # memory: the E2.1.Micro fallback (1 GB, 1/8 OCPU baseline; it shows 2 vCPUs, so the CPU count can't
 # tell it apart from a real 2-CPU VM). Below 4 CPUs libx264 runs a faster preset: A1.Flex shows one
@@ -144,6 +163,7 @@ install_latest() {
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 open_ports
+cap_journal
 ensure_user
 host=$RELAY_HOST
 if [[ -z $host ]]; then

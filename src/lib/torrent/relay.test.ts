@@ -61,7 +61,12 @@ describe('relayEndpoints', () => {
       stats: `${t}/stats`,
       webseed: `${t}/webseed/`,
       transcode: expect.any(Function),
+      diagnostics:
+        'http://127.0.0.1:7881/tok12345/v1/diagnostics?ih=dafc8c076ca2f3ed376eeae7c76a0d6be2415c45',
     });
+    expect(relayEndpoints('http://127.0.0.1:7881/tok12345', '').diagnostics).toBe(
+      'http://127.0.0.1:7881/tok12345/v1/diagnostics',
+    );
   });
   it('builds the transcode URL with the start in element seconds', () => {
     const e = relayEndpoints('http://127.0.0.1:7881/tok12345', 'ab'.repeat(20));

@@ -52,6 +52,15 @@ and a default public tracker list. WebRTC and seeding-after-done are off. API (`
   (about 1 cold 200 MB run in 10 on loopback), until the readers go away when the browser times
   out after 60 s. So a read that gets no data for 3 s toggles the torrent's data download off and
   on, which cancels every request; readers retry the error this causes. Stalls then last 3–6 s.
+- `GET {base}/v1/diagnostics[?ih={ih}]` (api 4) → `{version, api, uptimeS, config, torrents:
+[{infoHash, name, events, snapshots}], global: {events, snapshots}}`: per-torrent rings of events
+  (added, metainfo, announce, peer-connected/-closed/-unchoked-us, webseed, window, nudge,
+  transcode-start/-end) and counter snapshots every 10 s, bounded by count and bytes, dropped with
+  their torrent. Peer IPs are masked to their /16 (/32 for IPv6) plus a per-run keyed tag, trackers
+  cut to scheme and host, never the token or public URL. Announces come from the library's debug
+  "announced" records (a tap in front of the Warn-level logger), dial outcomes from wrapping the
+  client's dialers. Stdout gets only warnings, throttled per message to one a minute, and a summary
+  per torrent every 5 min. The app's relay dialog has "Copy diagnostics" (its side + this).
 - Anything outside `/<token>/` is the web app embedded in the binary (`GET /` → `index.html`).
 - Torrents idle for 10 min are dropped and their pieces deleted, as at shutdown and startup. Nothing
   survives a restart. The token is generated once and kept in the data dir. Logs never contain it.

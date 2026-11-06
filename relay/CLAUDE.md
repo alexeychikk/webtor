@@ -37,6 +37,11 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   Write stuck on a client that stopped reading. ffmpeg tests need `WEBTOR_RELAY_FFMPEG` or ffmpeg on
   `PATH` (skipped otherwise); a static build (e.g. johnvansickle.com) works in the sandbox.
   `testExtraInputArgs` (`-readrate 1`) keeps a 12 s fixture's job alive through a test.
+- Tracker URLs (magnet `tr=`, a .torrent's announce list, the default list) pass `usableTrackers`
+  (`trackers.go`) before anacrolix sees them: v1.61 panics, printing the URL, on userinfo (removed:
+  it can't send it), an unknown scheme or a URL that changes through `url.Parse` + `String`
+  (dropped). `addSpec` recovers a library panic during the add (500, value never logged, half-added
+  torrent dropped). The library's log lines go through `ScrubURLs` (URLs → scheme + host).
 - The library's logger goes through `QuietReadErrors`: it drops the Error-level read failures that
   normal streaming causes (cancelled web seed reads, the nudge). Extend it rather than raising the
   level when the library gets noisier.
@@ -54,6 +59,13 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   (`leaveWindow`); a read starved behind it drops it for `windowHold` (`unstarve`, from
   `watchStall`). Tests of a slow swarm: `seedtest.StartWith(path, Options{UploadRate: …})`, or
   `tcp-seeder -upload-rate <bytes/s>` for the browser.
+- Diagnostics (`diagnostics.go`, `eventlog.go`, `logthrottle.go`; ADR 0006): `Diagnostics` keeps
+  bounded `eventLog` rings (count + bytes) per torrent (`register`/`unregister` with the entry) and
+  globally; add events with `s.diag.event(ih, kind, k, v…)`, never per piece or per request (web
+  seed reads go to counters; a read gets an event only when slow, incomplete or the first). Peer
+  addresses only through `MaskAddr`, trackers through `TrackerHost`/`scrubURLs`. `Instrument(cfg)`
+  before `torrent.NewClient` and `InstrumentClient(cl)` after (counting dialers); the test harness
+  does both. Stdout lines that can repeat go through `s.throttle`/`ThrottleLog` (one per key a minute).
 - Rates in `/stats` come from `rateMeter`s (5 s window) sampled on each `/stats` call: from swarm
   (`BytesReadUsefulData`), to peers (`BytesWrittenData`), served (`entry.served`, counted by
   `progressReader` and the transcode writer). Bump `APIVersion` and `src/lib/torrent/relay.ts`

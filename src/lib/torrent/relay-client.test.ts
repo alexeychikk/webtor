@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlaybackError } from '../player/errors';
-import { fetchRelayTranscode } from './relay-client';
+import { fetchRelayDiagnostics, fetchRelayTranscode } from './relay-client';
 
 const missing = () =>
   Response.json({ error: 'torrent not added; fetch metainfo first' }, { status: 404 });
@@ -52,5 +52,47 @@ describe('fetchRelayTranscode', () => {
     ).catch((e: unknown) => e);
     expect((err as PlaybackError).code).toBe('relay-transcode-busy');
     expect(register).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchRelayDiagnostics', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const info = (api: number) => Response.json({ name: 'webtor-relay', version: '0.9.0', api });
+  const notFound = () => new Response('404 page not found', { status: 404 });
+
+  it('returns the relay report', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ api: 4, torrents: [] })));
+    expect(await fetchRelayDiagnostics('http://r/t/v1/diagnostics', 'http://r/t/v1/info')).toEqual({
+      kind: 'ok',
+      report: { api: 4, torrents: [] },
+    });
+  });
+
+  it('tells a relay without the endpoint from a wrong URL', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(notFound()).mockResolvedValueOnce(info(3)),
+    );
+    expect(await fetchRelayDiagnostics('http://r/t/d', 'http://r/t/i')).toEqual({
+      kind: 'too-old',
+      version: '0.9.0',
+      api: 3,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => notFound()),
+    );
+    expect(await fetchRelayDiagnostics('http://r/t/d', 'http://r/t/i')).toEqual({
+      kind: 'failed',
+      reason: 'HTTP 404 — wrong token or not a webtor-relay?',
+    });
+  });
+
+  it('never rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+    expect(await fetchRelayDiagnostics('http://r/t/d', 'http://r/t/i')).toEqual({
+      kind: 'failed',
+      reason: 'unreachable',
+    });
   });
 });

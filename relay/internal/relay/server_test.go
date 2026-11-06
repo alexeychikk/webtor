@@ -35,7 +35,8 @@ type harness struct {
 	logs    *syncBuffer
 }
 
-func newHarness(t *testing.T, opts Options) *harness {
+func newHarness(t *testing.T, opts Options) *harness { return newHarnessCfg(t, opts, nil) }
+func newHarnessCfg(t *testing.T, opts Options, tweak func(*torrent.ClientConfig)) *harness {
 	t.Helper()
 	dataDir := t.TempDir()
 	cfg := torrent.NewDefaultClientConfig()
@@ -47,10 +48,17 @@ func newHarness(t *testing.T, opts Options) *harness {
 	cfg.NoDefaultPortForwarding = true
 	cfg.DataDir = dataDir
 	cfg.DefaultStorage = NewStorage(dataDir)
+	if tweak != nil {
+		tweak(cfg)
+	}
+	diag := NewDiagnostics()
+	diag.Instrument(cfg)
 	cl, err := torrent.NewClient(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	diag.InstrumentClient(cl)
+	opts.Diagnostics = diag
 	logs := &syncBuffer{}
 	opts.Token = token
 	opts.DataDir = dataDir
@@ -462,7 +470,26 @@ func TestStallNudge(t *testing.T) {
 }
 
 func nudges(h *harness) int {
-	return strings.Count(h.logs.String(), "re-requesting pieces")
+	return countEvents(h.srv.diag, "nudge")
+}
+
+// countEvents counts the events of kind in every torrent log.
+func countEvents(d *Diagnostics, kind string) int {
+	d.mu.Lock()
+	logs := make([]*eventLog, 0, len(d.torrents))
+	for _, td := range d.torrents {
+		logs = append(logs, td.events)
+	}
+	d.mu.Unlock()
+	n := 0
+	for _, l := range logs {
+		for _, ev := range l.snapshot().Events {
+			if strings.Contains(string(ev), `"kind":"`+kind+`"`) {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // TestPostMetainfo: a .torrent POSTed to the relay adds the torrent with its info at once (no swarm

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 )
 
@@ -77,6 +78,9 @@ type Options struct {
 	// App, when set, is served at "/" (the embedded web app).
 	App    fs.FS
 	Logger *slog.Logger
+	// Diagnostics, when set, is the store hooked into the client (Diagnostics.Instrument); New makes
+	// an unhooked one otherwise, which still records the relay's own events.
+	Diagnostics *Diagnostics
 }
 
 // Server is the HTTP side of the relay. It owns no listener; mount Handler() anywhere.
@@ -84,6 +88,9 @@ type Server struct {
 	cl   *torrent.Client
 	opts Options
 	log  *slog.Logger
+	diag *Diagnostics
+	// throttle keeps repeated stdout lines (failing requests, nudges) to one per LogEvery.
+	throttle *logThrottle
 
 	mu       sync.Mutex
 	torrents map[metainfo.Hash]*entry
@@ -99,6 +106,7 @@ type entry struct {
 	// active counts requests in flight; a torrent is never dropped while one runs.
 	active   int
 	lastUsed time.Time
+	added    time.Time
 	// window holds the pieces past the last requested range that keep downloading between the
 	// browser's requests (Normal priority; see prefetchFrom).
 	window pieceRange
@@ -148,7 +156,13 @@ func New(cl *torrent.Client, opts Options) (*Server, error) {
 	if err := opts.Transcode.setDefaults(); err != nil {
 		return nil, err
 	}
-	return &Server{cl: cl, opts: opts, log: opts.Logger, torrents: map[metainfo.Hash]*entry{}, jobs: map[jobKey]*transcodeJob{}}, nil
+	if opts.Diagnostics == nil {
+		opts.Diagnostics = NewDiagnostics()
+	}
+	return &Server{
+		cl: cl, opts: opts, log: opts.Logger, diag: opts.Diagnostics, throttle: newLogThrottle(LogEvery),
+		torrents: map[metainfo.Hash]*entry{}, jobs: map[jobKey]*transcodeJob{},
+	}, nil
 }
 
 // RunJanitor drops idle torrents until ctx is done.
@@ -198,6 +212,8 @@ func (s *Server) dropLocked(e *entry, reason string) {
 	s.log.Info("dropping torrent", "infohash", e.ih.HexString(), "reason", reason)
 	e.t.Drop()
 	delete(s.torrents, e.ih)
+	s.diag.unregister(e.ih)
+	s.diag.globalEvent("torrent-dropped", "infoHash", e.ih.HexString(), "reason", reason, "livedMs", time.Since(e.added))
 	if s.opts.DataDir != "" {
 		if err := os.RemoveAll(TorrentDir(s.opts.DataDir, e.ih)); err != nil {
 			s.log.Warn("deleting torrent data", "infohash", e.ih.HexString(), "err", err)
@@ -210,6 +226,7 @@ func (s *Server) dropLocked(e *entry, reason string) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/info", s.handleInfo)
+	mux.HandleFunc("GET /v1/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("GET /v1/torrents/{ih}/metainfo", s.handleMetainfo)
 	mux.HandleFunc("POST /v1/torrents/{ih}/metainfo", s.handlePostMetainfo)
 	mux.HandleFunc("GET /v1/torrents/{ih}/stats", s.handleStats)
@@ -299,9 +316,29 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		case sw.code >= 400:
 			lvl = slog.LevelInfo
 		}
-		s.log.Log(r.Context(), lvl, "request", "method", r.Method, "path", r.URL.Path,
-			"range", r.Header.Get("Range"), "status", sw.code, "took", time.Since(start).Round(time.Millisecond))
+		attrs := []any{"method", r.Method, "path", r.URL.Path, "range", r.Header.Get("Range"), "status", sw.code,
+			"took", time.Since(start).Round(time.Millisecond)}
+		if lvl > slog.LevelDebug {
+			ok, suppressed := s.throttle.allow(fmt.Sprint("request ", sw.code, " ", routeOf(r.URL.Path)), time.Now())
+			if !ok {
+				return
+			}
+			if suppressed > 0 {
+				attrs = append(attrs, "suppressed", suppressed)
+			}
+		}
+		s.log.Log(r.Context(), lvl, "request", attrs...)
 	})
+}
+
+// routeOf is a request path without its torrent and file parts ("/v1/torrents/*/webseed"), the key
+// that throttles its log lines.
+func routeOf(p string) string {
+	parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 5)
+	if len(parts) >= 3 && parts[1] == "torrents" {
+		parts[2] = "*"
+	}
+	return "/" + strings.Join(parts[:min(len(parts), 4)], "/")
 }
 
 type statusWriter struct {
@@ -320,8 +357,8 @@ func (w *statusWriter) WriteHeader(code int) {
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // APIVersion is /v1/info's "api": 2 added .../transcode/{fileIndex} and the "transcode" object; 3
-// added the rates to .../stats and "uploadLimit".
-const APIVersion = 3
+// added the rates to .../stats and "uploadLimit"; 4 added GET /v1/diagnostics.
+const APIVersion = 4
 
 // TranscodeInfo is /v1/info's "transcode" object.
 type TranscodeInfo struct {
@@ -351,7 +388,7 @@ func (s *Server) handleMetainfo(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	e, err := s.acquire(ih, r.URL.Query())
+	e, err := s.acquire(ih, r.URL.Query(), "magnet")
 	if err != nil {
 		s.addError(w, err)
 		return
@@ -359,9 +396,15 @@ func (s *Server) handleMetainfo(w http.ResponseWriter, r *http.Request) {
 	defer s.release(e)
 	ctx, cancel := context.WithTimeout(r.Context(), s.opts.MetadataTimeout)
 	defer cancel()
+	waitStart := time.Now()
 	select {
 	case <-e.t.GotInfo():
 	case <-ctx.Done():
+		if r.Context().Err() == nil {
+			st := e.t.Stats()
+			s.diag.event(ih, "metainfo-timeout", "waitedMs", time.Since(waitStart), "peers", st.TotalPeers,
+				"connected", st.ActivePeers, "halfOpen", st.HalfOpenPeers)
+		}
 		httpError(w, http.StatusGatewayTimeout, errors.New("no metadata from the swarm yet"))
 		return
 	}
@@ -405,7 +448,7 @@ func (s *Server) handlePostMetainfo(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	e, err := s.acquireSpec(ih, spec)
+	e, err := s.acquireSpec(ih, "metainfo", spec)
 	if err != nil {
 		s.addError(w, err)
 		return
@@ -417,6 +460,7 @@ func (s *Server) handlePostMetainfo(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrTooManyTorrents):
+		s.diag.globalEvent("too-many-torrents", "maxTorrents", s.opts.MaxTorrents)
 		w.Header().Set("Retry-After", fmt.Sprint(int(s.opts.EvictAfter.Seconds())))
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
 			"error":       fmt.Sprintf("%v (max %d); close another one or wait", err, s.opts.MaxTorrents),
@@ -424,6 +468,8 @@ func (s *Server) addError(w http.ResponseWriter, err error) {
 		})
 	case errors.Is(err, errClosed):
 		httpError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, errAddFailed):
+		httpError(w, http.StatusInternalServerError, err)
 	default:
 		httpError(w, http.StatusBadRequest, err)
 	}
@@ -591,8 +637,58 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 		return ra
 	})
 	pr := &progressReader{ReadSeeker: rd, total: &e.served}
-	defer s.watchStall(r.Context(), e, pr)()
+	began, rangeStart := time.Now(), int64(0)
+	if first, _, ok := parseRange(r.Header.Get("Range")); ok {
+		rangeStart = first
+	}
+	missing := s.missingPieces(e, f.Offset()+rangeStart, end-rangeStart)
+	stop := s.watchStall(r.Context(), e, pr)
 	http.ServeContent(w, r, "", time.Time{}, pr)
+	stop()
+	s.recordWebseed(r, e, idx, rangeStart, end, missing, began, pr)
+}
+
+// slowTTFB is when a web seed request counts as slow (and gets a diagnostics event).
+const slowTTFB = time.Second
+
+// recordWebseed adds a served web seed request to the diagnostics.
+func (s *Server) recordWebseed(r *http.Request, e *entry, file int, start, end int64, missing int, began time.Time, pr *progressReader) {
+	sent := pr.n.Load()
+	incomplete := sent < end-start
+	ttfb := time.Duration(0)
+	if fb := pr.firstByte.Load(); fb != 0 {
+		ttfb = time.Duration(fb - began.UnixNano())
+	} else {
+		ttfb = time.Since(began)
+	}
+	kv := []any{"file", file, "start", start, "end", end, "missingPieces", missing, "bytes", sent,
+		"ttfbMs", ttfb, "tookMs", time.Since(began)}
+	if incomplete {
+		reason := "client gone"
+		if err := pr.readErr(); err != nil {
+			reason = err.Error()
+		} else if r.Context().Err() == nil {
+			reason = "unknown"
+		}
+		kv = append(kv, "incomplete", reason)
+	}
+	s.diag.webseedRequest(e.ih, ttfb >= slowTTFB, incomplete, ttfb, kv...)
+}
+
+// missingPieces counts the pieces of n bytes at off that the relay doesn't have yet.
+func (s *Server) missingPieces(e *entry, off, n int64) int {
+	info := e.t.Info()
+	if info == nil {
+		return 0
+	}
+	begin, end := pieceSpan(off, n, e.t.Length(), info.PieceLength)
+	missing := 0
+	for i := begin; i < end; i++ {
+		if !e.t.PieceState(i).Complete {
+			missing++
+		}
+	}
+	return missing
 }
 
 // stallCheck is how long a webseed read may go without any data, from this request or from the
@@ -605,6 +701,16 @@ type progressReader struct {
 	n atomic.Int64
 	// total is the torrent's served counter (entry.served).
 	total *atomic.Int64
+	// firstByte is when the first byte was read (unix ns), err the last read error but EOF.
+	firstByte atomic.Int64
+	mu        sync.Mutex
+	err       error
+}
+
+func (p *progressReader) readErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
@@ -613,6 +719,14 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	for tries := 0; n == 0 && err != nil && err.Error() == errDownloadDisabled && tries < 50; tries++ {
 		time.Sleep(10 * time.Millisecond)
 		n, err = p.ReadSeeker.Read(b)
+	}
+	if n > 0 && p.firstByte.Load() == 0 {
+		p.firstByte.CompareAndSwap(0, time.Now().UnixNano())
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		p.mu.Lock()
+		p.err = err
+		p.mu.Unlock()
 	}
 	p.n.Add(int64(n))
 	if p.total != nil {
@@ -730,7 +844,12 @@ func (s *Server) rerequest(e *entry, why string) {
 	}
 	e.lastNudge = time.Now()
 	s.mu.Unlock()
-	s.log.Info(why, "infohash", e.ih.HexString())
+	st := e.t.Stats()
+	s.diag.event(e.ih, "nudge", "why", why, "connected", st.ActivePeers, "seeders", st.ConnectedSeeders,
+		"usefulChunks", st.ChunksReadUseful.Int64())
+	if ok, suppressed := s.throttle.allow("nudge "+e.ih.HexString(), e.lastNudge); ok {
+		s.log.Info(why, "infohash", e.ih.HexString(), "suppressed", suppressed)
+	}
 	// Only cancelling every request unsticks it (just recomputing requests doesn't); in the browser
 	// that happens when its 60 s timeout closes the readers. Readers fail while download is off;
 	// progressReader retries that.
@@ -772,8 +891,12 @@ func (s *Server) prefetchFrom(e *entry, f *torrent.File, off, ra int64) {
 		s.cancelWindowLocked(e)
 		return
 	}
-	next, cancel := nextWindow(e.window, pieceRange{begin, end})
+	old, want := e.window, pieceRange{begin, end}
+	next, cancel := nextWindow(old, want)
 	e.window = next
+	if old.begin >= old.end || want.begin > old.end || want.end < old.begin {
+		s.diag.event(e.ih, "window", "begin", next.begin, "end", next.end, "from", [2]int{old.begin, old.end})
+	}
 	for _, c := range cancel {
 		e.t.CancelPieces(c.begin, c.end)
 	}
@@ -783,8 +906,8 @@ func (s *Server) prefetchFrom(e *entry, f *torrent.File, off, ra int64) {
 }
 
 // acquire finds or adds the torrent and marks a request on it as active.
-func (s *Server) acquire(ih metainfo.Hash, q url.Values) (*entry, error) {
-	return s.acquireSpec(ih, &torrent.TorrentSpec{
+func (s *Server) acquire(ih metainfo.Hash, q url.Values, source string) (*entry, error) {
+	return s.acquireSpec(ih, source, &torrent.TorrentSpec{
 		DisplayName: q.Get("dn"),
 		Trackers:    [][]string{q["tr"]},
 		PeerAddrs:   q["x.pe"],
@@ -794,11 +917,14 @@ func (s *Server) acquire(ih metainfo.Hash, q url.Values) (*entry, error) {
 
 // acquireSpec is acquire for a torrent described by spec (magnet params, or a whole .torrent with
 // InfoBytes). A torrent already open gets what spec adds (info, trackers, web seeds).
-func (s *Server) acquireSpec(ih metainfo.Hash, spec *torrent.TorrentSpec) (*entry, error) {
+// source ("magnet", "metainfo") goes to the diagnostics.
+func (s *Server) acquireSpec(ih metainfo.Hash, source string, spec *torrent.TorrentSpec) (*entry, error) {
 	if len(spec.Trackers) == 0 {
 		spec.Trackers = [][]string{nil}
 	}
-	spec.Trackers[0] = dedupe(append(spec.Trackers[0], s.opts.ExtraTrackers...))
+	spec.Trackers[0] = append(spec.Trackers[0], s.opts.ExtraTrackers...)
+	var cleanup trackerCleanup
+	spec.Trackers, cleanup = usableTrackers(spec.Trackers)
 	spec.InfoHash = ih
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -811,8 +937,7 @@ func (s *Server) acquireSpec(ih metainfo.Hash, spec *torrent.TorrentSpec) (*entr
 	if len(s.torrents) >= s.opts.MaxTorrents && s.torrents[ih] == nil {
 		return nil, ErrTooManyTorrents
 	}
-	// For a torrent already open this merges spec in (trackers, web seeds, info bytes).
-	t, _, err := s.cl.AddTorrentSpec(spec)
+	t, err := s.addSpec(ih, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -821,9 +946,66 @@ func (s *Server) acquireSpec(ih metainfo.Hash, spec *torrent.TorrentSpec) (*entr
 		return e, nil
 	}
 	s.log.Info("added torrent", "infohash", ih.HexString(), "name", spec.DisplayName, "torrents", len(s.torrents)+1)
-	e := &entry{ih: ih, t: t, lastUsed: time.Now(), active: 1}
+	now := time.Now()
+	e := &entry{ih: ih, t: t, lastUsed: now, added: now, active: 1}
 	s.torrents[ih] = e
+	s.diag.register(ih)
+	trackers := 0
+	for _, tier := range spec.Trackers {
+		trackers += len(tier)
+	}
+	kv := []any{"source", source, "trackers", trackers, "webSeeds", len(spec.Webseeds), "directPeers", len(spec.PeerAddrs)}
+	if cleanup.ignored > 0 || cleanup.loginsRemoved > 0 {
+		kv = append(kv, "trackersIgnored", cleanup.ignored, "trackerLoginsRemoved", cleanup.loginsRemoved)
+	}
+	if len(spec.InfoBytes) > 0 {
+		var info metainfo.Info
+		if bencode.Unmarshal(spec.InfoBytes, &info) == nil {
+			kv = append(kv, "private", info.Private != nil && *info.Private)
+		}
+	}
+	s.diag.event(ih, "added", kv...)
+	s.diag.globalEvent("torrent-added", "infoHash", ih.HexString(), "source", source, "torrents", len(s.torrents))
+	go s.watchMetainfo(e)
 	return e, nil
+}
+
+// errAddFailed answers an add that panicked inside the torrent library. The panic value is never
+// shown or logged: it can hold a tracker URL with its credentials.
+var errAddFailed = errors.New("the BitTorrent client could not add this torrent")
+
+// addSpec adds spec to the client, or merges it into the torrent already open (trackers, web
+// seeds, info bytes). A panic in the library becomes errAddFailed; a torrent it left half-added is
+// dropped. Call with s.mu held.
+func (s *Server) addSpec(ih metainfo.Hash, spec *torrent.TorrentSpec) (t *torrent.Torrent, err error) {
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		s.log.Error("the torrent library panicked adding a torrent", "infohash", ih.HexString())
+		s.diag.globalEvent("add-panicked", "infoHash", ih.HexString())
+		if s.torrents[ih] == nil {
+			if t, ok := s.cl.Torrent(ih); ok {
+				t.Drop()
+			}
+		}
+		t, err = nil, errAddFailed
+	}()
+	t, _, err = s.cl.AddTorrentSpec(spec)
+	return t, err
+}
+
+// watchMetainfo records when the torrent got its info dictionary.
+func (s *Server) watchMetainfo(e *entry) {
+	select {
+	case <-e.t.GotInfo():
+	case <-e.t.Closed():
+		return
+	}
+	info := e.t.Info()
+	s.diag.event(e.ih, "metainfo", "tookMs", time.Since(e.added), "pieces", info.NumPieces(),
+		"pieceLength", info.PieceLength, "files", len(info.UpvertedFiles()), "length", info.TotalLength(),
+		"private", info.Private != nil && *info.Private)
 }
 
 // evictLocked drops the least recently used torrent that has been idle for EvictAfter, if any.
