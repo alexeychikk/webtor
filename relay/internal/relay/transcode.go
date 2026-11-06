@@ -372,6 +372,12 @@ func (s *Server) runJob(ctx context.Context, w http.ResponseWriter, e *entry, f 
 		testJobStarted(j, cmd.Args)
 	}
 	log.Debug("transcode started", "start", start, "pid", cmd.Process.Pid)
+	began, outcome := time.Now(), "aborted"
+	var sent int64
+	s.diag.event(e.ih, "transcode-start", "file", j.key.file, "start", start)
+	defer func() {
+		s.diag.event(e.ih, "transcode-end", "file", j.key.file, "outcome", outcome, "bytes", sent, "tookMs", time.Since(began))
+	}()
 
 	// The idle clock runs from the start: a swarm that never delivers the input kills the job too.
 	rc := http.NewResponseController(w)
@@ -390,9 +396,11 @@ func (s *Server) runJob(ctx context.Context, w http.ResponseWriter, e *entry, f 
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errJobIdle):
 			log.Info("transcode got no input", "idle", topts.IdleTimeout)
+			outcome = "no input from the swarm"
 			httpError(w, http.StatusGatewayTimeout, fmt.Errorf("no data from the swarm for %v", topts.IdleTimeout))
 		case cause != nil:
 			log.Debug("transcode ended before output", "reason", cause)
+			outcome = fmt.Sprint("ended before output: ", cause)
 			// Replaced or shutting down: the client's request is over either way.
 			panic(http.ErrAbortHandler)
 		default:
@@ -401,6 +409,7 @@ func (s *Server) runJob(ctx context.Context, w http.ResponseWriter, e *entry, f 
 				detail = fmt.Sprint(errors.Join(rerr, werr))
 			}
 			log.Info("transcode failed", "err", werr, "stderr", detail)
+			outcome = "failed: " + detail
 			transcodeError(w, http.StatusUnprocessableEntity, "transcode-failed", detail, nil)
 		}
 		return
@@ -421,6 +430,7 @@ func (s *Server) runJob(ctx context.Context, w http.ResponseWriter, e *entry, f 
 			_ = rc.Flush()
 			lastWrite.Store(time.Now().UnixNano())
 			e.served.Add(int64(n))
+			sent += int64(n)
 		}
 		if rerr != nil {
 			break
@@ -435,11 +445,14 @@ func (s *Server) runJob(ctx context.Context, w http.ResponseWriter, e *entry, f 
 	switch {
 	case cause == nil && exitErr == nil && werr == nil:
 		log.Debug("transcode finished")
+		outcome = "finished"
 		return
 	case cause != nil:
 		log.Debug("transcode stopped", "reason", cause)
+		outcome = fmt.Sprint("stopped: ", cause)
 	default:
 		log.Info("transcode failed mid-stream", "err", exitErr, "stderr", stderr.LastLines(5))
+		outcome = "failed mid-stream: " + stderr.LastLines(2)
 	}
 	// Anything but a clean ffmpeg exit must not look like the end of the video to the app.
 	panic(http.ErrAbortHandler)

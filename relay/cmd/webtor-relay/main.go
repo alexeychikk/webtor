@@ -122,12 +122,17 @@ func run() error {
 	cfg.DataDir = piecesDir
 	cfg.DefaultStorage = relay.NewStorage(piecesDir)
 	// QuietReadErrors: the library logs every aborted web seed read (a browser seek) as an error.
-	cfg.Slogger = slog.New(relay.QuietReadErrors(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	// ThrottleLog: it repeats warnings per peer and piece; one line per message a minute is enough.
+	cfg.Slogger = slog.New(relay.QuietReadErrors(relay.ThrottleLog(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}), relay.LogEvery)))
+	// Diagnostics (GET /v1/diagnostics) live in memory only, in bounded logs.
+	diag := relay.NewDiagnostics()
+	diag.Instrument(cfg)
 	cl, err := torrent.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("starting BitTorrent client: %w", err)
 	}
 	defer cl.Close()
+	diag.InstrumentClient(cl)
 
 	opts := relay.Options{
 		Token:           tok,
@@ -140,6 +145,7 @@ func run() error {
 		DataDir:         piecesDir,
 		App:             webapp.FS(),
 		Logger:          logger,
+		Diagnostics:     diag,
 		Transcode: relay.TranscodeOptions{
 			MaxJobs:   *maxTranscodes,
 			Preset:    *transcodePreset,
@@ -178,6 +184,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go srv.RunJanitor(ctx)
+	go srv.RunDiagnostics(ctx)
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	// Conversions stream until the client goes away; kill them first so Shutdown can finish.
 	hs.RegisterOnShutdown(srv.StopTranscodes)
