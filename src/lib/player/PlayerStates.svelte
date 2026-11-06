@@ -20,7 +20,7 @@
   import IconButton from '../ui/IconButton.svelte';
   import { PLAYBACK_ERROR_TITLES, playbackErrorMessage, type PlaybackErrorCode } from './errors';
   import { formatTime } from './format';
-  import { errorActions, type StateCard, type StateToast } from './states';
+  import { errorActions, isStalledNotice, type StateCard, type StateToast } from './states';
 
   let {
     card,
@@ -91,7 +91,7 @@
               aria-expanded={open}
               onclick={() => (expanded = open ? null : t.code)}
             />
-            {#if t.code === 'stalled'}
+            {#if isStalledNotice(t.code)}
               <IconButton
                 class="small"
                 testid="why-link"

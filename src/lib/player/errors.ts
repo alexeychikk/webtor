@@ -7,6 +7,10 @@ export type PlaybackErrorCode =
   | 'no-webrtc'
   | 'no-peers'
   | 'stalled'
+  | 'relay-swarm-stalled'
+  | 'relay-not-serving'
+  | 'relay-swarm-slow'
+  | 'relay-not-answering'
   | 'no-playable-file'
   | 'unsupported-container'
   | 'unsupported-video-codec'
@@ -41,6 +45,18 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
     'public torrents will never start here. We keep searching in the background. To reach regular ' +
     'peers too, connect a relay you run yourself.',
   stalled: 'Download stalled: peers disconnected or stopped sending data. Still trying…',
+  'relay-swarm-stalled':
+    'The relay’s peers aren’t sending it any data. The torrent’s swarm is stuck, not this browser ' +
+    'or the relay. Still trying…',
+  'relay-not-serving':
+    'The relay is downloading but sends nothing to this browser. The relay is stuck, not the ' +
+    'swarm. Still trying… If it doesn’t recover, restart the relay or update it to the latest release.',
+  'relay-swarm-slow':
+    'The relay passes on everything it gets, but its peers send too little to finish a piece of ' +
+    'this torrent in time. It keeps downloading; playback starts once enough is in.',
+  'relay-not-answering':
+    'The relay stopped answering this browser: it may be restarting, or the network between you ' +
+    'and it is down. The relay or the connection to it is stuck, not the swarm. Still trying…',
   'no-playable-file': 'This torrent contains no video file that can be played in the browser.',
   'unsupported-container':
     'This video format cannot be opened in the browser (supported: MKV, MP4, MOV, WebM, MPEG-TS, AVI).',
@@ -98,6 +114,10 @@ export const PLAYBACK_ERROR_TITLES: Record<PlaybackErrorCode, string> = {
   'no-webrtc': 'No WebRTC in this browser',
   'no-peers': 'No browser peers yet',
   stalled: 'Download stalled',
+  'relay-swarm-stalled': 'Swarm sends no data',
+  'relay-not-serving': 'Relay sends no data',
+  'relay-swarm-slow': 'Swarm too slow',
+  'relay-not-answering': 'Relay not answering',
   'no-playable-file': 'No playable video',
   'unsupported-container': 'Format not supported',
   'unsupported-video-codec': 'Video codec not supported',
@@ -133,12 +153,39 @@ export class PlaybackError extends Error {
   }
 }
 
-/** The user-facing message; `video-needs-relay` names the format (`detail`) in the sentence. */
+const peers = (n: string) => (n === '1' ? '1 peer' : `${n} peers`);
+
+/**
+ * The user-facing message. `detail` goes into the sentence for `video-needs-relay` (the format),
+ * `relay-swarm-stalled` (the relay's peer count), `relay-not-serving` and `relay-swarm-slow` (its
+ * download rate); other codes append it in brackets.
+ */
 export function playbackErrorMessage(code: PlaybackErrorCode, detail?: string): string {
   if (code === 'video-needs-relay' && detail) {
     return (
       `This video uses an old ${detail} format that browsers can’t play. Converting it needs a ` +
       'relay you run yourself (webtor-relay) with ffmpeg installed.'
+    );
+  }
+  if (code === 'relay-swarm-stalled' && detail) {
+    const who =
+      detail === '0'
+        ? 'The relay has no peers right now.'
+        : `The relay is connected to ${peers(detail)}, but they aren’t sending it any data.`;
+    return `${who} The torrent’s swarm is stuck, not this browser or the relay. Still trying…`;
+  }
+  if (code === 'relay-not-serving' && detail) {
+    return (
+      `The relay is downloading (${detail}) but sends nothing to this browser. The relay is ` +
+      'stuck, not the swarm. Still trying… If it doesn’t recover, restart the relay or update it ' +
+      'to the latest release.'
+    );
+  }
+  if (code === 'relay-swarm-slow' && detail) {
+    return (
+      `The relay passes on everything it gets, but its peers send only ${detail}: too little to ` +
+      'finish a piece of this torrent in time. It keeps downloading; playback starts once enough ' +
+      'is in.'
     );
   }
   return PLAYBACK_ERROR_MESSAGES[code] + (detail ? ` (${detail})` : '');

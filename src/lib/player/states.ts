@@ -4,6 +4,7 @@
  */
 import type { Phase } from './controller.svelte';
 import type { PlaybackErrorCode } from './errors';
+import { STALLED_NOTICES } from './watchdog';
 
 export interface StateCard {
   code: PlaybackErrorCode;
@@ -21,6 +22,8 @@ export function playerStates(s: {
   error: PlaybackErrorCode | null;
   notices: readonly PlaybackErrorCode[];
   subtitleNotice: StateToast | null;
+  /** The detail (`playbackErrorMessage`) of a notice, by code. */
+  details?: Partial<Record<PlaybackErrorCode, string>>;
   /** Toast codes the user dismissed for the current file. */
   dismissed: ReadonlySet<PlaybackErrorCode>;
 }): { card: StateCard | null; toasts: StateToast[] } {
@@ -33,7 +36,10 @@ export function playerStates(s: {
     : null;
   const toasts: StateToast[] = s.notices
     .filter((code) => code !== 'no-peers')
-    .map((code) => ({ code }));
+    .map((code) => {
+      const detail = s.details?.[code];
+      return detail === undefined ? { code } : { code, detail };
+    });
   if (s.subtitleNotice) toasts.push(s.subtitleNotice);
   return { card, toasts: toasts.filter((t) => !s.dismissed.has(t.code)) };
 }
@@ -51,3 +57,16 @@ export function errorActions(code: PlaybackErrorCode): {
     relay: code.startsWith('relay-') ? 'settings' : code === 'video-needs-relay' ? 'setup' : null,
   };
 }
+
+/** `playerStates` details for the stalled notice showing, if any: its number (`stalledNotice`). */
+export function stalledDetails(
+  notices: readonly PlaybackErrorCode[],
+  detail: string | undefined,
+): Partial<Record<PlaybackErrorCode, string>> {
+  const code = notices.find((n) => (STALLED_NOTICES as readonly string[]).includes(n));
+  return code && detail !== undefined ? { [code]: detail } : {};
+}
+
+/** The stalled notices offer the help dialog ("Why won’t it play?"). */
+export const isStalledNotice = (code: PlaybackErrorCode): boolean =>
+  (STALLED_NOTICES as readonly string[]).includes(code);

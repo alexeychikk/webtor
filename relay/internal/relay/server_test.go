@@ -594,3 +594,90 @@ func TestPrefetchDownloadsAhead(t *testing.T) {
 	// 12 MiB to the end (16 MiB) comes on top of the first 4.25 MiB.
 	waitFor(t, func() bool { return e.t.BytesCompleted() >= 4<<20+256<<10+4<<20 }, 10*time.Second, "the window after the seek to download")
 }
+
+// TestFarReadNotStarvedByPrefetch: on a slow swarm, a read away from the prefetch window (the MKV
+// Cues at the end of the file, a seek) gets its data at the swarm's rate, not after the window. The
+// window's chunks were requested from the peers first, and anacrolix never takes a sent request
+// back for a more urgent one.
+func TestFarReadNotStarvedByPrefetch(t *testing.T) {
+	old := stallCheck
+	t.Cleanup(func() { stallCheck = old })
+	stallCheck = 200 * time.Millisecond
+	const size, piece, rate = 24 << 20, 256 << 10, 2 << 20
+	dir := t.TempDir()
+	content := randomBytes(size)
+	path := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := seedtest.StartWith(path, seedtest.Options{PieceLength: piece, UploadRate: rate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(seed.Close)
+	h := newHarness(t, Options{MetadataTimeout: 20 * time.Second, Readahead: 12 << 20, MaxReadahead: 12 << 20})
+	base := h.torrentURL(seed.InfoHash)
+	res := get(t, base+"/metainfo?x.pe="+seed.Addr, "")
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+
+	res = get(t, base+"/webseed/", fmt.Sprintf("bytes=0-%d", piece-1))
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	// Let the window's requests pile up in the seeder's queue, as they do while the page parses the
+	// header it just got.
+	time.Sleep(time.Second)
+
+	start := time.Now()
+	res = get(t, base+"/webseed/", fmt.Sprintf("bytes=%d-%d", size-piece, size-1))
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	took := time.Since(start)
+	if !bytes.Equal(body, content[size-piece:]) {
+		t.Fatalf("last piece: %d bytes", len(body))
+	}
+	// The 12 MiB window takes 6 s at 2 MiB/s; the last piece alone an eighth of a second.
+	t.Logf("last piece in %v", took)
+	if took > 2*time.Second {
+		t.Errorf("last piece took %v: it waited for the prefetch window", took)
+	}
+}
+
+// TestStarvedReadHoldsWindow: a read that waited behind the window drops it, and the window stays
+// off for windowHold, however many requests come meanwhile.
+func TestStarvedReadHoldsWindow(t *testing.T) {
+	seed, _ := seedFileP(t, "movie.mkv", 8<<20, 256<<10)
+	h := newHarness(t, Options{MetadataTimeout: 20 * time.Second, Readahead: 2 << 20})
+	base := h.torrentURL(seed.InfoHash)
+	res := get(t, base+"/metainfo?x.pe="+seed.Addr, "")
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	read := func(rng string) {
+		res := get(t, base+"/webseed/", rng)
+		_, _ = io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}
+	read("bytes=0-262143")
+	var e *entry
+	h.srv.mu.Lock()
+	for _, x := range h.srv.torrents {
+		e = x
+	}
+	window := func() pieceRange {
+		h.srv.mu.Lock()
+		defer h.srv.mu.Unlock()
+		return e.window
+	}
+	h.srv.mu.Unlock()
+	if w := window(); w != (pieceRange{1, 9}) {
+		t.Fatalf("window after the first read: %v", w)
+	}
+	h.srv.unstarve(e)
+	read("bytes=262144-524287")
+	if w := window(); w != (pieceRange{}) {
+		t.Errorf("window while held: %v", w)
+	}
+	if !strings.Contains(h.logs.String(), "waits behind the prefetch window") {
+		t.Errorf("no log of the starved read:\n%s", h.logs.String())
+	}
+}

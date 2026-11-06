@@ -118,3 +118,25 @@ func TestNextWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestOutsideWindow(t *testing.T) {
+	r := func(b, e int) pieceRange { return pieceRange{b, e} }
+	for _, tc := range []struct {
+		name        string
+		window, req pieceRange
+		want        bool
+	}{
+		{"no window", r(0, 0), r(40, 41), false},
+		{"inside", r(5, 10), r(6, 7), false},
+		{"the piece before it (its own request, late)", r(5, 10), r(4, 5), false},
+		{"the piece after it", r(5, 10), r(10, 11), false},
+		{"overlapping its end", r(5, 10), r(9, 12), false},
+		{"the last piece (MKV Cues)", r(1, 3), r(10, 11), true},
+		{"seek back", r(50, 55), r(5, 6), true},
+		{"empty read", r(5, 10), r(40, 40), false},
+	} {
+		if got := outsideWindow(tc.window, tc.req); got != tc.want {
+			t.Errorf("%s: outsideWindow(%v, %v) = %v, want %v", tc.name, tc.window, tc.req, got, tc.want)
+		}
+	}
+}

@@ -185,6 +185,12 @@ describe('relay responses', () => {
     ).toEqual({ download: 5, upload: 0, served: 0, uploadLimit: 0 });
     expect(parseRelayStats({ activePeers: 1, downloadRate: 5 })?.rates).toBeUndefined();
   });
+  it('reads the running totals from peers and to the browser', () => {
+    expect(
+      parseRelayStats({ activePeers: 1, bytesReadData: 9_000_000, bytesServed: 8_600_000 })?.totals,
+    ).toEqual({ read: 9_000_000, served: 8_600_000 });
+    expect(parseRelayStats({ activePeers: 1, bytesReadData: 9 })?.totals).toBeUndefined();
+  });
 });
 
 describe('relayRateRows', () => {

@@ -1,3 +1,6 @@
+import type { RelayStats, RelayTotals } from '../torrent/relay';
+import { formatSpeed } from './format';
+
 /**
  * When to show the non-fatal `no-peers` and `stalled` notices (docs/decisions/0002). Pure: the
  * controller samples torrent stats once a second and asks this.
@@ -21,6 +24,114 @@ export function watchdogNotice(s: WatchdogSample): WatchdogNotice {
     return s.numPeers === 0 && s.elapsed >= NO_PEERS_AFTER_MS ? 'no-peers' : null;
   }
   return s.starvedFor >= STALLED_AFTER_MS ? 'stalled' : null;
+}
+
+/** Below this a relay rate counts as nothing (bytes/s): keep-alives and stats, no payload. */
+export const RELAY_FLOW_MIN = 1024;
+
+/** What the relay's `/stats` says about the data flow (api 3 rates, ADR 0006). */
+export interface RelayFlow {
+  activePeers: number;
+  /** From the relay's peers, bytes/s. */
+  download: number;
+  /** From the relay to the browser, bytes/s. */
+  served: number;
+}
+
+export type StalledNotice =
+  | 'stalled'
+  | 'relay-swarm-stalled'
+  | 'relay-not-serving'
+  | 'relay-swarm-slow'
+  | 'relay-not-answering';
+
+/** The stalled notices: a relay one says which side is stuck. */
+export const STALLED_NOTICES: readonly StalledNotice[] = [
+  'stalled',
+  'relay-swarm-stalled',
+  'relay-not-serving',
+  'relay-swarm-slow',
+  'relay-not-answering',
+];
+
+/** `/stats` polls in a row without an answer after which the relay's last stats count as stale. */
+export const RELAY_STATS_MAX_MISSES = 2;
+
+/** A `/stats` answer's running totals, at `at` ms (the controller's clock). */
+export interface RelaySample extends RelayTotals {
+  at: number;
+}
+
+/**
+ * The relay's samples of the last `STALLED_AFTER_MS` (one older as the base) after `sample`. A total
+ * that went back (the relay restarted) starts them over.
+ */
+export function nextRelaySamples(
+  samples: readonly RelaySample[],
+  sample: RelaySample,
+): RelaySample[] {
+  const last = samples.at(-1);
+  if (last && (sample.read < last.read || sample.served < last.served)) return [sample];
+  const kept = [...samples, sample];
+  const firstInWindow = kept.findIndex((s) => sample.at - s.at < STALLED_AFTER_MS);
+  return kept.slice(Math.max(0, firstInWindow - 1));
+}
+
+/**
+ * The relay's data flow for `stalledNotice`: `unreachable` once its `/stats` went unanswered
+ * `RELAY_STATS_MAX_MISSES` times in a row (its last rates are stale then), null without its rates
+ * (api < 3). Each rate is at least the average of its total over `samples` (the stalled window):
+ * the relay serves a web-seed response in bursts, waiting seconds for each next chunk from a slow
+ * swarm, and one poll's `servedRate` can read 0 between them.
+ */
+export function relayFlowOf(
+  stats: RelayStats | null,
+  misses: number,
+  samples: readonly RelaySample[] = [],
+): RelayFlow | 'unreachable' | null {
+  if (misses >= RELAY_STATS_MAX_MISSES) return 'unreachable';
+  if (!stats?.rates) return null;
+  return {
+    activePeers: stats.activePeers,
+    download: Math.max(
+      stats.rates.download,
+      averageRate(samples, (s) => s.read),
+    ),
+    served: Math.max(
+      stats.rates.served,
+      averageRate(samples, (s) => s.served),
+    ),
+  };
+}
+
+function averageRate(samples: readonly RelaySample[], total: (s: RelaySample) => number): number {
+  const first = samples[0];
+  const last = samples.at(-1);
+  if (!first || !last || last.at <= first.at) return 0;
+  return Math.max(0, (total(last) - total(first)) / ((last.at - first.at) / 1000));
+}
+
+/**
+ * Which `stalled` notice to show: with a relay that reports its rates, the side that is stuck, and
+ * the number for its message (`playbackErrorMessage`). Nothing from the relay's peers: the swarm
+ * (`relay-swarm-stalled`, the peer count). The relay gets data but sends the browser none: the
+ * relay (`relay-not-serving`, its download rate). Data reaches the browser, but no piece completed
+ * in `STALLED_AFTER_MS`: a swarm too slow for the torrent's pieces (`relay-swarm-slow`, the rate).
+ * The relay no longer answers `/stats`: the relay or the way to it (`relay-not-answering`).
+ */
+export function stalledNotice(relay: RelayFlow | 'unreachable' | null): {
+  code: StalledNotice;
+  detail?: string;
+} {
+  if (!relay) return { code: 'stalled' };
+  if (relay === 'unreachable') return { code: 'relay-not-answering' };
+  if (relay.served >= RELAY_FLOW_MIN) {
+    return { code: 'relay-swarm-slow', detail: formatSpeed(relay.download) };
+  }
+  if (relay.download >= RELAY_FLOW_MIN) {
+    return { code: 'relay-not-serving', detail: formatSpeed(relay.download) };
+  }
+  return { code: 'relay-swarm-stalled', detail: String(relay.activePeers) };
 }
 
 export interface StarvationSample {

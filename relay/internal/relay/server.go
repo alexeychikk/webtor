@@ -110,6 +110,8 @@ type entry struct {
 	// window holds the pieces past the last requested range that keep downloading between the
 	// browser's requests (Normal priority; see prefetchFrom).
 	window pieceRange
+	// windowHeldUntil keeps the window off after it starved a read (see unstarve).
+	windowHeldUntil time.Time
 	// served counts the bytes sent to the browser (web seed and conversions); the meters turn it
 	// and the client's counters into rates for stats and the adaptive readahead.
 	served               atomic.Int64
@@ -612,13 +614,16 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "", time.Time{}, io.NewSectionReader(nopReaderAt{}, 0, f.Length()))
 		return
 	}
-	// Download the whole requested range at once, and the readahead after it with a lower priority,
-	// so the next request (WebTorrent asks piece by piece) usually finds its data already here. A
-	// seek simply moves both: data around the old position stops being prioritised.
-	end := RangeEnd(r.Header.Get("Range"), f.Length())
+	// Download the whole requested range at once, and once it is served the readahead after it with
+	// a lower priority, so the next request (WebTorrent asks piece by piece) usually finds its data
+	// already here. The window moves only after the read: its chunks are requested from the peers
+	// first, and anacrolix never takes a sent request back for a more urgent one (on a slow swarm
+	// the range waited behind the whole window). A read away from the window drops it at once.
+	start, end := RangeStart(r.Header.Get("Range")), RangeEnd(r.Header.Get("Range"), f.Length())
 	ra := s.readaheadFor(e)
+	s.leaveWindow(e, f, start, end)
 	if end < f.Length() {
-		s.prefetchFrom(e, f, end, ra)
+		defer s.prefetchFrom(e, f, end, ra)
 	}
 	rd := f.NewReader()
 	defer rd.Close()
@@ -632,7 +637,7 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 		return ra
 	})
 	pr := &progressReader{ReadSeeker: rd, total: &e.served}
-	start, rangeStart := time.Now(), int64(0)
+	began, rangeStart := time.Now(), int64(0)
 	if first, _, ok := parseRange(r.Header.Get("Range")); ok {
 		rangeStart = first
 	}
@@ -640,7 +645,7 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 	stop := s.watchStall(r.Context(), e, pr)
 	http.ServeContent(w, r, "", time.Time{}, pr)
 	stop()
-	s.recordWebseed(r, e, idx, rangeStart, end, missing, start, pr)
+	s.recordWebseed(r, e, idx, rangeStart, end, missing, began, pr)
 }
 
 // slowTTFB is when a web seed request counts as slow (and gets a diagnostics event).
@@ -751,8 +756,12 @@ func (s *Server) watchStall(ctx context.Context, e *entry, pr *progressReader) f
 			case <-tick.C:
 			}
 			nowServed, nowChunks := pr.n.Load(), usefulChunks(e.t)
-			if nowServed == served && nowChunks == chunks && !e.t.Complete().Bool() {
-				s.nudge(e)
+			if nowServed == served && !e.t.Complete().Bool() {
+				if nowChunks == chunks {
+					s.nudge(e)
+				} else {
+					s.unstarve(e)
+				}
 			}
 			served, chunks = nowServed, nowChunks
 		}
@@ -767,6 +776,67 @@ func usefulChunks(t *torrent.Torrent) int64 {
 
 // nudge makes the client re-request the torrent's wanted pieces, at most once per stallCheck.
 func (s *Server) nudge(e *entry) {
+	s.rerequest(e, "no data for a while, re-requesting pieces")
+}
+
+// windowHold is how long the prefetch window stays off after it starved a read.
+func windowHold() time.Duration { return 10 * stallCheck }
+
+// unstarve handles a read that got nothing for a stallCheck while the torrent got data: the peers
+// are busy with the window's requests. It drops the window, keeps it off for windowHold (on a swarm
+// slower than the browser, the browser's own requests are all it can keep up with) and re-requests.
+func (s *Server) unstarve(e *entry) {
+	s.mu.Lock()
+	if s.torrents[e.ih] != e || e.window.begin >= e.window.end {
+		s.mu.Unlock()
+		return
+	}
+	s.cancelWindowLocked(e)
+	e.windowHeldUntil = time.Now().Add(windowHold())
+	s.mu.Unlock()
+	s.rerequest(e, "a read waits behind the prefetch window, dropping it and re-requesting pieces")
+}
+
+// leaveWindow drops the prefetch window when a read of [start, end) in f needs pieces outside it
+// (a seek, the MKV Cues near the end), and re-requests, so the read is first in every peer's queue.
+func (s *Server) leaveWindow(e *entry, f *torrent.File, start, end int64) {
+	info := e.t.Info()
+	if info == nil || start >= end {
+		return
+	}
+	begin, stop := pieceSpan(f.Offset()+start, end-start, e.t.Length(), info.PieceLength)
+	if !hasIncomplete(e.t, begin, stop) {
+		return
+	}
+	s.mu.Lock()
+	if s.torrents[e.ih] != e || !outsideWindow(e.window, pieceRange{begin, stop}) {
+		s.mu.Unlock()
+		return
+	}
+	s.cancelWindowLocked(e)
+	s.mu.Unlock()
+	s.rerequest(e, "a read away from the prefetch window, dropping it and re-requesting pieces")
+}
+
+func hasIncomplete(t *torrent.Torrent, begin, end int) bool {
+	for i := begin; i < end; i++ {
+		if !t.Piece(i).State().Complete {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) cancelWindowLocked(e *entry) {
+	if e.window.begin < e.window.end {
+		e.t.CancelPieces(e.window.begin, e.window.end)
+	}
+	e.window = pieceRange{}
+}
+
+// rerequest cancels every request of the torrent so the client makes them again in priority order,
+// at most once per stallCheck.
+func (s *Server) rerequest(e *entry, why string) {
 	s.mu.Lock()
 	if s.torrents[e.ih] != e || time.Since(e.lastNudge) < stallCheck {
 		s.mu.Unlock()
@@ -775,10 +845,10 @@ func (s *Server) nudge(e *entry) {
 	e.lastNudge = time.Now()
 	s.mu.Unlock()
 	st := e.t.Stats()
-	s.diag.event(e.ih, "nudge", "connected", st.ActivePeers, "seeders", st.ConnectedSeeders,
+	s.diag.event(e.ih, "nudge", "why", why, "connected", st.ActivePeers, "seeders", st.ConnectedSeeders,
 		"usefulChunks", st.ChunksReadUseful.Int64())
 	if ok, suppressed := s.throttle.allow("nudge "+e.ih.HexString(), e.lastNudge); ok {
-		s.log.Info("no data for a while, re-requesting pieces", "infohash", e.ih.HexString(), "suppressed", suppressed)
+		s.log.Info(why, "infohash", e.ih.HexString(), "suppressed", suppressed)
 	}
 	// Only cancelling every request unsticks it (just recomputing requests doesn't); in the browser
 	// that happens when its 60 s timeout closes the readers. Readers fail while download is off;
@@ -816,6 +886,10 @@ func (s *Server) prefetchFrom(e *entry, f *torrent.File, off, ra int64) {
 	defer s.mu.Unlock()
 	if s.torrents[e.ih] != e {
 		return // dropped meanwhile
+	}
+	if time.Now().Before(e.windowHeldUntil) {
+		s.cancelWindowLocked(e)
+		return
 	}
 	old, want := e.window, pieceRange{begin, end}
 	next, cancel := nextWindow(old, want)

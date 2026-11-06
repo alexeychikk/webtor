@@ -56,7 +56,17 @@ import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
-import { nextReopen, nextStarvedFor, watchdogNotice } from './watchdog';
+import {
+  RELAY_STATS_MAX_MISSES,
+  STALLED_NOTICES,
+  nextReopen,
+  nextStarvedFor,
+  nextRelaySamples,
+  relayFlowOf,
+  stalledNotice,
+  watchdogNotice,
+  type RelaySample,
+} from './watchdog';
 import {
   audioRef,
   matchAudioTrack,
@@ -99,7 +109,7 @@ const SAVE_POSITION_MS = 5000;
 /** The "Resumed at" toast goes once the playhead is this far from where it resumed. */
 const RESUME_TOAST_S = 15;
 /** Notices about the torrent, not the file: they survive a file switch. */
-const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
+const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', ...STALLED_NOTICES];
 /** Opened .torrent files that got the relay's web seed (ADR 0007 §2). */
 const withRelayWebseed = new WeakSet<Torrent>();
 
@@ -115,6 +125,8 @@ export class PlayerController {
   stats = $state<TorrentStats>({ numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 });
   /** Non-fatal conditions (`no-peers`, `stalled`, `no-playable-audio`, …). */
   notices = $state<PlaybackErrorCode[]>([]);
+  /** The number in a relay stalled notice's message (`stalledNotice`). */
+  stalledDetail = $state<string | undefined>(undefined);
   error = $state<PlaybackError | null>(null);
   fileName = $state<string | null>(null);
   audioTracks = $state<readonly AudioTrackInfo[]>([]);
@@ -158,6 +170,8 @@ export class PlayerController {
   private relayAbort: AbortController | null = null;
   private relayTimer: ReturnType<typeof setInterval> | undefined;
   private relayStats: RelayStats | null = null;
+  private relayMisses = 0;
+  private relaySamples: RelaySample[] = [];
   /** The torrent's last warnings and errors (bounded), for "Copy diagnostics". */
   private warnings: string[] = [];
   /** Watch-state key (watch-state.ts) of the file playing; null when none. */
@@ -246,6 +260,8 @@ export class PlayerController {
     const relayBase = typeof input === 'string' ? relaySettings.base : null;
     this.viaRelay = relayBase !== null;
     this.relayStats = null;
+    this.relayMisses = 0;
+    this.relaySamples = [];
 
     const valid = typeof input === 'string' ? isTorrentId(input) : looksLikeTorrentFile(input);
     if (!valid) return this.fail(new PlaybackError('invalid-input'));
@@ -541,8 +557,22 @@ export class PlayerController {
       polling = true;
       const stats = await fetchRelayStats(urls.stats, abort.signal);
       polling = false;
-      if (abort.signal.aborted || run !== this.run || !stats) return;
+      if (abort.signal.aborted || run !== this.run) return;
+      this.relayMisses = stats ? 0 : this.relayMisses + 1;
+      if (!stats) {
+        if (this.relayMisses >= RELAY_STATS_MAX_MISSES) {
+          this.relayStats = null;
+          this.relaySamples = [];
+        }
+        return;
+      }
       this.relayStats = stats;
+      if (stats.totals) {
+        this.relaySamples = nextRelaySamples(this.relaySamples, {
+          at: performance.now(),
+          ...stats.totals,
+        });
+      }
       if (!this.torrent) this.stats = mergeRelayStats(NO_STATS, 0, stats);
     };
     this.relayTimer = setInterval(() => void poll(), RELAY_STATS_MS);
@@ -622,6 +652,8 @@ export class PlayerController {
     this.timer = undefined;
     this.stopRelay();
     this.relayStats = null;
+    this.relayMisses = 0;
+    this.relaySamples = [];
     this.videoEvents?.abort();
     this.videoEvents = null;
     this.player?.destroy();
@@ -948,8 +980,16 @@ export class PlayerController {
       numPeers: t.numPeers,
       starvedFor: this.starvedFor,
     });
-    const others = this.notices.filter((n) => n !== 'no-peers' && n !== 'stalled');
-    const next = notice ? [notice, ...others] : others;
+    const relay = this.viaRelay
+      ? relayFlowOf(this.relayStats, this.relayMisses, this.relaySamples)
+      : null;
+    const stalled = notice === 'stalled' ? stalledNotice(relay) : null;
+    const code = stalled?.code ?? notice;
+    const others = this.notices.filter(
+      (n) => n !== 'no-peers' && !(STALLED_NOTICES as readonly string[]).includes(n),
+    );
+    const next = code ? [code, ...others] : others;
     if (next.join() !== this.notices.join()) this.notices = next;
+    if (stalled?.detail !== this.stalledDetail) this.stalledDetail = stalled?.detail;
   }
 }

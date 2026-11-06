@@ -14,6 +14,7 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
+	"golang.org/x/time/rate"
 )
 
 // Seeder seeds one file or directory.
@@ -27,6 +28,19 @@ type Seeder struct {
 
 // Start seeds path (a file or a directory) with the given piece length (0 = 256 KiB).
 func Start(path string, pieceLength int64) (*Seeder, error) {
+	return StartWith(path, Options{PieceLength: pieceLength})
+}
+
+// Options shape a seeder: its torrent's piece length (0 = 256 KiB) and how fast it uploads
+// (bytes/s, 0 = unlimited), to stand in for a slow swarm.
+type Options struct {
+	PieceLength int64
+	UploadRate  int64
+}
+
+// StartWith is Start with Options.
+func StartWith(path string, opts Options) (*Seeder, error) {
+	pieceLength := opts.PieceLength
 	if pieceLength == 0 {
 		pieceLength = 256 << 10
 	}
@@ -50,6 +64,9 @@ func Start(path string, pieceLength int64) (*Seeder, error) {
 	cfg.DisableIPv6 = true
 	cfg.NoDefaultPortForwarding = true
 	cfg.Seed = true
+	if opts.UploadRate > 0 {
+		cfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(opts.UploadRate), 0)
+	}
 	cfg.DataDir = filepath.Dir(path)
 	cfg.DefaultStorage = storage.NewFileOpts(storage.NewFileClientOpts{
 		ClientBaseDir: filepath.Dir(path),
