@@ -280,7 +280,10 @@ with `docker cp webtor-relay:/licenses/ffmpeg .`). The pinned version and checks
   oldest dropped first), and a torrent's log goes when the torrent is dropped. It never holds the
   token, the public URL or tracker passkeys: peer addresses are shown as `203.0.x.x#a1b2c3` (the
   network prefix plus a tag that tells peers apart within one run), and trackers by scheme and
-  host only. A relay older than 0.4.0 (API 4) has no diagnostics: the app then copies its own side and
+  host only, also in the relay's console output. A tracker login in a magnet or .torrent
+  (`http://user:pass@host/announce`) is removed before announcing, because the BitTorrent library
+  can't send it; a passkey in the tracker's path or query still goes to that tracker. Tracker URLs
+  the library can't use (unknown scheme, malformed) are skipped. A relay older than 0.4.0 (API 4) has no diagnostics: the app then copies its own side and
   says the relay is too old to report.
 - SIGINT/SIGTERM shut down gracefully: in-flight requests get 3 s, then torrents are dropped and
   their data deleted. A second Ctrl-C kills the process.

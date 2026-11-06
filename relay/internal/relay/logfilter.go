@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 )
@@ -48,4 +49,53 @@ func expectedReadError(r slog.Record) bool {
 		return false
 	})
 	return expected
+}
+
+// ScrubURLs wraps the torrent library's log handler and reduces every URL in a record's message
+// and values to its scheme and host (scrubURLs): the library quotes tracker URLs, which can carry
+// a login or a passkey, in its log lines and errors. Wrap it inside QuietReadErrors, which needs
+// the original error values.
+func ScrubURLs(h slog.Handler) slog.Handler { return scrubHandler{h} }
+
+type scrubHandler struct{ slog.Handler }
+
+func (s scrubHandler) Handle(ctx context.Context, r slog.Record) error {
+	out := slog.NewRecord(r.Time, r.Level, scrubURLs(r.Message), r.PC)
+	r.Attrs(func(a slog.Attr) bool {
+		out.AddAttrs(scrubAttr(a))
+		return true
+	})
+	return s.Handler.Handle(ctx, out)
+}
+
+func (s scrubHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	scrubbed := make([]slog.Attr, len(attrs))
+	for i, a := range attrs {
+		scrubbed[i] = scrubAttr(a)
+	}
+	return scrubHandler{s.Handler.WithAttrs(scrubbed)}
+}
+
+func (s scrubHandler) WithGroup(name string) slog.Handler {
+	return scrubHandler{s.Handler.WithGroup(name)}
+}
+
+func scrubAttr(a slog.Attr) slog.Attr {
+	v := a.Value.Resolve()
+	switch v.Kind() {
+	case slog.KindString:
+		return slog.String(a.Key, scrubURLs(v.String()))
+	case slog.KindGroup:
+		group := v.Group()
+		scrubbed := make([]any, len(group))
+		for i, g := range group {
+			scrubbed[i] = scrubAttr(g)
+		}
+		return slog.Group(a.Key, scrubbed...)
+	case slog.KindAny:
+		if text := fmt.Sprint(v.Any()); strings.Contains(text, "://") {
+			return slog.String(a.Key, scrubURLs(text))
+		}
+	}
+	return slog.Attr{Key: a.Key, Value: v}
 }

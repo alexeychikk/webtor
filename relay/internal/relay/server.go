@@ -466,6 +466,8 @@ func (s *Server) addError(w http.ResponseWriter, err error) {
 		})
 	case errors.Is(err, errClosed):
 		httpError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, errAddFailed):
+		httpError(w, http.StatusInternalServerError, err)
 	default:
 		httpError(w, http.StatusBadRequest, err)
 	}
@@ -846,7 +848,9 @@ func (s *Server) acquireSpec(ih metainfo.Hash, source string, spec *torrent.Torr
 	if len(spec.Trackers) == 0 {
 		spec.Trackers = [][]string{nil}
 	}
-	spec.Trackers[0] = dedupe(append(spec.Trackers[0], s.opts.ExtraTrackers...))
+	spec.Trackers[0] = append(spec.Trackers[0], s.opts.ExtraTrackers...)
+	var cleanup trackerCleanup
+	spec.Trackers, cleanup = usableTrackers(spec.Trackers)
 	spec.InfoHash = ih
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -859,8 +863,7 @@ func (s *Server) acquireSpec(ih metainfo.Hash, source string, spec *torrent.Torr
 	if len(s.torrents) >= s.opts.MaxTorrents && s.torrents[ih] == nil {
 		return nil, ErrTooManyTorrents
 	}
-	// For a torrent already open this merges spec in (trackers, web seeds, info bytes).
-	t, _, err := s.cl.AddTorrentSpec(spec)
+	t, err := s.addSpec(ih, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -878,6 +881,9 @@ func (s *Server) acquireSpec(ih metainfo.Hash, source string, spec *torrent.Torr
 		trackers += len(tier)
 	}
 	kv := []any{"source", source, "trackers", trackers, "webSeeds", len(spec.Webseeds), "directPeers", len(spec.PeerAddrs)}
+	if cleanup.ignored > 0 || cleanup.loginsRemoved > 0 {
+		kv = append(kv, "trackersIgnored", cleanup.ignored, "trackerLoginsRemoved", cleanup.loginsRemoved)
+	}
 	if len(spec.InfoBytes) > 0 {
 		var info metainfo.Info
 		if bencode.Unmarshal(spec.InfoBytes, &info) == nil {
@@ -888,6 +894,31 @@ func (s *Server) acquireSpec(ih metainfo.Hash, source string, spec *torrent.Torr
 	s.diag.globalEvent("torrent-added", "infoHash", ih.HexString(), "source", source, "torrents", len(s.torrents))
 	go s.watchMetainfo(e)
 	return e, nil
+}
+
+// errAddFailed answers an add that panicked inside the torrent library. The panic value is never
+// shown or logged: it can hold a tracker URL with its credentials.
+var errAddFailed = errors.New("the BitTorrent client could not add this torrent")
+
+// addSpec adds spec to the client, or merges it into the torrent already open (trackers, web
+// seeds, info bytes). A panic in the library becomes errAddFailed; a torrent it left half-added is
+// dropped. Call with s.mu held.
+func (s *Server) addSpec(ih metainfo.Hash, spec *torrent.TorrentSpec) (t *torrent.Torrent, err error) {
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		s.log.Error("the torrent library panicked adding a torrent", "infohash", ih.HexString())
+		s.diag.globalEvent("add-panicked", "infoHash", ih.HexString())
+		if s.torrents[ih] == nil {
+			if t, ok := s.cl.Torrent(ih); ok {
+				t.Drop()
+			}
+		}
+		t, err = nil, errAddFailed
+	}()
+	t, _, err = s.cl.AddTorrentSpec(spec)
+	return t, err
 }
 
 // watchMetainfo records when the torrent got its info dictionary.

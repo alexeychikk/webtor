@@ -37,6 +37,11 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   Write stuck on a client that stopped reading. ffmpeg tests need `WEBTOR_RELAY_FFMPEG` or ffmpeg on
   `PATH` (skipped otherwise); a static build (e.g. johnvansickle.com) works in the sandbox.
   `testExtraInputArgs` (`-readrate 1`) keeps a 12 s fixture's job alive through a test.
+- Tracker URLs (magnet `tr=`, a .torrent's announce list, the default list) pass `usableTrackers`
+  (`trackers.go`) before anacrolix sees them: v1.61 panics, printing the URL, on userinfo (removed:
+  it can't send it), an unknown scheme or a URL that changes through `url.Parse` + `String`
+  (dropped). `addSpec` recovers a library panic during the add (500, value never logged, half-added
+  torrent dropped). The library's log lines go through `ScrubURLs` (URLs → scheme + host).
 - The library's logger goes through `QuietReadErrors`: it drops the Error-level read failures that
   normal streaming causes (cancelled web seed reads, the nudge). Extend it rather than raising the
   level when the library gets noisier.
