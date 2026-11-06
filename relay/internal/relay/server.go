@@ -336,7 +336,7 @@ func routeOf(p string) string {
 	if len(parts) >= 3 && parts[1] == "torrents" {
 		parts[2] = "*"
 	}
-	return strings.Join(parts[:min(len(parts), 4)], "/")
+	return "/" + strings.Join(parts[:min(len(parts), 4)], "/")
 }
 
 type statusWriter struct {
