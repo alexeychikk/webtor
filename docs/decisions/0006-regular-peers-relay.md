@@ -165,7 +165,9 @@ slow swarm the request waits behind the whole window. Now (`handleWebseed`):
 The same run then plays after 44 s, as fast as 16 MiB pieces at 500 KB/s allow. The app's stalled
 notice now names the stuck side from `/stats` (`stalledNotice`): `relay-swarm-stalled` (the relay's
 peers send nothing), `relay-not-serving` (the relay downloads but sends the browser nothing) or
-`relay-swarm-slow` (data flows but no piece completes in 30 s). A swarm that sends nothing to a
+`relay-swarm-slow` (data flows but no piece completes in 30 s); once `/stats` goes unanswered twice
+in a row its last rates are stale, and it says `relay-not-answering` (the relay or the network to
+it). A swarm that sends nothing to a
 relay with peers (the reported 5 of 110 seeds) can't be reproduced in the sandbox; the relay's
 diagnostics log is for that.
 

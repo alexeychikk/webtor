@@ -1,3 +1,4 @@
+import type { RelayStats } from '../torrent/relay';
 import { formatSpeed } from './format';
 
 /**
@@ -38,7 +39,11 @@ export interface RelayFlow {
 }
 
 export type StalledNotice =
-  'stalled' | 'relay-swarm-stalled' | 'relay-not-serving' | 'relay-swarm-slow';
+  | 'stalled'
+  | 'relay-swarm-stalled'
+  | 'relay-not-serving'
+  | 'relay-swarm-slow'
+  | 'relay-not-answering';
 
 /** The stalled notices: a relay one says which side is stuck. */
 export const STALLED_NOTICES: readonly StalledNotice[] = [
@@ -46,7 +51,29 @@ export const STALLED_NOTICES: readonly StalledNotice[] = [
   'relay-swarm-stalled',
   'relay-not-serving',
   'relay-swarm-slow',
+  'relay-not-answering',
 ];
+
+/** `/stats` polls in a row without an answer after which the relay's last stats count as stale. */
+export const RELAY_STATS_MAX_MISSES = 2;
+
+/**
+ * The relay's data flow for `stalledNotice`: `unreachable` once its `/stats` went unanswered
+ * `RELAY_STATS_MAX_MISSES` times in a row (its last rates are stale then), null without its rates
+ * (api < 3).
+ */
+export function relayFlowOf(
+  stats: RelayStats | null,
+  misses: number,
+): RelayFlow | 'unreachable' | null {
+  if (misses >= RELAY_STATS_MAX_MISSES) return 'unreachable';
+  if (!stats?.rates) return null;
+  return {
+    activePeers: stats.activePeers,
+    download: stats.rates.download,
+    served: stats.rates.served,
+  };
+}
 
 /**
  * Which `stalled` notice to show: with a relay that reports its rates, the side that is stuck, and
@@ -54,9 +81,14 @@ export const STALLED_NOTICES: readonly StalledNotice[] = [
  * (`relay-swarm-stalled`, the peer count). The relay gets data but sends the browser none: the
  * relay (`relay-not-serving`, its download rate). Data reaches the browser, but no piece completed
  * in `STALLED_AFTER_MS`: a swarm too slow for the torrent's pieces (`relay-swarm-slow`, the rate).
+ * The relay no longer answers `/stats`: the relay or the way to it (`relay-not-answering`).
  */
-export function stalledNotice(relay: RelayFlow | null): { code: StalledNotice; detail?: string } {
+export function stalledNotice(relay: RelayFlow | 'unreachable' | null): {
+  code: StalledNotice;
+  detail?: string;
+} {
   if (!relay) return { code: 'stalled' };
+  if (relay === 'unreachable') return { code: 'relay-not-answering' };
   if (relay.served >= RELAY_FLOW_MIN) {
     return { code: 'relay-swarm-slow', detail: formatSpeed(relay.download) };
   }

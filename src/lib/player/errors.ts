@@ -10,6 +10,7 @@ export type PlaybackErrorCode =
   | 'relay-swarm-stalled'
   | 'relay-not-serving'
   | 'relay-swarm-slow'
+  | 'relay-not-answering'
   | 'no-playable-file'
   | 'unsupported-container'
   | 'unsupported-video-codec'
@@ -53,6 +54,9 @@ export const PLAYBACK_ERROR_MESSAGES: Record<PlaybackErrorCode, string> = {
   'relay-swarm-slow':
     'The relay passes on everything it gets, but its peers send too little to finish a piece of ' +
     'this torrent in time. It keeps downloading; playback starts once enough is in.',
+  'relay-not-answering':
+    'The relay stopped answering this browser: it may be restarting, or the network between you ' +
+    'and it is down. The relay or the connection to it is stuck, not the swarm. Still trying…',
   'no-playable-file': 'This torrent contains no video file that can be played in the browser.',
   'unsupported-container':
     'This video format cannot be opened in the browser (supported: MKV, MP4, MOV, WebM, MPEG-TS, AVI).',
@@ -113,6 +117,7 @@ export const PLAYBACK_ERROR_TITLES: Record<PlaybackErrorCode, string> = {
   'relay-swarm-stalled': 'Swarm sends no data',
   'relay-not-serving': 'Relay sends no data',
   'relay-swarm-slow': 'Swarm too slow',
+  'relay-not-answering': 'Relay not answering',
   'no-playable-file': 'No playable video',
   'unsupported-container': 'Format not supported',
   'unsupported-video-codec': 'Video codec not supported',

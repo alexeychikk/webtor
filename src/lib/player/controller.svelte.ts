@@ -56,12 +56,13 @@ import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import {
+  RELAY_STATS_MAX_MISSES,
   STALLED_NOTICES,
   nextReopen,
   nextStarvedFor,
+  relayFlowOf,
   stalledNotice,
   watchdogNotice,
-  type RelayFlow,
 } from './watchdog';
 import {
   audioRef,
@@ -166,6 +167,7 @@ export class PlayerController {
   private relayAbort: AbortController | null = null;
   private relayTimer: ReturnType<typeof setInterval> | undefined;
   private relayStats: RelayStats | null = null;
+  private relayMisses = 0;
   /** Watch-state key (watch-state.ts) of the file playing; null when none. */
   private watch: string | null = null;
   /**
@@ -252,6 +254,7 @@ export class PlayerController {
     const relayBase = typeof input === 'string' ? relaySettings.base : null;
     this.viaRelay = relayBase !== null;
     this.relayStats = null;
+    this.relayMisses = 0;
 
     const valid = typeof input === 'string' ? isTorrentId(input) : looksLikeTorrentFile(input);
     if (!valid) return this.fail(new PlaybackError('invalid-input'));
@@ -537,8 +540,11 @@ export class PlayerController {
       polling = true;
       const stats = await fetchRelayStats(urls.stats, abort.signal);
       polling = false;
-      if (abort.signal.aborted || run !== this.run || !stats) return;
-      this.relayStats = stats;
+      if (abort.signal.aborted || run !== this.run) return;
+      this.relayMisses = stats ? 0 : this.relayMisses + 1;
+      if (stats) this.relayStats = stats;
+      else if (this.relayMisses >= RELAY_STATS_MAX_MISSES) this.relayStats = null;
+      if (!stats) return;
       if (!this.torrent) this.stats = mergeRelayStats(NO_STATS, 0, stats);
     };
     this.relayTimer = setInterval(() => void poll(), RELAY_STATS_MS);
@@ -618,6 +624,7 @@ export class PlayerController {
     this.timer = undefined;
     this.stopRelay();
     this.relayStats = null;
+    this.relayMisses = 0;
     this.videoEvents?.abort();
     this.videoEvents = null;
     this.player?.destroy();
@@ -863,7 +870,8 @@ export class PlayerController {
       numPeers: t.numPeers,
       starvedFor: this.starvedFor,
     });
-    const stalled = notice === 'stalled' ? stalledNotice(this.relayFlow()) : null;
+    const relay = this.viaRelay ? relayFlowOf(this.relayStats, this.relayMisses) : null;
+    const stalled = notice === 'stalled' ? stalledNotice(relay) : null;
     const code = stalled?.code ?? notice;
     const others = this.notices.filter(
       (n) => n !== 'no-peers' && !(STALLED_NOTICES as readonly string[]).includes(n),
@@ -871,16 +879,5 @@ export class PlayerController {
     const next = code ? [code, ...others] : others;
     if (next.join() !== this.notices.join()) this.notices = next;
     if (stalled?.detail !== this.stalledDetail) this.stalledDetail = stalled?.detail;
-  }
-
-  /** The relay's data flow for `stalledNotice`; null without a relay or its rates (api < 3). */
-  private relayFlow(): RelayFlow | null {
-    const relay = this.relayStats;
-    if (!this.viaRelay || !relay?.rates) return null;
-    return {
-      activePeers: relay.activePeers,
-      download: relay.rates.download,
-      served: relay.rates.served,
-    };
   }
 }

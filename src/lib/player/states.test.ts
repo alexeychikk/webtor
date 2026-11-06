@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PLAYBACK_ERROR_MESSAGES, PLAYBACK_ERROR_TITLES, type PlaybackErrorCode } from './errors';
 import { errorActions, isStalledNotice, playerStates, stalledDetails } from './states';
+import { STALLED_NOTICES } from './watchdog';
 
 const base = {
   phase: 'playing' as const,
@@ -78,7 +79,7 @@ describe('stalled notices', () => {
     ).toEqual([{ code: 'relay-swarm-stalled', detail: '5' }, { code: 'no-playable-audio' }]);
   });
   it('all offer the help dialog', () => {
-    for (const code of ['stalled', 'relay-swarm-stalled', 'relay-not-serving', 'relay-swarm-slow'])
+    for (const code of STALLED_NOTICES)
       expect(isStalledNotice(code as PlaybackErrorCode), code).toBe(true);
     expect(isStalledNotice('no-peers')).toBe(false);
   });

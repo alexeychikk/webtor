@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import type { RelayStats } from '../torrent/relay';
 import { playbackErrorMessage } from './errors';
 import {
   MAX_REOPENS,
   RELAY_FLOW_MIN,
+  RELAY_STATS_MAX_MISSES,
   nextReopen,
   nextStarvedFor,
+  relayFlowOf,
   stalledNotice,
   watchdogNotice,
 } from './watchdog';
@@ -55,6 +58,34 @@ describe('nextReopen', () => {
   it('starts a new row once the reopened player recovered', () => {
     expect(nextReopen(MAX_REOPENS, true)).toBe(1);
     expect(nextReopen(2, true)).toBe(1);
+  });
+});
+
+describe('relayFlowOf', () => {
+  const stats: RelayStats = {
+    activePeers: 5,
+    seeders: 5,
+    hasMetadata: true,
+    rates: { download: 2_000_000, upload: 0, served: 1_900_000, uploadLimit: 0 },
+  };
+  it('is the last /stats rates while the relay answers', () => {
+    expect(relayFlowOf(stats, 0)).toEqual({
+      activePeers: 5,
+      download: 2_000_000,
+      served: 1_900_000,
+    });
+    expect(relayFlowOf(stats, RELAY_STATS_MAX_MISSES - 1)).toMatchObject({ served: 1_900_000 });
+  });
+  it('is null without rates (api < 3)', () => {
+    expect(relayFlowOf(null, 0)).toBeNull();
+    expect(relayFlowOf({ ...stats, rates: undefined }, 0)).toBeNull();
+  });
+  it('drops stale rates once the relay stops answering', () => {
+    expect(relayFlowOf(stats, RELAY_STATS_MAX_MISSES)).toBe('unreachable');
+    expect(relayFlowOf(null, RELAY_STATS_MAX_MISSES)).toBe('unreachable');
+    expect(stalledNotice(relayFlowOf(stats, RELAY_STATS_MAX_MISSES))).toEqual({
+      code: 'relay-not-answering',
+    });
   });
 });
 
