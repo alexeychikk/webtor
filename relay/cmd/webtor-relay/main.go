@@ -123,7 +123,8 @@ func run() error {
 	cfg.DefaultStorage = relay.NewStorage(piecesDir)
 	// QuietReadErrors: the library logs every aborted web seed read (a browser seek) as an error.
 	// ThrottleLog: it repeats warnings per peer and piece; one line per message a minute is enough.
-	cfg.Slogger = slog.New(relay.QuietReadErrors(relay.ThrottleLog(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}), relay.LogEvery)))
+	// ScrubURLs: its lines quote tracker URLs, which can hold a login or a passkey.
+	cfg.Slogger = slog.New(relay.QuietReadErrors(relay.ScrubURLs(relay.ThrottleLog(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}), relay.LogEvery))))
 	// Diagnostics (GET /v1/diagnostics) live in memory only, in bounded logs.
 	diag := relay.NewDiagnostics()
 	diag.Instrument(cfg)

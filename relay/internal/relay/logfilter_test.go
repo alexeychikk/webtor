@@ -43,3 +43,24 @@ func TestQuietReadErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestScrubURLs(t *testing.T) {
+	var buf bytes.Buffer
+	l := slog.New(ScrubURLs(slog.NewTextHandler(&buf, nil))).
+		With("url", "http://alice:s3cret@tracker.example/pk-123/announce")
+	l.Warn(`error announcing to "udp://bob:hunter2@tracker.example:6969/announce?passkey=pk-456"`,
+		"err", errors.New(`Get "https://tracker.example/announce/pk-789": EOF`),
+		slog.Group("g", "u", "wss://carol:pw@tracker.example/x"),
+		"n", 3)
+	out := buf.String()
+	for _, secret := range []string{"alice", "s3cret", "bob", "hunter2", "pk-", "carol"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("log line has %q: %s", secret, out)
+		}
+	}
+	for _, kept := range []string{"url=http://tracker.example", "udp://tracker.example:6969", "https://tracker.example", "g.u=wss://tracker.example", "n=3"} {
+		if !strings.Contains(out, kept) {
+			t.Fatalf("log line lacks %q: %s", kept, out)
+		}
+	}
+}

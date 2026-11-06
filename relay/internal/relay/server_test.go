@@ -35,7 +35,8 @@ type harness struct {
 	logs    *syncBuffer
 }
 
-func newHarness(t *testing.T, opts Options) *harness {
+func newHarness(t *testing.T, opts Options) *harness { return newHarnessCfg(t, opts, nil) }
+func newHarnessCfg(t *testing.T, opts Options, tweak func(*torrent.ClientConfig)) *harness {
 	t.Helper()
 	dataDir := t.TempDir()
 	cfg := torrent.NewDefaultClientConfig()
@@ -47,6 +48,9 @@ func newHarness(t *testing.T, opts Options) *harness {
 	cfg.NoDefaultPortForwarding = true
 	cfg.DataDir = dataDir
 	cfg.DefaultStorage = NewStorage(dataDir)
+	if tweak != nil {
+		tweak(cfg)
+	}
 	diag := NewDiagnostics()
 	diag.Instrument(cfg)
 	cl, err := torrent.NewClient(cfg)
