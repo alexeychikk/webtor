@@ -163,31 +163,43 @@ test('plays through the end and stays ended (no replay from 0)', async ({ page }
  * Plays from 37 s and waits (rAF) for the player's `endOfStream()` call, a moment before the end,
  * with the element not ended yet. Needs `hookEndOfStream` first.
  */
-async function afterEndOfStream(page: Page) {
+/**
+ * Seeks to `t` (default: the duration) in a microtask right after the first `endOfStream()` from
+ * 37 s on: the element ends at most `EOS_AHEAD_S` of media later, too soon for another round trip.
+ * Resolves with `ended` just before the seek.
+ */
+async function seekAfterEndOfStream(page: Page, t?: number): Promise<boolean> {
   await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = 37));
-  await video(page).evaluate(
-    (v: HTMLVideoElement) =>
-      new Promise<void>((resolve, reject) => {
-        const w = window as unknown as { __eos: number };
-        const tick = () => {
-          if (v.ended) reject(new Error('ended before endOfStream() was seen'));
-          else if (w.__eos > 0) resolve();
-          else requestAnimationFrame(tick);
+  return video(page).evaluate(
+    (v: HTMLVideoElement, t) =>
+      new Promise<boolean>((resolve, reject) => {
+        const w = window as unknown as { __afterEos?: () => void };
+        v.addEventListener('ended', () => reject(new Error('ended before endOfStream()')), {
+          once: true,
+        });
+        w.__afterEos = () => {
+          const ended = v.ended;
+          v.currentTime = t ?? v.duration;
+          resolve(ended);
         };
-        tick();
       }),
+    t,
   );
 }
 
-/** Counts `MediaSource.endOfStream()` calls in `window.__eos`. */
+/** Runs `window.__afterEos` once, in a microtask after the next `MediaSource.endOfStream()`. */
 async function hookEndOfStream(page: Page) {
   await page.addInitScript(() => {
-    const w = window as unknown as { __eos: number };
-    w.__eos = 0;
+    const w = window as unknown as { __afterEos?: () => void };
     const end = MediaSource.prototype.endOfStream;
     MediaSource.prototype.endOfStream = function (this: MediaSource, ...args: []) {
-      w.__eos++;
-      return end.apply(this, args);
+      const after = w.__afterEos;
+      w.__afterEos = undefined;
+      try {
+        return end.apply(this, args);
+      } finally {
+        if (after) queueMicrotask(after);
+      }
     };
   });
 }
@@ -199,18 +211,10 @@ test.describe('a seek after endOfStream(), before ended', () => {
   test.beforeEach(async ({ page }) => {
     await hookEndOfStream(page);
     await open(page);
-    await afterEndOfStream(page);
   });
 
   test('back to 30 s plays on from there', async ({ page }) => {
-    // The same task as the poll: no time for the element to end in between.
-    expect(
-      await video(page).evaluate((v: HTMLVideoElement) => {
-        const ended = v.ended;
-        v.currentTime = 30;
-        return ended;
-      }),
-    ).toBe(false);
+    expect(await seekAfterEndOfStream(page, 30)).toBe(false);
     await expect.poll(() => prop(page, 'currentTime'), { timeout: 10_000 }).toBeLessThan(36);
     await expect.poll(() => prop(page, 'currentTime'), { timeout: 10_000 }).toBeGreaterThan(31);
     expect(await prop(page, 'paused')).toBe(false);
@@ -219,7 +223,7 @@ test.describe('a seek after endOfStream(), before ended', () => {
   });
 
   test('to duration ends the video', async ({ page }) => {
-    await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = v.duration));
+    expect(await seekAfterEndOfStream(page)).toBe(false);
     await expectEnded(page);
   });
 });
