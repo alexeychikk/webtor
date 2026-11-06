@@ -5,6 +5,8 @@ import {
   MAX_REOPENS,
   RELAY_FLOW_MIN,
   RELAY_STATS_MAX_MISSES,
+  STALLED_AFTER_MS,
+  nextRelaySamples,
   nextReopen,
   nextStarvedFor,
   relayFlowOf,
@@ -86,6 +88,55 @@ describe('relayFlowOf', () => {
     expect(stalledNotice(relayFlowOf(stats, RELAY_STATS_MAX_MISSES))).toEqual({
       code: 'relay-not-answering',
     });
+  });
+});
+
+describe('relay samples over the stalled window', () => {
+  const stats: RelayStats = {
+    activePeers: 5,
+    seeders: 5,
+    hasMetadata: true,
+    rates: { download: 300_000, upload: 0, served: 0, uploadLimit: 0 },
+  };
+  const at = (s: number, read: number, served: number) => ({ at: s * 1000, read, served });
+
+  it('keeps the last STALLED_AFTER_MS of samples, one older as the base', () => {
+    let samples = [at(0, 0, 0)];
+    for (let s = 2; s <= 40; s += 2) samples = nextRelaySamples(samples, at(s, s, s));
+    expect(samples[0]?.at).toBe(40_000 - STALLED_AFTER_MS);
+    expect(samples.at(-1)?.at).toBe(40_000);
+  });
+  it('starts over when a total goes back (the relay restarted)', () => {
+    const samples = nextRelaySamples([at(0, 5_000, 5_000), at(2, 9_000, 9_000)], at(4, 100, 0));
+    expect(samples).toEqual([at(4, 100, 0)]);
+  });
+  it('a web-seed response served in bursts is the swarm being slow, not the relay (QA repro)', () => {
+    // 300 kB/s from the peers; servedRate reads 0 while the relay waits for the next in-order
+    // chunk, but bytesServed grew over the stall (8.37 → 8.6 MB).
+    let samples: ReturnType<typeof nextRelaySamples> = [];
+    for (let s = 0; s <= 30; s += 2) {
+      samples = nextRelaySamples(samples, at(s, s * 300_000, 8_370_000 + (s >= 20 ? 230_000 : 0)));
+    }
+    const flow = relayFlowOf(stats, 0, samples);
+    expect(flow).toMatchObject({ download: 300_000 });
+    expect(stalledNotice(flow).code).toBe('relay-swarm-slow');
+  });
+  it('blames the relay when its served total stands still over the window', () => {
+    let samples: ReturnType<typeof nextRelaySamples> = [];
+    for (let s = 0; s <= 30; s += 2)
+      samples = nextRelaySamples(samples, at(s, s * 300_000, 8_370_000));
+    expect(stalledNotice(relayFlowOf(stats, 0, samples))).toEqual({
+      code: 'relay-not-serving',
+      detail: '300 kB/s',
+    });
+  });
+  it('uses the totals for the peers too: a burst between polls is not a dead swarm', () => {
+    const idle = { ...stats, rates: { ...stats.rates!, download: 0 } };
+    const samples = [at(0, 0, 0), at(30, 60_000, 0)];
+    expect(stalledNotice(relayFlowOf(idle, 0, samples)).code).toBe('relay-not-serving');
+    expect(stalledNotice(relayFlowOf(idle, 0, [at(0, 0, 0), at(30, 0, 0)])).code).toBe(
+      'relay-swarm-stalled',
+    );
   });
 });
 

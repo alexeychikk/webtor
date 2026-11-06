@@ -286,6 +286,16 @@ export interface RelayStats {
   hasMetadata: boolean;
   /** Absent from relays before api 3. */
   rates?: RelayRates;
+  /**
+   * Running byte totals (`bytesReadData` from peers, `bytesServed` to the browser; api 3): unlike
+   * the rates, they show data that flowed between two polls in bursts.
+   */
+  totals?: RelayTotals;
+}
+
+export interface RelayTotals {
+  read: number;
+  served: number;
 }
 
 const num = (v: unknown): number | undefined =>
@@ -293,8 +303,17 @@ const num = (v: unknown): number | undefined =>
 
 export function parseRelayStats(json: unknown): RelayStats | null {
   if (typeof json !== 'object' || json === null) return null;
-  const { activePeers, seeders, hasMetadata, downloadRate, uploadRate, servedRate, uploadLimit } =
-    json as Record<string, unknown>;
+  const {
+    activePeers,
+    seeders,
+    hasMetadata,
+    downloadRate,
+    uploadRate,
+    servedRate,
+    uploadLimit,
+    bytesReadData,
+    bytesServed,
+  } = json as Record<string, unknown>;
   if (typeof activePeers !== 'number') return null;
   const stats: RelayStats = {
     activePeers,
@@ -310,6 +329,11 @@ export function parseRelayStats(json: unknown): RelayStats | null {
       served: Math.max(0, served),
       uploadLimit: num(uploadLimit) ?? 0,
     };
+  }
+  const read = num(bytesReadData);
+  const servedTotal = num(bytesServed);
+  if (read !== undefined && servedTotal !== undefined) {
+    stats.totals = { read, served: servedTotal };
   }
   return stats;
 }

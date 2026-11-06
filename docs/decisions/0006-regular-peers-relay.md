@@ -167,7 +167,10 @@ notice now names the stuck side from `/stats` (`stalledNotice`): `relay-swarm-st
 peers send nothing), `relay-not-serving` (the relay downloads but sends the browser nothing) or
 `relay-swarm-slow` (data flows but no piece completes in 30 s); once `/stats` goes unanswered twice
 in a row its last rates are stale, and it says `relay-not-answering` (the relay or the network to
-it). A swarm that sends nothing to a
+it). The rates it judges are at least the averages of the running totals (`bytesReadData`,
+`bytesServed`) over the stalled window: on a slow swarm the relay serves a 16 MiB web-seed response
+in bursts, waiting ~10 s for each next in-order chunk, so one poll's `servedRate` reads 0 and would
+blame the relay. A swarm that sends nothing to a
 relay with peers (the reported 5 of 110 seeds) can't be reproduced in the sandbox; the relay's
 diagnostics log is for that.
 

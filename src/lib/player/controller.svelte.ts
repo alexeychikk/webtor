@@ -60,9 +60,11 @@ import {
   STALLED_NOTICES,
   nextReopen,
   nextStarvedFor,
+  nextRelaySamples,
   relayFlowOf,
   stalledNotice,
   watchdogNotice,
+  type RelaySample,
 } from './watchdog';
 import {
   audioRef,
@@ -168,6 +170,7 @@ export class PlayerController {
   private relayTimer: ReturnType<typeof setInterval> | undefined;
   private relayStats: RelayStats | null = null;
   private relayMisses = 0;
+  private relaySamples: RelaySample[] = [];
   /** Watch-state key (watch-state.ts) of the file playing; null when none. */
   private watch: string | null = null;
   /**
@@ -255,6 +258,7 @@ export class PlayerController {
     this.viaRelay = relayBase !== null;
     this.relayStats = null;
     this.relayMisses = 0;
+    this.relaySamples = [];
 
     const valid = typeof input === 'string' ? isTorrentId(input) : looksLikeTorrentFile(input);
     if (!valid) return this.fail(new PlaybackError('invalid-input'));
@@ -542,9 +546,20 @@ export class PlayerController {
       polling = false;
       if (abort.signal.aborted || run !== this.run) return;
       this.relayMisses = stats ? 0 : this.relayMisses + 1;
-      if (stats) this.relayStats = stats;
-      else if (this.relayMisses >= RELAY_STATS_MAX_MISSES) this.relayStats = null;
-      if (!stats) return;
+      if (!stats) {
+        if (this.relayMisses >= RELAY_STATS_MAX_MISSES) {
+          this.relayStats = null;
+          this.relaySamples = [];
+        }
+        return;
+      }
+      this.relayStats = stats;
+      if (stats.totals) {
+        this.relaySamples = nextRelaySamples(this.relaySamples, {
+          at: performance.now(),
+          ...stats.totals,
+        });
+      }
       if (!this.torrent) this.stats = mergeRelayStats(NO_STATS, 0, stats);
     };
     this.relayTimer = setInterval(() => void poll(), RELAY_STATS_MS);
@@ -625,6 +640,7 @@ export class PlayerController {
     this.stopRelay();
     this.relayStats = null;
     this.relayMisses = 0;
+    this.relaySamples = [];
     this.videoEvents?.abort();
     this.videoEvents = null;
     this.player?.destroy();
@@ -870,7 +886,9 @@ export class PlayerController {
       numPeers: t.numPeers,
       starvedFor: this.starvedFor,
     });
-    const relay = this.viaRelay ? relayFlowOf(this.relayStats, this.relayMisses) : null;
+    const relay = this.viaRelay
+      ? relayFlowOf(this.relayStats, this.relayMisses, this.relaySamples)
+      : null;
     const stalled = notice === 'stalled' ? stalledNotice(relay) : null;
     const code = stalled?.code ?? notice;
     const others = this.notices.filter(

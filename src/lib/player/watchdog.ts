@@ -1,4 +1,4 @@
-import type { RelayStats } from '../torrent/relay';
+import type { RelayStats, RelayTotals } from '../torrent/relay';
 import { formatSpeed } from './format';
 
 /**
@@ -57,22 +57,58 @@ export const STALLED_NOTICES: readonly StalledNotice[] = [
 /** `/stats` polls in a row without an answer after which the relay's last stats count as stale. */
 export const RELAY_STATS_MAX_MISSES = 2;
 
+/** A `/stats` answer's running totals, at `at` ms (the controller's clock). */
+export interface RelaySample extends RelayTotals {
+  at: number;
+}
+
+/**
+ * The relay's samples of the last `STALLED_AFTER_MS` (one older as the base) after `sample`. A total
+ * that went back (the relay restarted) starts them over.
+ */
+export function nextRelaySamples(
+  samples: readonly RelaySample[],
+  sample: RelaySample,
+): RelaySample[] {
+  const last = samples.at(-1);
+  if (last && (sample.read < last.read || sample.served < last.served)) return [sample];
+  const kept = [...samples, sample];
+  const firstInWindow = kept.findIndex((s) => sample.at - s.at < STALLED_AFTER_MS);
+  return kept.slice(Math.max(0, firstInWindow - 1));
+}
+
 /**
  * The relay's data flow for `stalledNotice`: `unreachable` once its `/stats` went unanswered
  * `RELAY_STATS_MAX_MISSES` times in a row (its last rates are stale then), null without its rates
- * (api < 3).
+ * (api < 3). Each rate is at least the average of its total over `samples` (the stalled window):
+ * the relay serves a web-seed response in bursts, waiting seconds for each next chunk from a slow
+ * swarm, and one poll's `servedRate` can read 0 between them.
  */
 export function relayFlowOf(
   stats: RelayStats | null,
   misses: number,
+  samples: readonly RelaySample[] = [],
 ): RelayFlow | 'unreachable' | null {
   if (misses >= RELAY_STATS_MAX_MISSES) return 'unreachable';
   if (!stats?.rates) return null;
   return {
     activePeers: stats.activePeers,
-    download: stats.rates.download,
-    served: stats.rates.served,
+    download: Math.max(
+      stats.rates.download,
+      averageRate(samples, (s) => s.read),
+    ),
+    served: Math.max(
+      stats.rates.served,
+      averageRate(samples, (s) => s.served),
+    ),
   };
+}
+
+function averageRate(samples: readonly RelaySample[], total: (s: RelaySample) => number): number {
+  const first = samples[0];
+  const last = samples.at(-1);
+  if (!first || !last || last.at <= first.at) return 0;
+  return Math.max(0, (total(last) - total(first)) / ((last.at - first.at) / 1000));
 }
 
 /**

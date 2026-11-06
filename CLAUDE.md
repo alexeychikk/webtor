@@ -505,6 +505,9 @@ urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer cou
   the `stalled` notice becomes the stuck side: `relay-swarm-stalled` (its peers send nothing; detail =
   peer count), `relay-not-serving` (it downloads, the browser gets nothing) or `relay-swarm-slow` (data
   flows, no piece completes in 30 s); detail = its download rate, in `controller.stalledDetail`.
+  Each rate is at least its running total's average over the last 30 s (`bytesReadData`,
+  `bytesServed`; `nextRelaySamples`): a slow swarm's web-seed response comes in bursts, and one
+  poll's `servedRate` reads 0 between them.
   After `RELAY_STATS_MAX_MISSES` (2) unanswered `/stats` polls in a row its last stats are dropped
   as stale and the notice is `relay-not-answering` (`relayFlowOf`).
 - **Relay video conversion (ADR 0007 §2).** An AVI whose video codec is null (DivX/Xvid) plays
