@@ -160,10 +160,6 @@ test('plays through the end and stays ended (no replay from 0)', async ({ page }
 });
 
 /**
- * Plays from 37 s and waits (rAF) for the player's `endOfStream()` call, a moment before the end,
- * with the element not ended yet. Needs `hookEndOfStream` first.
- */
-/**
  * Seeks to `t` (default: the duration) in a microtask right after the first `endOfStream()` from
  * 37 s on: the element ends at most `EOS_AHEAD_S` of media later, too soon for another round trip.
  * Resolves with `ended` just before the seek.

@@ -793,6 +793,7 @@ export class MsePlayer {
     const request = { t, play };
     this.lostEndRequest = request;
     queueMicrotask(() => {
+      this.lostEndRequest = null;
       if (this.destroyed) return;
       const at = request.t >= this.endedAt! - 0.001 && request.play ? 0 : request.t;
       this.opts.onLostEnd?.(at, request.play);
