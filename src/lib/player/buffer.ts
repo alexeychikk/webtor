@@ -145,6 +145,16 @@ export function endSnap(
 }
 
 /**
+ * True when an element that ended at `endedAt` (no seek or play since) no longer reports it.
+ * WebKit's GStreamer MSE backend tears its pipeline down at the end of the stream; once anything
+ * refreshes the element's cached position (e.g. a ManagedMediaSource `startstreaming`), it reads
+ * `currentTime` 0 and `ended` false, with no event, and a seek or play then errors or hangs.
+ */
+export function endLost(endedAt: number | null, ended: boolean, t: number): boolean {
+  return endedAt !== null && (!ended || Math.abs(t - endedAt) > 0.5);
+}
+
+/**
  * How close (s) the playhead must be to the end of the buffered media before a MediaSource whose
  * appends are all done gets `endOfStream()` on a stall or a seek there (`atBufferedEnd`).
  */

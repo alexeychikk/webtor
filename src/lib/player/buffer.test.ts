@@ -5,6 +5,7 @@ import {
   endOfStreamIn,
   bufferedAhead,
   bufferedToEnd,
+  endLost,
   endSnap,
   endedBefore,
   evictionRange,
@@ -72,6 +73,23 @@ describe('bufferedToEnd', () => {
     expect(bufferedToEnd(toRanges([[0, 30]]), 40, 40.08)).toBe(false);
     expect(bufferedToEnd(toRanges([]), 40, 40.08)).toBe(false);
     expect(bufferedToEnd(r, 40, NaN)).toBe(false);
+  });
+});
+
+describe('endLost', () => {
+  it('is false before the element ended or after a seek or play cleared it', () => {
+    expect(endLost(null, false, 0)).toBe(false);
+    expect(endLost(null, true, 40)).toBe(false);
+  });
+
+  it('is false while the element still reports where it ended', () => {
+    expect(endLost(40.08, true, 40.08)).toBe(false);
+  });
+
+  it('is true once the element reads 0 or not ended without a seek (WebKit GStreamer teardown)', () => {
+    expect(endLost(40.08, false, 0)).toBe(true);
+    expect(endLost(40.08, true, 0)).toBe(true);
+    expect(endLost(40.08, false, 40.08)).toBe(true);
   });
 });
 
