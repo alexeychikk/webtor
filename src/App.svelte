@@ -17,6 +17,7 @@
   import HistoryDialog from './lib/history/HistoryDialog.svelte';
   import { loadTorrentFile } from './lib/history/torrent-files';
   import RelayDialog from './lib/torrent/RelayDialog.svelte';
+  import { DiagnosticsCopy } from './lib/player/diagnostics-copy.svelte';
   import { isTorrentFile, readTorrentFile } from './lib/torrent/files';
   import { checkRelayUrl } from './lib/torrent/relay';
   import { relaySettings } from './lib/torrent/relay-settings.svelte';
@@ -29,6 +30,11 @@
   } from './lib/url-hash';
 
   const controller = new PlayerController();
+  const diagnostics = new DiagnosticsCopy({
+    app: () => controller.diagnostics(),
+    relayBase: () => relaySettings.base,
+    infoHash: () => controller.infoHash,
+  });
   let input = $state('');
   let video = $state<HTMLVideoElement>();
   /** What is loaded: a magnet / info hash, or the bytes of an opened .torrent file. */
@@ -347,7 +353,7 @@
       </div>
     </div>
   {/if}
-  <RelayDialog onchange={relayChanged} />
+  <RelayDialog onchange={relayChanged} {diagnostics} />
   <WhyDialog />
   <HistoryDialog {controller} onpick={(entry) => void openFromHistory(entry)} />
 </div>
