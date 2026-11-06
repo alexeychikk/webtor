@@ -144,6 +144,31 @@ rows with page RTT. The swarm-RTT rows keep 4, to show the readahead fix on its 
    connection. Over plain HTTP Chromium opens at most 6 per host, which the bench above hits.
    Small pieces stay slow at high RTT; nothing on the relay's side changes piece size.
 
+## A slow swarm starved the browser's reads (2026-11-06)
+
+"5 peers via relay" and a video that never started. Reproduced on loopback with 16 MiB pieces and
+a `tcp-seeder -upload-rate 500000`: the relay downloaded at the full 500 KB/s, but the page's read
+of the last piece (the MKV Cues) took 59 s and the next piece hit WebTorrent's 60 s abort (then a
+10 s retry), so playback started after ~96 s. The window's chunks were requested from the peers
+first, and anacrolix never takes a sent request back for a more urgent one: a reader's Now priority
+only orders requests not yet sent. Peer queues hold hundreds of chunks (`reqq` up to 1024), so on a
+slow swarm the request waits behind the whole window. Now (`handleWebseed`):
+
+- The window moves only after the read is served (`defer prefetchFrom`), so a request's own pieces
+  are always asked for before the window past it.
+- A read of pieces outside the window that aren't here yet (a seek, the Cues) drops the window and
+  re-requests at once (`leaveWindow`, `outsideWindow`), so it is first in every peer's queue.
+- A read that gets nothing for `stallCheck` while the torrent gets data is starved by the window
+  (`unstarve`): the window is dropped and stays off for `windowHold` (30 s), and pieces are
+  re-requested. On a swarm slower than the video the browser's own requests are all it can use.
+
+The same run then plays after 44 s, as fast as 16 MiB pieces at 500 KB/s allow. The app's stalled
+notice now names the stuck side from `/stats` (`stalledNotice`): `relay-swarm-stalled` (the relay's
+peers send nothing), `relay-not-serving` (the relay downloads but sends the browser nothing) or
+`relay-swarm-slow` (data flows but no piece completes in 30 s). A swarm that sends nothing to a
+relay with peers (the reported 5 of 110 seeds) can't be reproduced in the sandbox; the relay's
+diagnostics log is for that.
+
 ## Consequences
 
 - Without a relay nothing changes. The no-peers message gains "Connect a relay".

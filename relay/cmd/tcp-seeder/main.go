@@ -15,12 +15,13 @@ import (
 
 func main() {
 	pieceLength := flag.Int64("piece-length", 256<<10, "piece length in bytes")
+	uploadRate := flag.Int64("upload-rate", 0, "bytes/s uploaded at most (0 = unlimited): a slow swarm")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: tcp-seeder [-piece-length N] <file-or-dir>")
+		fmt.Fprintln(os.Stderr, "usage: tcp-seeder [-piece-length N] [-upload-rate N] <file-or-dir>")
 		os.Exit(2)
 	}
-	s, err := seedtest.Start(flag.Arg(0), *pieceLength)
+	s, err := seedtest.StartWith(flag.Arg(0), seedtest.Options{PieceLength: *pieceLength, UploadRate: *uploadRate})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tcp-seeder:", err)
 		os.Exit(1)

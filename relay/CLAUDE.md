@@ -48,6 +48,12 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   `DownloadPieces` and trimmed with `CancelPieces` (`nextWindow`), not a parked `Reader`: anacrolix
   wants nothing for a reader that only seeked (`piecesUncached` zeroes its readahead). Its size is
   `AdaptiveReadahead` (30 s of the served rate, between `-readahead` and `-max-readahead`).
+  anacrolix never takes back a request it sent, whatever the priorities later say, so the window
+  must never get ahead of a read (ADR 0006 "A slow swarm starved the browser's reads"): it moves
+  only after the read (`defer prefetchFrom`); a read outside it drops it and re-requests
+  (`leaveWindow`); a read starved behind it drops it for `windowHold` (`unstarve`, from
+  `watchStall`). Tests of a slow swarm: `seedtest.StartWith(path, Options{UploadRate: …})`, or
+  `tcp-seeder -upload-rate <bytes/s>` for the browser.
 - Rates in `/stats` come from `rateMeter`s (5 s window) sampled on each `/stats` call: from swarm
   (`BytesReadUsefulData`), to peers (`BytesWrittenData`), served (`entry.served`, counted by
   `progressReader` and the transcode writer). Bump `APIVersion` and `src/lib/torrent/relay.ts`

@@ -13,7 +13,7 @@
   import Users from '@lucide/svelte/icons/users';
   import type { PlaybackErrorCode } from './errors';
   import PlayerStates from './PlayerStates.svelte';
-  import { playerStates } from './states';
+  import { playerStates, stalledDetails } from './states';
   import AudioMenu from './AudioMenu.svelte';
   import { audioTrackTitle } from './audio-options';
   import { formatSpeed } from './format';
@@ -443,6 +443,7 @@
       phase: controller.phase,
       error: controller.error?.code ?? null,
       notices: controller.notices,
+      details: stalledDetails(controller.notices, controller.stalledDetail),
       subtitleNotice: subtitleNotice
         ? { code: subtitleNotice.code, detail: subtitleNotice.detail }
         : null,

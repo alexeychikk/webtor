@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_REOPENS, nextReopen, nextStarvedFor, watchdogNotice } from './watchdog';
+import { playbackErrorMessage } from './errors';
+import {
+  MAX_REOPENS,
+  RELAY_FLOW_MIN,
+  nextReopen,
+  nextStarvedFor,
+  stalledNotice,
+  watchdogNotice,
+} from './watchdog';
 
 const base = { elapsed: 0, hasMetadata: false, numPeers: 0, starvedFor: 0 };
 
@@ -47,5 +55,43 @@ describe('nextReopen', () => {
   it('starts a new row once the reopened player recovered', () => {
     expect(nextReopen(MAX_REOPENS, true)).toBe(1);
     expect(nextReopen(2, true)).toBe(1);
+  });
+});
+
+describe('stalledNotice', () => {
+  const flow = { activePeers: 5, download: 0, served: 0 };
+  it('is the plain stalled notice without a relay (or its rates)', () => {
+    expect(stalledNotice(null)).toEqual({ code: 'stalled' });
+  });
+  it('blames the swarm when the relay gets nothing from its peers', () => {
+    expect(stalledNotice(flow)).toEqual({ code: 'relay-swarm-stalled', detail: '5' });
+    expect(stalledNotice({ ...flow, download: RELAY_FLOW_MIN - 1 }).code).toBe(
+      'relay-swarm-stalled',
+    );
+  });
+  it('blames the relay when it downloads but sends the browser nothing', () => {
+    expect(stalledNotice({ ...flow, download: 2_500_000 })).toEqual({
+      code: 'relay-not-serving',
+      detail: '2.5 MB/s',
+    });
+  });
+  it('calls the swarm too slow when data reaches the browser but no piece completes', () => {
+    expect(stalledNotice({ ...flow, download: 500_000, served: 480_000 })).toEqual({
+      code: 'relay-swarm-slow',
+      detail: '500 kB/s',
+    });
+  });
+  it('says it in plain words, with the number', () => {
+    expect(playbackErrorMessage('relay-swarm-stalled', '5')).toMatch(
+      /^The relay is connected to 5 peers, but they aren’t sending it any data\. The torrent’s swarm is stuck/,
+    );
+    expect(playbackErrorMessage('relay-swarm-stalled', '1')).toContain('connected to 1 peer,');
+    expect(playbackErrorMessage('relay-swarm-stalled', '0')).toMatch(/^The relay has no peers/);
+    expect(playbackErrorMessage('relay-not-serving', '2.5 MB/s')).toMatch(
+      /^The relay is downloading \(2\.5 MB\/s\) but sends nothing to this browser\. The relay is stuck/,
+    );
+    expect(playbackErrorMessage('relay-swarm-slow', '500 kB/s')).toContain(
+      'its peers send only 500 kB/s',
+    );
   });
 });

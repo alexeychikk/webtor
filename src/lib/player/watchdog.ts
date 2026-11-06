@@ -1,3 +1,5 @@
+import { formatSpeed } from './format';
+
 /**
  * When to show the non-fatal `no-peers` and `stalled` notices (docs/decisions/0002). Pure: the
  * controller samples torrent stats once a second and asks this.
@@ -21,6 +23,47 @@ export function watchdogNotice(s: WatchdogSample): WatchdogNotice {
     return s.numPeers === 0 && s.elapsed >= NO_PEERS_AFTER_MS ? 'no-peers' : null;
   }
   return s.starvedFor >= STALLED_AFTER_MS ? 'stalled' : null;
+}
+
+/** Below this a relay rate counts as nothing (bytes/s): keep-alives and stats, no payload. */
+export const RELAY_FLOW_MIN = 1024;
+
+/** What the relay's `/stats` says about the data flow (api 3 rates, ADR 0006). */
+export interface RelayFlow {
+  activePeers: number;
+  /** From the relay's peers, bytes/s. */
+  download: number;
+  /** From the relay to the browser, bytes/s. */
+  served: number;
+}
+
+export type StalledNotice =
+  'stalled' | 'relay-swarm-stalled' | 'relay-not-serving' | 'relay-swarm-slow';
+
+/** The stalled notices: a relay one says which side is stuck. */
+export const STALLED_NOTICES: readonly StalledNotice[] = [
+  'stalled',
+  'relay-swarm-stalled',
+  'relay-not-serving',
+  'relay-swarm-slow',
+];
+
+/**
+ * Which `stalled` notice to show: with a relay that reports its rates, the side that is stuck, and
+ * the number for its message (`playbackErrorMessage`). Nothing from the relay's peers: the swarm
+ * (`relay-swarm-stalled`, the peer count). The relay gets data but sends the browser none: the
+ * relay (`relay-not-serving`, its download rate). Data reaches the browser, but no piece completed
+ * in `STALLED_AFTER_MS`: a swarm too slow for the torrent's pieces (`relay-swarm-slow`, the rate).
+ */
+export function stalledNotice(relay: RelayFlow | null): { code: StalledNotice; detail?: string } {
+  if (!relay) return { code: 'stalled' };
+  if (relay.served >= RELAY_FLOW_MIN) {
+    return { code: 'relay-swarm-slow', detail: formatSpeed(relay.download) };
+  }
+  if (relay.download >= RELAY_FLOW_MIN) {
+    return { code: 'relay-not-serving', detail: formatSpeed(relay.download) };
+  }
+  return { code: 'relay-swarm-stalled', detail: String(relay.activePeers) };
 }
 
 export interface StarvationSample {

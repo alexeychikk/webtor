@@ -55,7 +55,14 @@ import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
 import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
-import { nextReopen, nextStarvedFor, watchdogNotice } from './watchdog';
+import {
+  STALLED_NOTICES,
+  nextReopen,
+  nextStarvedFor,
+  stalledNotice,
+  watchdogNotice,
+  type RelayFlow,
+} from './watchdog';
 import {
   audioRef,
   matchAudioTrack,
@@ -98,7 +105,7 @@ const SAVE_POSITION_MS = 5000;
 /** The "Resumed at" toast goes once the playhead is this far from where it resumed. */
 const RESUME_TOAST_S = 15;
 /** Notices about the torrent, not the file: they survive a file switch. */
-const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', 'stalled'];
+const TORRENT_NOTICES: readonly PlaybackErrorCode[] = ['no-webrtc', 'no-peers', ...STALLED_NOTICES];
 /** Opened .torrent files that got the relay's web seed (ADR 0007 §2). */
 const withRelayWebseed = new WeakSet<Torrent>();
 
@@ -114,6 +121,8 @@ export class PlayerController {
   stats = $state<TorrentStats>({ numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 });
   /** Non-fatal conditions (`no-peers`, `stalled`, `no-playable-audio`, …). */
   notices = $state<PlaybackErrorCode[]>([]);
+  /** The number in a relay stalled notice's message (`stalledNotice`). */
+  stalledDetail = $state<string | undefined>(undefined);
   error = $state<PlaybackError | null>(null);
   fileName = $state<string | null>(null);
   audioTracks = $state<readonly AudioTrackInfo[]>([]);
@@ -854,8 +863,24 @@ export class PlayerController {
       numPeers: t.numPeers,
       starvedFor: this.starvedFor,
     });
-    const others = this.notices.filter((n) => n !== 'no-peers' && n !== 'stalled');
-    const next = notice ? [notice, ...others] : others;
+    const stalled = notice === 'stalled' ? stalledNotice(this.relayFlow()) : null;
+    const code = stalled?.code ?? notice;
+    const others = this.notices.filter(
+      (n) => n !== 'no-peers' && !(STALLED_NOTICES as readonly string[]).includes(n),
+    );
+    const next = code ? [code, ...others] : others;
     if (next.join() !== this.notices.join()) this.notices = next;
+    if (stalled?.detail !== this.stalledDetail) this.stalledDetail = stalled?.detail;
+  }
+
+  /** The relay's data flow for `stalledNotice`; null without a relay or its rates (api < 3). */
+  private relayFlow(): RelayFlow | null {
+    const relay = this.relayStats;
+    if (!this.viaRelay || !relay?.rates) return null;
+    return {
+      activePeers: relay.activePeers,
+      download: relay.rates.download,
+      served: relay.rates.served,
+    };
   }
 }

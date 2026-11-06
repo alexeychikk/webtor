@@ -41,6 +41,13 @@ func RangeEnd(header string, size int64) int64 {
 	return size
 }
 
+// RangeStart returns the offset the request's byte range starts at, or 0 when the header is absent
+// or not a single range.
+func RangeStart(header string) int64 {
+	first, _, _ := parseRange(header)
+	return first
+}
+
 // RangeMinLength is the smallest file size the request's byte range fits in (0 without a range).
 func RangeMinLength(header string) int64 {
 	first, last, ok := parseRange(header)

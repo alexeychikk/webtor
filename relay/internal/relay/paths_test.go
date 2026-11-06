@@ -71,6 +71,15 @@ func TestRangeEnd(t *testing.T) {
 	}
 }
 
+func TestRangeStart(t *testing.T) {
+	cases := map[string]int64{"": 0, "bytes=0-99": 0, "bytes=500-": 500, "bytes=900-999": 900, "bytes=-100": 0, "bytes=0-1,5-9": 0, "bytes= 10-19": 10}
+	for h, want := range cases {
+		if got := RangeStart(h); got != want {
+			t.Errorf("RangeStart(%q) = %d, want %d", h, got, want)
+		}
+	}
+}
+
 func TestMakeLinks(t *testing.T) {
 	cases := []struct{ public, listen, relay, open string }{
 		{"", "127.0.0.1:7881", "http://127.0.0.1:7881/tok12345", "http://127.0.0.1:7881/#relay=http%3A%2F%2F127.0.0.1%3A7881%2Ftok12345"},

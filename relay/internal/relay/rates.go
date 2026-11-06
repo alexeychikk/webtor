@@ -107,3 +107,13 @@ func nextWindow(old, want pieceRange) (next pieceRange, cancel []pieceRange) {
 	}
 	return next, cancel
 }
+
+// outsideWindow says whether a read of the pieces req lies outside the prefetch window: neither in
+// it nor touching either end (the piece just before it, or the one right after it, is the stream
+// going on).
+func outsideWindow(window, req pieceRange) bool {
+	if window.begin >= window.end || req.begin >= req.end {
+		return false
+	}
+	return req.end < window.begin || req.begin > window.end
+}
