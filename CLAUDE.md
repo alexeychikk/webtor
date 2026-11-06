@@ -198,7 +198,7 @@ src/lib/subtitles/             subtitle sources, parsers and rendering (ADR 0004
   mkv/                         embedded MKV/WebM subtitles: EBML reader (header, Cues, Attachments),
                                cluster scanner, embedded.ts (selector entries + scan ~30 s ahead of the playhead)
 src/lib/torrent/relay.ts       webtor-relay contract: URL check, endpoints, error mapping, stats merge
-  relay-client.ts              fetch glue (metainfo, /v1/info, /stats); relay-settings.svelte.ts
+  relay-client.ts              fetch glue (metainfo, /v1/info, /stats, /v1/diagnostics); relay-settings.svelte.ts
   RelayDialog.svelte           settings dialog (setup steps, Test, privacy copy)
 relay/                         Go module: cmd/webtor-relay, cmd/tcp-seeder (test seeder), internal/relay
 e2e/                           Playwright specs; e2e/support/fixture-server.mjs; e2e/fixtures/
@@ -487,6 +487,14 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   Back-pressure then follows `Pipeline.writtenTo`, not `sb.buffered`. The e2e asserts no
   _underrun_ (`waiting` with < 0.5 s buffered). A busy machine can fire a `waiting` with seconds
   buffered, which says nothing about the player.
+- **Relay diagnostics (ADR 0006).** The relay dialog has "Copy diagnostics" while a relay is set
+  (`DiagnosticsCopy`, `diagnostics-copy.svelte.ts`; pure parts in `diagnostics.ts`): the controller's
+  `diagnostics()` (phase, file, piece window, watchdog, last warnings with URLs cut to origins, video
+  element, browser features) plus the relay's `GET /v1/diagnostics?ih=` (api 4). A 404 there with
+  `/v1/info` api < 4 = too old (app side only, said in the note). `redactRelay` removes the relay URL,
+  token and host from the whole text. Hooks: `relay-diagnostics` (`data-state`
+  `idle|collecting|copied|failed`), `relay-diagnostics-note` (`data-relay` `ok|too-old|failed|none`),
+  `relay-diagnostics-text` (only after a refused copy). e2e: `e2e/relay-diagnostics.spec.ts`.
 - **Relay (opt-in, ADR 0006).** The setting is `localStorage['webtor:relay-url']` (normalised base);
   `#relay=<url>` (the relay's printed Open link) saves it and is stripped with `replaceState`. With a
   relay set, the controller fetches `metainfo` from the relay, then `client.add(bytes, {announce,

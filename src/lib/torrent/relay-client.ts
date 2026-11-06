@@ -2,8 +2,10 @@
  * Fetch glue for webtor-relay (docs/decisions/0006). Decisions (error codes, parsing) are the pure
  * helpers in `relay.ts`; this file only talks HTTP.
  */
+import type { RelayReport } from '../player/diagnostics';
 import { PlaybackError } from '../player/errors';
 import {
+  RELAY_DIAGNOSTICS_API,
   parseRelayInfo,
   parseRelayStats,
   relayErrorCode,
@@ -154,4 +156,40 @@ export async function fetchRelayTranscode(
     return fetchRelayTranscode(url, signal);
   }
   throw new PlaybackError(relayTranscodeErrorCode(failure), relayErrorDetail(failure));
+}
+
+const DIAGNOSTICS_TIMEOUT_MS = 10_000;
+
+/**
+ * The relay's side of a diagnostics report (`GET /v1/diagnostics`, api 4). A relay without the
+ * endpoint answers 404 like a wrong token does, so `/v1/info` tells the two apart. Never rejects.
+ */
+export async function fetchRelayDiagnostics(
+  diagnosticsUrl: string,
+  infoUrl: string,
+): Promise<RelayReport> {
+  let failure: RelayFailure;
+  try {
+    const res = await relayGet(diagnosticsUrl, DIAGNOSTICS_TIMEOUT_MS);
+    return { kind: 'ok', report: await res.json() };
+  } catch (err) {
+    failure = err instanceof RelayRequestError ? err.failure : { kind: 'bad-response' };
+  }
+  if (failure.kind === 'http' && failure.status === 404) {
+    try {
+      const info = await fetchRelayInfo(infoUrl);
+      if (info.api < RELAY_DIAGNOSTICS_API) {
+        return { kind: 'too-old', version: info.version, api: info.api };
+      }
+    } catch (err) {
+      if (err instanceof RelayRequestError) failure = err.failure;
+    }
+  }
+  return { kind: 'failed', reason: relayFailureReason(failure) };
+}
+
+function relayFailureReason(f: RelayFailure): string {
+  if (f.kind === 'network') return 'unreachable';
+  if (f.kind === 'timeout') return 'no answer in time';
+  return relayErrorDetail(f) ?? f.kind;
 }

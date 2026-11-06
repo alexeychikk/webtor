@@ -48,6 +48,13 @@ contract is `src/lib/torrent/relay.ts`: change both together. Flags and behaviou
   `DownloadPieces` and trimmed with `CancelPieces` (`nextWindow`), not a parked `Reader`: anacrolix
   wants nothing for a reader that only seeked (`piecesUncached` zeroes its readahead). Its size is
   `AdaptiveReadahead` (30 s of the served rate, between `-readahead` and `-max-readahead`).
+- Diagnostics (`diagnostics.go`, `eventlog.go`, `logthrottle.go`; ADR 0006): `Diagnostics` keeps
+  bounded `eventLog` rings (count + bytes) per torrent (`register`/`unregister` with the entry) and
+  globally; add events with `s.diag.event(ih, kind, k, v…)`, never per piece or per request (web
+  seed reads go to counters; a read gets an event only when slow, incomplete or the first). Peer
+  addresses only through `MaskAddr`, trackers through `TrackerHost`/`scrubURLs`. `Instrument(cfg)`
+  before `torrent.NewClient` and `InstrumentClient(cl)` after (counting dialers); the test harness
+  does both. Stdout lines that can repeat go through `s.throttle`/`ThrottleLog` (one per key a minute).
 - Rates in `/stats` come from `rateMeter`s (5 s window) sampled on each `/stats` call: from swarm
   (`BytesReadUsefulData`), to peers (`BytesWrittenData`), served (`entry.served`, counted by
   `progressReader` and the transcode writer). Bump `APIVersion` and `src/lib/torrent/relay.ts`

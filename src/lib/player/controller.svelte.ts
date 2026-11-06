@@ -49,6 +49,7 @@ import { isTorrentId } from '../torrent/trackers';
 import { boundedMagnet } from '../history/history';
 import { saveTorrentFile } from '../history/torrent-files';
 import { rememberAudioLanguage } from './audio-preference';
+import { browserFeatures, originsOnly, pushWarning } from './diagnostics';
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { HDR_DISPLAY_QUERY, toneMapped, type HdrFormat } from './hdr';
 import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
@@ -157,6 +158,8 @@ export class PlayerController {
   private relayAbort: AbortController | null = null;
   private relayTimer: ReturnType<typeof setInterval> | undefined;
   private relayStats: RelayStats | null = null;
+  /** The torrent's last warnings and errors (bounded), for "Copy diagnostics". */
+  private warnings: string[] = [];
   /** Watch-state key (watch-state.ts) of the file playing; null when none. */
   private watch: string | null = null;
   /**
@@ -271,13 +274,23 @@ export class PlayerController {
     this.startedAt = performance.now();
     this.starvedFor = 0;
     this.lastDownloaded = verifiedBytes(torrent);
+    this.warnings = [];
+    const warn = (err: unknown) => {
+      if (torrent === this.torrent) {
+        pushWarning(this.warnings, performance.now() - this.startedAt, err);
+      }
+    };
     torrent.on('error', (err) => {
+      warn(err);
       if (torrent !== this.torrent) return;
       // WebTorrent's word for a .torrent file it cannot parse.
       const unreadable = typeof input !== 'string' && /invalid torrent/i.test(String(err));
       this.fail(new PlaybackError(unreadable ? 'invalid-input' : 'torrent-failed', String(err)));
     });
-    torrent.on('warning', (err) => console.warn('torrent:', err));
+    torrent.on('warning', (err) => {
+      warn(err);
+      console.warn('torrent:', err);
+    });
     torrent.on('metadata', () => {
       if (torrent === this.torrent && this.phase === 'connecting') this.phase = 'metadata';
     });
@@ -793,6 +806,87 @@ export class PlayerController {
       index,
       magnet: boundedMagnet(this.magnet),
       ...(typeof this.input === 'string' ? {} : { fromFile: true }),
+    };
+  }
+
+  /**
+   * The app's side of "Copy diagnostics" (diagnostics.ts): playback state, the torrent's swarm and
+   * piece window, the watchdog, the last warnings (URLs cut to their origin) and browser features.
+   */
+  diagnostics(): Record<string, unknown> {
+    const t = this.torrent && !this.torrent.destroyed ? this.torrent : null;
+    const file = t && this.fileIndex !== null ? t.files?.[this.fileIndex] : undefined;
+    const wires: Record<string, number> = {};
+    for (const w of t?.wires ?? [])
+      wires[w.type ?? 'unknown'] = (wires[w.type ?? 'unknown'] ?? 0) + 1;
+    const v = this.video;
+    const buffered = v
+      ? Array.from({ length: v.buffered.length }, (_, i) => [
+          v.buffered.start(i),
+          v.buffered.end(i),
+        ])
+      : [];
+    return {
+      phase: this.phase,
+      error: this.error && {
+        code: this.error.code,
+        detail: this.error.detail && originsOnly(this.error.detail),
+      },
+      notices: this.notices,
+      viaRelay: this.viaRelay,
+      input:
+        this.input === null ? null : typeof this.input === 'string' ? 'magnet' : 'torrent-file',
+      infoHash: this.infoHash,
+      torrent: t && {
+        ready: t.ready,
+        hasMetadata: Boolean(t.files?.length),
+        files: t.files?.length ?? 0,
+        length: t.length,
+        pieceLength: t.pieceLength,
+        numPeers: t.numPeers,
+        wires,
+        downloadSpeed: t.downloadSpeed,
+        uploadSpeed: t.uploadSpeed,
+        progress: t.progress,
+        heldBytes: t.downloaded,
+        verifiedBytes: verifiedBytes(t),
+        openForS: Math.round((performance.now() - this.startedAt) / 100) / 10,
+      },
+      file: file && {
+        index: this.fileIndex,
+        name: file.name,
+        type: /\.([^./]+)$/.exec(file.name)?.[1]?.toLowerCase() ?? '',
+        length: file.length,
+      },
+      audio: {
+        trackId: this.audioTrackId,
+        codec: this.audioCodec,
+        tracks: this.audioTracks.map(({ id, codec, channels, playback, outputCodec }) => ({
+          id,
+          codec,
+          channels,
+          playback,
+          outputCodec,
+        })),
+      },
+      hdr: this.hdr,
+      pieceWindow: { budgetBytes: WINDOW_BYTES, storedBytes: t ? storedBytes(t) : 0 },
+      buffer: this.buffer,
+      watchdog: { starvedForMs: this.starvedFor, lastVerifiedBytes: this.lastDownloaded },
+      relayStats: this.relayStats,
+      warnings: this.warnings.map(originsOnly),
+      video: v && {
+        readyState: v.readyState,
+        networkState: v.networkState,
+        paused: v.paused,
+        ended: v.ended,
+        seeking: v.seeking,
+        currentTime: v.currentTime,
+        duration: v.duration,
+        buffered,
+        error: v.error && { code: v.error.code, message: v.error.message },
+      },
+      browser: browserFeatures(),
     };
   }
 

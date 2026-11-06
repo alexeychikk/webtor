@@ -1,10 +1,13 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
+  import ClipboardCheck from '@lucide/svelte/icons/clipboard-check';
+  import ClipboardCopy from '@lucide/svelte/icons/clipboard-copy';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import X from '@lucide/svelte/icons/x';
   import IconButton from '../ui/IconButton.svelte';
   import { showPageDialog } from '../ui/page-dialog';
+  import type { DiagnosticsCopy } from '../player/diagnostics-copy.svelte';
   import { PLAYBACK_ERROR_MESSAGES } from '../player/errors';
   import {
     checkRelayUrl,
@@ -17,8 +20,20 @@
   import { fetchRelayInfo, RelayRequestError } from './relay-client';
   import { relaySettings } from './relay-settings.svelte';
 
-  /** Called after the user saves or removes a relay, so the app can retry what is playing. */
-  let { onchange }: { onchange?: () => void } = $props();
+  let {
+    onchange,
+    diagnostics,
+  }: {
+    /** Called after the user saves or removes a relay, so the app can retry what is playing. */
+    onchange?: () => void;
+    /** "Copy diagnostics" while a relay is set. */
+    diagnostics?: DiagnosticsCopy;
+  } = $props();
+
+  let diagnosticsText = $state<HTMLTextAreaElement>();
+  $effect(() => {
+    if (diagnostics?.state === 'failed') diagnosticsText?.select();
+  });
 
   // Relay releases (tag relay-v*) are the repository's only releases and are marked latest.
   const RELEASES_URL = 'https://github.com/alexeychikk/webtor/releases/latest';
@@ -45,6 +60,7 @@
       url = initial;
       touched = initial !== '';
       test = { state: 'idle' };
+      diagnostics?.reset();
       void showPageDialog(dialog, () => relaySettings.dialogOpen);
     } else if (!relaySettings.dialogOpen && dialog.open) {
       dialog.close();
@@ -169,6 +185,50 @@
       </p>
     {/if}
 
+    {#if relaySettings.base && diagnostics}
+      <h3>Diagnostics</h3>
+      <p>
+        Playback stalls? Copy a report and send it with your bug report. It holds the relay’s recent
+        events for the torrent playing and this page’s playback state. Peer addresses are masked;
+        the relay URL and its token are left out.
+      </p>
+      <button
+        type="button"
+        class="btn"
+        data-testid="relay-diagnostics"
+        data-state={diagnostics.state}
+        disabled={diagnostics.state === 'collecting'}
+        onclick={() => void diagnostics.copy()}
+      >
+        {#if diagnostics.state === 'copied'}<ClipboardCheck size={18} aria-hidden="true" />
+          Copied{:else if diagnostics.state === 'collecting'}<span class="icon spin"
+            ><LoaderCircle size={18} aria-hidden="true" /></span
+          >Collecting…{:else}<ClipboardCopy size={18} aria-hidden="true" /> Copy diagnostics{/if}
+      </button>
+      {#if diagnostics.note && diagnostics.state !== 'collecting'}
+        <p
+          class="diagnostics-note"
+          data-testid="relay-diagnostics-note"
+          data-relay={diagnostics.relay}
+          aria-live="polite"
+        >
+          {diagnostics.note}
+        </p>
+      {/if}
+      {#if diagnostics.state === 'failed'}
+        <label for="relay-diagnostics-text"
+          >The clipboard refused it. Copy the report from here:</label
+        >
+        <textarea
+          id="relay-diagnostics-text"
+          data-testid="relay-diagnostics-text"
+          readonly
+          rows="6"
+          value={diagnostics.text}
+          bind:this={diagnosticsText}></textarea>
+      {/if}
+    {/if}
+
     <p class="privacy">
       <strong>Privacy:</strong> the relay sees every byte and every torrent you open. Swarm peers and
       trackers see the relay's IP address — your home IP when it runs on your computer, just as with qBittorrent.
@@ -255,6 +315,21 @@
   }
   .transcode[data-available='false'] {
     color: var(--warning);
+  }
+  .diagnostics-note {
+    margin-top: var(--space-2);
+    color: var(--text-muted);
+  }
+  textarea {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-1);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    resize: vertical;
   }
   .privacy {
     margin: var(--space-5) 0;
