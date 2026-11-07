@@ -28,14 +28,13 @@
   import { hideDelay, remainingDelay } from './auto-hide';
   import {
     DOUBLE_TAP_MS,
-    formatStreak,
     NO_TAPS,
     onTap,
     SEEK_COALESCE_MS,
     SEEK_STREAK_MS,
     tapZone,
-    type SeekSide,
   } from './touch-seek';
+  import { onSkip, SKIP_STREAK_MS, streakLabel, type SeekStreak } from './seek-streak';
   import { provideControlsShown } from '../ui/tooltip-context';
   import type { Flash } from './centre';
   import { MediaState } from './media-state.svelte';
@@ -341,8 +340,23 @@
   let streakTimer: ReturnType<typeof setTimeout> | undefined;
   let seekTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingSeek = 0;
-  /** The running streak, for the overlay (`n` restarts its pulse on every tap). */
-  let streak = $state<{ side: SeekSide; total: number; n: number } | null>(null);
+  /** The overlay of the running streak or skips (seek-streak.ts; `n` restarts its pulse). */
+  let streak = $state<SeekStreak | null>(null);
+
+  function showStreak(next: SeekStreak, ms: number, onEnd?: () => void) {
+    streak = next;
+    clearTimeout(streakTimer);
+    streakTimer = setTimeout(() => {
+      onEnd?.();
+      streak = null;
+    }, ms);
+  }
+
+  /** A relative skip (←/→, the centre ±5 s buttons): seeks and adds it to the overlay. */
+  function skip(by: number) {
+    seekBy(by);
+    showStreak(onSkip(streak, by, performance.now()), SKIP_STREAK_MS);
+  }
 
   /** A tap that may be a seek tap: on the picture (no control, menu, card or toast), file open. */
   function seekTapTarget(target: EventTarget | null) {
@@ -389,12 +403,9 @@
       }, DOUBLE_TAP_MS);
     } else {
       queueSeek(action.by);
-      streak = { side: action.side, total: action.total, n: (streak?.n ?? 0) + 1 };
-      clearTimeout(streakTimer);
-      streakTimer = setTimeout(() => {
-        taps = NO_TAPS;
-        streak = null;
-      }, SEEK_STREAK_MS);
+      const at = performance.now();
+      const next = { side: action.side, total: action.total, at, n: (streak?.n ?? 0) + 1 };
+      showStreak(next, SEEK_STREAK_MS, () => (taps = NO_TAPS));
     }
   }
 
@@ -571,7 +582,7 @@
         togglePlay();
         break;
       case 'seek':
-        seekVideo(v, seekTarget(v.currentTime, action.by, v.duration));
+        skip(action.by);
         break;
       case 'volume':
         v.volume = volumeTarget(v.muted ? 0 : v.volume, action.by);
@@ -753,7 +764,7 @@
       shown={controlsShown}
       covered={states.card !== null}
       ontoggleplay={togglePlay}
-      onseek={seekBy}
+      onseek={skip}
     />
     <PlayerStates
       card={states.card}
@@ -780,7 +791,7 @@
         {#key s.n}
           <span class="seek-streak-label">
             {#if s.side === 'back'}<ChevronsLeft size={28} aria-hidden="true" />{/if}
-            <span>{formatStreak(s.total)}</span>
+            <span>{streakLabel(s.side, s.total)}</span>
             {#if s.side === 'forward'}<ChevronsRight size={28} aria-hidden="true" />{/if}
           </span>
         {/key}
@@ -1043,7 +1054,7 @@
     align-items: center;
     min-height: min(30rem, 90vh);
   }
-  /* Double-tap seek streak: a soft half-disc on that side with the amount (YouTube-like). */
+  /* Seek streak (double-tap, ←/→, centre ±5 s): a soft half-disc on that side with the amount (YouTube-like). */
   .seek-streak {
     position: absolute;
     top: 0;
