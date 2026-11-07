@@ -28,12 +28,8 @@ export interface ByteRange {
  */
 export type ReadRole = 'demux' | 'scan' | 'once';
 
-interface Sample extends LearnedPoint {
-  /** Element time of a fragment the pipelines produced. */
-  time: number;
-  /** Where the reads were then: the media at `time` lies before it (up to the read slack). */
-  byte: number;
-}
+/** A fragment's element time with the read cursor then: its media lies before it (up to the slack). */
+type Sample = LearnedPoint;
 
 export class ByteWindow {
   private samples: Sample[] = [];
