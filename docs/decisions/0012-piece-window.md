@@ -76,6 +76,32 @@ after a seek.
   grows). `downloaded` now drops when pieces are evicted, and `received` is no substitute: it also
   counts protocol bytes, which a failing web seed's retries keep adding.
 
+### Seek bar
+
+The seek bar draws the held pieces of the playing file ("downloaded", under "buffered") on its
+**time** axis. Byte fractions are not time: in a VBR file (low-bitrate credits), the window
+around the playhead was drawn far right of it, with a gap. So `byte-time.ts` maps each held byte
+range (`downloadedBytes`, seek.ts: pieces → file bytes, through the file's offset in the torrent)
+to element time, piecewise-linear through points where the file says which time sits at which
+byte (`MsePlayer.byteTimeIndex()`):
+
+- **MKV/WebM:** the Cues (`readCuePoints`, read once through a `once` window source), cluster
+  start → cue time − `startTime`. The whole index: bytes after the last cue run on to the end of
+  the media (the Cues or Attachments after the last Cluster, else the Segment's end) = duration.
+- **AVI:** the video's keyframe offsets (`AviDemuxer.byteTimeIndex()`); whole once its index is
+  complete, still growing during a `movi` scan.
+- **Anything else (MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
+  (fragment start time, read cursor) samples, plus (read end, duration) once every pipeline
+  appended through the end. The cursor is past its fragment's media, so these points place bytes
+  early, never late: the layer may start a little before the playhead, never after it.
+
+Byte 0 is time 0 (the header). Without a whole index, bytes past the last point are left out
+rather than guessed; with no points at all the layer is empty. Ranges re-map every tick, so
+evicted ones disappear and re-downloaded ones come back at their times after any seek.
+`byte-time.test.ts` covers the mapping; `e2e/seek-downloaded.spec.ts` (chromium + webkit) checks
+that the layer covers the playhead after keys, seek-bar clicks and drags, far jumps, touch
+skips and a resume, and that evicted ranges go.
+
 ## Consequences
 
 - Memory stays at about the budget, however long the file and however long the watch. A reload

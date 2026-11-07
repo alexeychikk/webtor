@@ -287,6 +287,11 @@ export class MsePlayer {
   /** Runs `checkStuckSeek` while the element is seeking; null once `onStuckSeek` was asked. */
   private stuckSeekTimer: ReturnType<typeof setTimeout> | undefined | null;
   private seekGen = 0;
+  /**
+   * `seekGen` of a restart still clearing the buffers and starting its pipelines; 0 = none. Until
+   * it did, `sb.buffered` still shows the media it is about to remove.
+   */
+  private restarting = 0;
   private readonly abort = new AbortController();
   private readonly bufferAhead: number;
   private switchGen = 0;
@@ -1059,7 +1064,10 @@ export class MsePlayer {
     this.opts.onNotice?.('relay-transcode-slow');
   }
 
-  /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
+  /**
+   * Seek: nothing to do if the target is buffered everywhere (and no restart is about to clear the
+   * buffers), else restart at the keyframe before it.
+   */
   private onSeeking() {
     this.reopen();
     const t = this.video.currentTime;
@@ -1082,12 +1090,12 @@ export class MsePlayer {
       this.video.currentTime = snap;
       return;
     }
-    if (!this.seekNeedsRestart(t)) return void this.maybeEndOfStream();
+    if (!this.restarting && !this.seekNeedsRestart(t)) return void this.maybeEndOfStream();
     clearTimeout(this.seekTimer);
     this.seekTimer = setTimeout(() => {
       // The appends this seek woke may have reached the end meanwhile (see `seekNeedsRestart`).
       const now = this.video.currentTime;
-      if (!this.appendedToEnd(now)) void this.restartAt(now);
+      if (this.restarting || !this.appendedToEnd(now)) void this.restartAt(now);
       else this.maybeEndOfStream();
     }, SEEK_DEBOUNCE_MS);
   }
@@ -1169,6 +1177,7 @@ export class MsePlayer {
   /** `t` is element time; the keyframe lookup and trim work in source time. */
   private async restartAt(t: number) {
     const gen = ++this.seekGen;
+    this.restarting = gen;
     this.bytes.restart();
     // Stop the old pipelines first so their reads stop competing with the keyframe lookup.
     const stopped = this.pipelines.map((p) => ({ p, ...this.stopPipeline(p) }));
@@ -1195,6 +1204,8 @@ export class MsePlayer {
       );
     } catch (err) {
       if (gen === this.seekGen) this.fail(err);
+    } finally {
+      if (this.restarting === gen) this.restarting = 0;
     }
   }
 

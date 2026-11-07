@@ -43,7 +43,7 @@ pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
                     #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail + start-stress
-                    #   + piece-window
+                    #   + piece-window + seek-downloaded
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -169,7 +169,9 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
                                `playerStates`/`errorActions` are the pure rules, titles in `PLAYBACK_ERROR_TITLES`
   PlayerCentre.svelte centre.ts   centre of the picture: play/pause/replay circle, toggle flash, loading/buffering
                                spinner, touch ±5 s (`centreState` is the pure rule)
-  media-state.svelte.ts seek.ts   `<video>` state as runes; `downloadedRanges` (piece bitfield → file fractions)
+  media-state.svelte.ts seek.ts   `<video>` state as runes; `downloadedBytes` (piece bitfield → file byte ranges)
+  byte-time.ts                 seek bar's downloaded layer in time: byte ranges → element time through the
+                               MKV Cues / AVI keyframes / learned read points (ADR 0012 "Seek bar")
   avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
@@ -288,9 +290,9 @@ docs/decisions/                ADRs
   `PlaybackErrorCode`), `subtitle-upload` (hidden file input, always in the screen), `screen` (the
   container our fullscreen button, the `f` shortcut and a double-click on the video fullscreen),
   `title` (file name, top strip), `controls` (our control bar; class `shown`) with `play-pause` (not
-  on touch), `seek` (`seek-downloaded`, `seek-buffered`: one child per range; `seek-hover` time
-  chip), `time`, `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label`
-  "Fullscreen" / "Exit fullscreen"; absent without any fullscreen), `tooltip` (inside an icon button
+  on touch), `seek` (`seek-downloaded`, `seek-buffered`: one child per range,
+  `data-start`/`data-end` = fractions of the duration; `seek-hover` time chip), `time`, `mute`,
+  `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label` "Fullscreen" / "Exit fullscreen"; absent without any fullscreen), `tooltip` (inside an icon button
   while shown), `centre` (`data-state` `loading|buffering|play|pause|replay|none`) with
   `centre-button` and, on touch, `seek-back` / `seek-forward`, `seek-streak` (skip overlay: double-tap, ←/→, centre ±5 s),
   and `ass-canvas` (the JASSUB overlay; exists only while an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas
@@ -485,6 +487,9 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     stream"); `endSnap` would have to cover that.
   - Stress check: `STRESS_OPENS=120 pnpm exec playwright test --project=webkit start-stress`
     (prints the log of every open that needed a reopen).
+- **A seek during a restart always restarts** (`restarting`, `onSeeking`): until the running restart
+  cleared the buffers, `sb.buffered` still shows the media it is about to remove, and a seek "into
+  it" was left with nothing (a −5 s right after a +10 s stalled for good).
 - **Audio switch keeps the old track buffered** (ADR 0003): never `remove()` audio ahead of the
   playhead to make room for a new track. The new pipeline's first fragment can take seconds
   (transcoder start), and an empty buffer stalls the element. Let the new appends overwrite it.
