@@ -71,6 +71,22 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   Then restart both conversions at `trim.start = K`. Reads issued by the new conversion re-prioritise
   pieces. WebTorrent reads selected ranges first. MKV Cues and MP4 `moov`-at-end sit at the file tail:
   the first read fetches those few pieces.
+- **Decode errors (2026-11-07): open the file again, never fatal at once.** WebKit's GStreamer
+  backend (Linux; Playwright WebKit) sets `max-errors` to 0 on its decoders
+  (`MediaPlayerPrivateGStreamer::configureVideoDecoder`), so one packet gst-libav's `avdec_h264`
+  can't send to FFmpeg (`avcodec_send_packet` < 0, "Failed to send data for decoding") is a
+  pipeline error and a MediaError `MEDIA_ERR_DECODE`; GStreamer's own default (-1) only warns.
+  It was seen in a few runs of quick →/← streaks (`e2e/seek-downloaded.spec.ts`, PR #53) and never
+  again in ~40 WebKit runs of the same streaks since (`e2e/seek-quick.spec.ts` included; with and
+  without CPU load, on builds with and without #53's seek-during-restart fix). Nothing in our
+  appends was found to cause it: every `remove`/`abort`/`timestampOffset` runs idle (`whenIdle`),
+  and a restart aborts the parser before the next init segment. Safari plays through AVFoundation,
+  not this GStreamer path. So `MsePlayer`
+  hands a decode error to the controller (`onDecodeError`), which opens the file again at the
+  playhead or seek target in a new MsePlayer, like a stuck seek (`reopenFile`): at most
+  `MAX_REOPENS` in a row, and a reopened player that fails again within `DECODE_SPOT_S` (5 s) of
+  where it was reopened did not recover (`nextDecodeReopen`), so media that can't be decoded ends
+  in the error card instead of reopening forever.
 - **Video is never transcoded.** Copy when
   `MediaSource.isTypeSupported('video/mp4; codecs="' + await track.getCodecParameterString() + '"')`.
   Otherwise show `unsupported-video-codec`. Real-time software video encoding in a tab is not viable.

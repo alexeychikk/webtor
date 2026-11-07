@@ -131,6 +131,8 @@ class StalePipeline extends Error {}
 const SEEK_DEBOUNCE_MS = 150;
 /** Bit rate of the silence after an audio track that ends before the video (`fillSilence`). */
 const SILENCE_BITRATE = 64_000;
+/** `MediaError.MEDIA_ERR_DECODE`. */
+const MEDIA_ERR_DECODE = 3;
 /** A seek with its target buffered in every SourceBuffer is stuck after this long (`onStuckSeek`). */
 const STUCK_SEEK_MS = 4000;
 /**
@@ -268,6 +270,13 @@ export interface MsePlayerOptions {
    */
   onLostEnd?(t: number, play: boolean): void;
   /**
+   * The element failed to decode (`MEDIA_ERR_DECODE`) with the playhead or seek target at `t`. The
+   * element is dead then, so the owner opens the file again at `t` in a new MsePlayer. WebKit's
+   * GStreamer backend fails so after some quick seek streaks ("Failed to send data for decoding",
+   * ADR 0003 "Decode errors"). Asked at most once per player; without it the error fails it.
+   */
+  onDecodeError?(t: number): void;
+  /**
    * Bytes the piece store may hold (ADR 0012): the ahead target shrinks so that much media at the
    * file's mean rate fits (`aheadWithin`).
    */
@@ -292,6 +301,8 @@ export class MsePlayer {
    * it did, `sb.buffered` still shows the media it is about to remove.
    */
   private restarting = 0;
+  /** `onDecodeError` was asked (once per player). */
+  private decodeErrorAsked = false;
   private readonly abort = new AbortController();
   private readonly bufferAhead: number;
   private switchGen = 0;
@@ -933,8 +944,13 @@ export class MsePlayer {
       'error',
       () => {
         const e = this.video.error;
-        if (e)
-          this.fail(new PlaybackError('playback-failed', e.message || `media error ${e.code}`));
+        if (!e || this.destroyed) return;
+        if (e.code === MEDIA_ERR_DECODE && this.opts.onDecodeError && !this.decodeErrorAsked) {
+          this.decodeErrorAsked = true;
+          console.warn(`decode error at ${this.video.currentTime.toFixed(2)} s:`, e.message);
+          return this.opts.onDecodeError(this.video.currentTime);
+        }
+        this.fail(new PlaybackError('playback-failed', e.message || `media error ${e.code}`));
       },
       { signal },
     );

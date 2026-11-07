@@ -7,8 +7,7 @@ import { fixtureMagnet } from './support/fixtures';
 // piece-window.spec.ts settings, so the small fixture is read in pieces and evicted behind the
 // playhead. Without an index (points learned from the reads): offset.ts (MPEG-TS) and vbr.mp4 (30 s,
 // 93 % of the bytes in its first half), with the default demuxer cache too, which reads the file
-// at once. WebKit gets its quick seek streaks spaced out: GStreamer fails to decode after some (on
-// main too), which is not what this spec checks.
+// at once.
 
 const DURATION = 40;
 /** Seconds the layer may start after the playhead: a 1 s tick reads the playhead later. */
@@ -93,7 +92,6 @@ async function settle(page: Page) {
 
 test('the layer covers the playhead across keys, seek-bar jumps and evictions', async ({
   page,
-  browserName,
 }) => {
   await open(page);
   await expectNoGap(page, 'start');
@@ -105,17 +103,13 @@ test('the layer covers the playhead across keys, seek-bar jumps and evictions', 
   await page.keyboard.press('ArrowRight');
   await settle(page);
   await expectNoGap(page, '→');
-  for (let i = 0; i < 3; i++) {
-    await page.keyboard.press('ArrowRight');
-    if (browserName === 'webkit') await settle(page);
-  }
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowRight');
   await settle(page);
   await expectNoGap(page, '→ streak');
   await page.keyboard.press('ArrowLeft');
   await settle(page);
   await expectNoGap(page, '←');
   await page.keyboard.down('ArrowLeft');
-  if (browserName === 'webkit') await settle(page);
   await page.keyboard.down('ArrowLeft');
   await page.keyboard.up('ArrowLeft');
   await settle(page);

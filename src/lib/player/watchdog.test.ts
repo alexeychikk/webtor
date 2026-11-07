@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { RelayStats } from '../torrent/relay';
 import { playbackErrorMessage } from './errors';
 import {
+  DECODE_SPOT_S,
   MAX_REOPENS,
   RELAY_FLOW_MIN,
   RELAY_STATS_MAX_MISSES,
   STALLED_AFTER_MS,
   nextRelaySamples,
+  nextDecodeReopen,
   nextReopen,
   nextStarvedFor,
   relayFlowOf,
@@ -60,6 +62,24 @@ describe('nextReopen', () => {
   it('starts a new row once the reopened player recovered', () => {
     expect(nextReopen(MAX_REOPENS, true)).toBe(1);
     expect(nextReopen(2, true)).toBe(1);
+  });
+});
+
+describe('nextDecodeReopen', () => {
+  it('counts reopens in a row, then fails', () => {
+    expect(nextDecodeReopen(0, false, 0, 12)).toBe(1);
+    expect(nextDecodeReopen(1, false, 12, 12)).toBe(2);
+    expect(nextDecodeReopen(MAX_REOPENS, false, 12, 30)).toBeNull();
+  });
+  it('starts a new row once the reopened player recovered and failed elsewhere', () => {
+    expect(nextDecodeReopen(MAX_REOPENS, true, 12, 12 + DECODE_SPOT_S + 1)).toBe(1);
+    expect(nextDecodeReopen(2, true, 20, 3)).toBe(1);
+  });
+  it('keeps the row when the reopened player fails again at the same spot', () => {
+    expect(nextDecodeReopen(1, true, 12, 12)).toBe(2);
+    expect(nextDecodeReopen(2, true, 12, 12 + DECODE_SPOT_S)).toBe(3);
+    expect(nextDecodeReopen(MAX_REOPENS, true, 12, 14)).toBeNull();
+    expect(nextDecodeReopen(1, true, 0, 0.5)).toBe(2);
   });
 });
 

@@ -60,6 +60,7 @@ import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import {
   RELAY_STATS_MAX_MISSES,
   STALLED_NOTICES,
+  nextDecodeReopen,
   nextReopen,
   nextStarvedFor,
   nextRelaySamples,
@@ -383,6 +384,12 @@ export class PlayerController {
         onLostEnd: (t, play) => {
           if (run === this.run) void this.reopenFile(t, 0, play);
         },
+        onDecodeError: (t) => {
+          if (run !== this.run) return;
+          const count = nextDecodeReopen(reopen?.count ?? 0, recovered, reopen?.at ?? 0, t);
+          if (count !== null) void this.reopenFile(t, count);
+          else this.fail(new PlaybackError('playback-failed', video.error?.message || undefined));
+        },
         onStuckSeek: (t) => {
           if (run !== this.run) return;
           const count = nextReopen(reopen?.count ?? 0, recovered);
@@ -476,7 +483,8 @@ export class PlayerController {
    * A seek got stuck in the browser (`onStuckSeek`, WebKit): the same file again in a new
    * MsePlayer, at `t`, playing if it was. `count` reopens in a row: after `MAX_REOPENS` a stuck
    * seek fails the open (an error with Retry, never an endless spinner). Also after the element
-   * lost its end (`onLostEnd`), at the seek's target, playing if `play`.
+   * lost its end (`onLostEnd`), at the seek's target, playing if `play`, and after a decode error
+   * (`onDecodeError`), counted like a stuck seek (`nextDecodeReopen`).
    */
   private async reopenFile(t: number, count: number, play?: boolean) {
     const torrent = this.torrent;
