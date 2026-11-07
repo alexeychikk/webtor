@@ -86,8 +86,9 @@ test('a decode error during a streak opens the file again at the seek target', a
 
 test('decode errors again and again at one spot end in the error card', async ({ page }) => {
   await open(page);
-  await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = 20));
-  await playsOn(page, 'at 20 s');
+  // Away from the start without a seek: a reopen there can get stuck (CLAUDE.md "The start"),
+  // and stuck seeks count towards the same reopens.
+  await expect.poll(() => prop(page, 'currentTime'), { timeout: 30_000 }).toBeGreaterThan(10);
   for (let i = 0; i < 3; i++) {
     const { src } = await decodeError(page);
     await expect.poll(() => prop(page, 'src'), { message: `reopen ${i + 1}` }).not.toBe(src);
