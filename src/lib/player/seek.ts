@@ -86,3 +86,33 @@ export function seekVideo(video: HTMLVideoElement, t: number): boolean {
   video.currentTime = t;
   return true;
 }
+
+/** Where a reopen starts: null = from the beginning, near it (a seek is what got stuck there). */
+export function reopenAt(t: number): number | null {
+  return t > 1 ? t : null;
+}
+
+/**
+ * While a file opens again (`reopenFile`), `video.currentTime` reads and writes `reopen.at`, so a
+ * seek in that time (a key of a streak) moves where it reopens instead of being lost. Release it
+ * once the new player reads where to start; it leaves an accessor that replaced it alone.
+ */
+export function seekWhileReopening(
+  video: HTMLVideoElement,
+  reopen: { at: number | null },
+): () => void {
+  const time: PropertyDescriptor = {
+    configurable: true,
+    enumerable: true,
+    get: () => reopen.at ?? 0,
+    set: (t: number) => {
+      if (Number.isFinite(t)) reopen.at = reopenAt(Math.max(0, t));
+    },
+  };
+  Object.defineProperty(video, 'currentTime', time);
+  return () => {
+    const now = Object.getOwnPropertyDescriptor(video, 'currentTime');
+    if (!now || now.get !== time.get || now.set !== time.set) return;
+    Reflect.deleteProperty(video, 'currentTime');
+  };
+}

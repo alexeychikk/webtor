@@ -55,7 +55,13 @@ import { HDR_DISPLAY_QUERY, toneMapped, type HdrFormat } from './hdr';
 import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
 import { downloadedTimes } from './byte-time';
-import { downloadedBytes, sameRanges, type FractionRanges } from './seek';
+import {
+  downloadedBytes,
+  reopenAt,
+  sameRanges,
+  seekWhileReopening,
+  type FractionRanges,
+} from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import {
   RELAY_STATS_MAX_MISSES,
@@ -338,7 +344,7 @@ export class PlayerController {
     run: number,
     torrent: Torrent,
     index: number,
-    reopen?: { at: number | null; play: boolean; count: number },
+    reopen?: { at: number | null; play: boolean; count: number; release(): void },
   ): Promise<void> {
     const video = this.video!;
     const file = torrent.files[index]!;
@@ -380,7 +386,11 @@ export class PlayerController {
           }
         },
         restoreAudio: (tracks) => matchAudioTrack(tracks, stored?.audio),
-        startAt: (duration) => (reopen ? reopen.at : resumePoint(stored?.position, duration)),
+        startAt: (duration) => {
+          if (!reopen) return resumePoint(stored?.position, duration);
+          reopen.release();
+          return reopen.at;
+        },
         onLostEnd: (t, play) => {
           if (run === this.run) void this.reopenFile(t, 0, play);
         },
@@ -495,8 +505,13 @@ export class PlayerController {
     const run = ++this.run;
     this.closeFile();
     this.phase = 'buffering';
-    // Near the start, start over rather than seek (a seek is what got stuck).
-    await this.openFile(run, torrent, index, { at: t > 1 ? t : null, play, count });
+    const reopen = { at: reopenAt(t), play, count, release: () => {} };
+    reopen.release = seekWhileReopening(video, reopen);
+    try {
+      await this.openFile(run, torrent, index, reopen);
+    } finally {
+      reopen.release();
+    }
   }
 
   /** Tears down the playing file (MsePlayer and its SourceBuffers, subtitle sources), keeps the torrent. */

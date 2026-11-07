@@ -3,7 +3,9 @@ import {
   downloadedBytes,
   endSeekRedundant,
   pointerFraction,
+  reopenAt,
   sameRanges,
+  seekWhileReopening,
   timeFractions,
 } from './seek';
 
@@ -88,5 +90,41 @@ describe('endSeekRedundant', () => {
     expect(endSeekRedundant(39.9, 34.9, 40.08, false)).toBe(false);
     expect(endSeekRedundant(10, 40.08, NaN, false)).toBe(false);
     expect(endSeekRedundant(10, 40.08, Infinity, false)).toBe(false);
+  });
+});
+
+describe('seekWhileReopening', () => {
+  class Element {
+    #t = 3;
+    get currentTime() {
+      return this.#t;
+    }
+    set currentTime(t: number) {
+      this.#t = t;
+    }
+  }
+
+  it('moves the reopen target with seeks until released', () => {
+    const video = new Element() as unknown as HTMLVideoElement;
+    const reopen = { at: reopenAt(16) };
+    const release = seekWhileReopening(video, reopen);
+    expect(video.currentTime).toBe(16);
+    video.currentTime += 5;
+    expect(reopen.at).toBe(21);
+    video.currentTime = 0.5;
+    expect(reopen.at).toBeNull();
+    expect(video.currentTime).toBe(0);
+    video.currentTime = NaN;
+    expect(reopen.at).toBeNull();
+    release();
+    expect(video.currentTime).toBe(3);
+  });
+
+  it('leaves an accessor installed after it alone', () => {
+    const video = new Element() as unknown as HTMLVideoElement;
+    const release = seekWhileReopening(video, { at: 10 });
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => 42 });
+    release();
+    expect(video.currentTime).toBe(42);
   });
 });

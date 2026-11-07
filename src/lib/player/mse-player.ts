@@ -307,6 +307,11 @@ export class MsePlayer {
   private decodeErrorAsked = false;
   /** The element's time at its last `seeking` or `timeupdate`; null before either. */
   private lastTime: number | null = null;
+  /**
+   * The target of the element's seek that has not completed: set as it is written (`seekTo`; a
+   * decode error can come before `seeking`), cleared by `seeked`.
+   */
+  private pendingSeek: number | null = null;
   /** A failure came after the MediaSource closed and waits for the element's `error` (`fail`). */
   private awaitingElementError = false;
   /** `onError` was told (`report`). */
@@ -815,6 +820,7 @@ export class MsePlayer {
     this.seekTo = (t) => {
       this.endedAt = null;
       set.call(video, t);
+      this.pendingSeek = get.call(video) as number;
     };
     const lost = () =>
       endLost(this.endedAt, nativeEnded.call(video) as boolean, get.call(video) as number);
@@ -924,8 +930,15 @@ export class MsePlayer {
     }
     this.video.addEventListener('seeking', () => this.armStuckSeek(), { signal });
     this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
-    for (const ev of ['seeking', 'timeupdate'])
-      this.video.addEventListener(ev, () => (this.lastTime = this.video.currentTime), { signal });
+    this.video.addEventListener(
+      'seeking',
+      () => (this.lastTime = this.pendingSeek = this.video.currentTime),
+      { signal },
+    );
+    this.video.addEventListener('seeked', () => (this.pendingSeek = null), { signal });
+    this.video.addEventListener('timeupdate', () => (this.lastTime = this.video.currentTime), {
+      signal,
+    });
     this.video.addEventListener('loadedmetadata', () => this.jumpGap(), { signal });
     this.video.addEventListener(
       'waiting',
@@ -1003,12 +1016,15 @@ export class MsePlayer {
   }
 
   /**
-   * The element's time. A failed WebKit element that started at a resume point (a reopen) reads 0,
-   * and the reopen would start over: then its last known time, or the resume point.
+   * Where a reopen goes after a decode error. A failed WebKit element reads its last played time
+   * during a seek, and 0 if it started at a resume point (a reopen, whose first `timeupdate` can
+   * read 0 too): so the pending seek's target, else the first of the element's time, its last known
+   * one and the resume point that is past 0.
    */
   private playhead(): number {
-    const t = this.video.currentTime;
-    return t > 0 ? t : (this.lastTime ?? this.resumedAt ?? t);
+    if (this.pendingSeek !== null) return this.pendingSeek;
+    const known = [this.video.currentTime, this.lastTime, this.resumedAt];
+    return known.find((t): t is number => t !== null && t > 0) ?? 0;
   }
 
   private armStuckSeek() {
