@@ -486,6 +486,8 @@ export class MsePlayer {
         (await input.getDurationFromMetadata().catch(() => null)) ??
           (await input.computeDuration()),
       );
+      // The header reads (and Matroska Cues at the end) say nothing about where playback reads.
+      bytes.restart();
       // Resume: both pipelines start at the keyframe before the resume point, so nothing is
       // fetched from the start of the file. The relay converts from the exact time (ffmpeg -ss).
       const resumeAt = avi?.indexMode === 'scan' ? null : (opts.startAt?.(duration) ?? null);

@@ -242,7 +242,8 @@ docs/decisions/                ADRs
 - **Piece window (ADR 0012).** Pieces live only in memory (`MemoryChunkStore`; OPFS is cleared at
   start, never written). Every `tick` evicts the stored pieces outside `MsePlayer.keepRange()`
   (`ByteWindow`, `byte-window.ts`: 10 s behind the playhead to the reads since the last seek, ±16 MiB
-  slack) with `evictPieces` (client.ts: `_markUnverified`, so they're not "have" and a seek back
+  slack; the start only from fragments since the last seek, everything kept until the first one, and
+  `restart()` after `open`'s header reads) with `evictPieces` (client.ts: `_markUnverified`, so they're not "have" and a seek back
   re-downloads); reads in flight (`trackedSource`) and `_selections` are never evicted: a `done` file
   reads the store with no selection, and a missing piece destroys the stream. Every read of the
   playing file goes through the window: other readers (subtitle scan, MKV header, fonts) use
@@ -252,7 +253,8 @@ docs/decisions/                ADRs
   `torrent.downloaded`/`progress` drop on eviction: the starvation watchdog uses `verifiedBytes` (client.ts; `received` counts a failing web seed's protocol bytes). Small fixtures
   are read whole by Mediabunny's cache, so `e2e/piece-window.spec.ts` (chromium + webkit) sets
   `localStorage['webtor:read-cache-bytes']` (small `maxCacheSize`, no prefetch) and
-  `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes`.
+  `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes` and `__webtorKeepRange` (the kept
+  bytes at the last tick; null = all). Seek-bar layer assertions: `e2e/support/downloaded.ts`.
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
   `localStorage['webtor:sb-quota-bytes']` gives every SourceBuffer a Safari-like byte quota
@@ -410,7 +412,8 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
 - `resume/` = `movie.mkv` (40 s 320×180; audio "English AAC" + "Russian AC3"; subtitles `embedded:4`
   "English", `embedded:5` "English SDH", `embedded:6` "Russian") + `extra.mkv` (→ sample.mkv).
 - `vbr.mp4`: 30 s 320×180 H.264 + AAC, faststart; 0–15 s noise (~93 % of the bytes), 15–30 s near-static
-  (the seek bar's downloaded layer without an index, `e2e/seek-downloaded.spec.ts`).
+  (the seek bar's downloaded layer without an index, `e2e/seek-downloaded.spec.ts`). `vbr.ts`: the same in
+  MPEG-TS (first frame at ~1.46 s), for seeks without an index under the piece window.
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the

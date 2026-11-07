@@ -34,14 +34,23 @@ after a seek.
   - **Sampling.** `MsePlayer` wraps the file's `ByteSource` and records every demuxer read. Each
     fragment produced by a local pipeline gives a sample: (furthest `writtenTo`, end of the
     latest read).
-  - **Start.** The byte of the latest sample at least `KEEP_BEHIND_S` (10 s) behind the playhead,
-    minus `READ_AHEAD_SLACK` (16 MiB). Mediabunny's 'network' prefetch reads up to 8 MiB beyond
-    what it demuxed.
+  - **Start.** The byte of the latest sample of this run (since the last seek) at least
+    `KEEP_BEHIND_S` (10 s) behind the playhead, minus `READ_AHEAD_SLACK` (16 MiB). Mediabunny's
+    'network' prefetch reads up to 8 MiB beyond what it demuxed.
+    - Until this run has such a sample, the lowest read since the seek, or lower where an earlier
+      run's sample says so. An earlier run's cursor can be far past its media (the demuxer read
+      ahead), so alone it never sets the start. It did, and after a far seek back or forward the
+      window began past the playhead's bytes: the pieces the pipelines were reading were evicted,
+      and seeks stalled (MPEG-TS never completed one).
+    - Before this run's first fragment, from 0: a keyframe search (MPEG-TS without an index)
+      probes all over the file, and shrinking the window between its reads evicted the probes.
+      The probes since the seek then stay kept for `KEEP_BEHIND_S`.
   - **End.** The furthest sample since the last seek (or the latest read, if further), plus the
     slack, capped at the furthest read.
     A one-off read far away, such as Matroska Cues at the end of the file, does not stretch the
     window. Before the first sample, the end is the furthest read.
-  - **Reset.** A seek (`restartAt`) resets the run.
+  - **Reset.** A seek (`restartAt`) resets the run, and so does `MsePlayer.open` after the header
+    and duration reads, so a resume's window starts at its resume point from the first tick.
   - **Reads in flight are always inside** (`trackedSource` pins a read until its promise settles or
     its stream delivered its bytes, ends or is cancelled). Every read of the playing file goes
     through the window: the pipelines' (`demux`), the subtitle scan's (`scan`, via

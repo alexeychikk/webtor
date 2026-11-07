@@ -35,14 +35,56 @@ describe('ByteWindow', () => {
     expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 42 * MiB });
   });
 
-  it('after a seek keeps behind by the earlier samples and ahead by the new reads', () => {
+  it('after a seek keeps everything during the keyframe search, then from its lowest read', () => {
     const w = new ByteWindow(0);
     play(w, 0, 50);
     w.restart();
-    expect(w.keep(30)).toEqual({ start: 42 * MiB, end: Infinity });
+    expect(w.keep(30)).toBeNull();
+    w.read(900 * MiB, 901 * MiB)();
+    w.read(30 * MiB, 31 * MiB)();
+    expect(w.keep(30)).toEqual({ start: 0, end: 901 * MiB });
     play(w, 30, 35);
-    expect(w.keep(31)).toEqual({ start: 44 * MiB, end: 72 * MiB });
-    expect(w.keep(60)).toEqual({ start: 72 * MiB, end: 72 * MiB });
+    expect(w.keep(31)).toEqual({ start: 30 * MiB, end: 72 * MiB });
+    expect(w.keep(45)).toEqual({ start: 72 * MiB, end: 72 * MiB });
+  });
+
+  it('after a far seek keeps from the playhead, whatever the earlier cursor ran ahead to', () => {
+    const w = new ByteWindow(0);
+    // Before the seek the reads ran 30 s of media (60 MiB) ahead of each fragment.
+    for (let t = 0; t < 40; t++) {
+      w.read((t + 30) * 2 * MiB, (t + 31) * 2 * MiB)();
+      w.produced(t);
+    }
+    expect(w.keep(35)?.start).toBe(112 * MiB);
+    w.restart();
+    play(w, 40, 42);
+    expect(w.keep(40)).toEqual({ start: 80 * MiB, end: 86 * MiB });
+    play(w, 43, 60);
+    expect(w.keep(55)).toEqual({ start: 92 * MiB, end: 122 * MiB });
+  });
+
+  it('after a far seek back keeps from the new playhead, not the earlier run', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 100);
+    w.restart();
+    play(w, 20, 25);
+    expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 52 * MiB });
+    play(w, 26, 40);
+    expect(w.keep(40)).toEqual({ start: 62 * MiB, end: 82 * MiB });
+  });
+
+  it('after a resume keeps the window around the resume point from the first fragment', () => {
+    const w = new ByteWindow(0);
+    w.read(0, 1 * MiB)();
+    w.read(999 * MiB, 1000 * MiB)();
+    w.restart();
+    w.read(999 * MiB, 1000 * MiB)();
+    w.read(40 * MiB, 41 * MiB)();
+    play(w, 20, 20);
+    expect(w.keep(20)).toEqual({ start: 40 * MiB, end: 42 * MiB });
+    play(w, 21, 40);
+    expect(w.keep(30)).toEqual({ start: 42 * MiB, end: 82 * MiB });
+    expect(w.keep(35)).toEqual({ start: 52 * MiB, end: 82 * MiB });
   });
 
   it('ignores fragments before any read and non-finite times', () => {
