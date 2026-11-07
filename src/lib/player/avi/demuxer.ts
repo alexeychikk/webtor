@@ -15,6 +15,7 @@
 import type { EncodedPacket, InputFormat } from 'mediabunny';
 import { readRange } from '../../subtitles/mkv/reader';
 import { PlaybackError } from '../errors';
+import type { ByteTimeIndex, ByteTimePoint } from '../byte-time';
 import type { ByteSource } from '../types';
 import {
   aacObjectType,
@@ -166,6 +167,16 @@ export class AviDemuxer {
     const index = this.index;
     if (!index || index.mode !== 'scan' || index.complete(0)) return null;
     return this.video?.scannedEnd() ?? 0;
+  }
+
+  /**
+   * Where the video's keyframes sit in the file (source times), for the seek bar's downloaded
+   * layer (ADR 0012); `whole` once the index is complete. Null before the header is read.
+   */
+  byteTimeIndex(): ByteTimeIndex | null {
+    const video = this.video;
+    if (!video) return null;
+    return { points: video.keyframePositions(), whole: video.indexComplete };
   }
 
   private read(start: number, end: number): Promise<Uint8Array> {
@@ -410,6 +421,8 @@ export class AviVideoBacking extends AviBacking {
   private readonly pts: number[] = [];
   /** Chunks of the table taken in by `sync`. */
   private synced = 0;
+  /** `keyframePositions`, one per GOP so far. */
+  private readonly positions: ByteTimePoint[] = [];
   private readonly gopJobs = new Map<number, Promise<void>>();
   private readonly frameDuration: number;
   readonly fourcc: string;
@@ -444,6 +457,25 @@ export class AviVideoBacking extends AviBacking {
       this.packetChunk.push(i);
       this.pts.push(NaN);
     }
+  }
+
+  get indexComplete(): boolean {
+    return this.complete;
+  }
+
+  /** File offset (chunk header) and source time of each GOP's first frame. */
+  keyframePositions(): ByteTimePoint[] {
+    this.sync();
+    if (this.positions.length !== this.gopStarts.length) {
+      for (let g = this.positions.length; g < this.gopStarts.length; g++) {
+        const p = this.gopStarts[g]!;
+        this.positions.push({
+          byte: this.table.offsets[this.packetChunk[p]!]! - 8,
+          time: this.dts(p),
+        });
+      }
+    }
+    return this.positions;
   }
 
   /** Source time of the last frame known so far (`seekLimit` while scanning). */

@@ -4,6 +4,7 @@
  * dropped from the piece store and downloaded again when a seek goes back there.
  */
 
+import type { ByteTimePoint } from './byte-time';
 import type { ByteSource } from './types';
 
 /** Media kept behind the playhead (s), for short seeks back without a download. */
@@ -77,6 +78,19 @@ export class ByteWindow {
     if (i === -1) this.samples.push(sample);
     else if (this.samples[i]!.time === time) this.samples[i] = sample;
     else this.samples.splice(i, 0, sample);
+  }
+
+  /**
+   * What the reads tell of where media times sit (the seek bar's fallback without an index, ADR
+   * 0012): each fragment's start time with the read cursor then, which is past that media.
+   */
+  points(): readonly ByteTimePoint[] {
+    return this.samples;
+  }
+
+  /** End of the latest demuxer read. */
+  get readEnd(): number {
+    return this.cursor;
   }
 
   /**

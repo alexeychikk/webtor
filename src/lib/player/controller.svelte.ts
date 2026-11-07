@@ -54,7 +54,8 @@ import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { HDR_DISPLAY_QUERY, toneMapped, type HdrFormat } from './hdr';
 import { MsePlayer, mediaSourceClass, type BufferInfo } from './mse-player';
 import type { RemoteVideo } from './remote-video';
-import { downloadedRanges, sameRanges, type FractionRanges } from './seek';
+import { downloadedTimes } from './byte-time';
+import { downloadedBytes, sameRanges, type FractionRanges } from './seek';
 import type { AudioTrackInfo, ByteSource, TorrentStats } from './types';
 import {
   RELAY_STATS_MAX_MISSES,
@@ -146,7 +147,7 @@ export class PlayerController {
   magnet = $state<string | null>(null);
   /** Lower-case info hash of the loaded torrent, once known (the history's "Now playing"). */
   infoHash = $state<string | null>(null);
-  /** Downloaded parts of the playing file (fractions of its bytes) for the seek bar; 1 s tick. */
+  /** Downloaded parts of the playing file (fractions of its duration) for the seek bar; 1 s tick. */
   downloaded = $state<FractionRanges>([]);
   /** Buffer window and quota hits of the playing file (stats panel); 1 s tick, null without a file. */
   buffer = $state<BufferInfo | null>(null);
@@ -930,11 +931,18 @@ export class PlayerController {
     else this.phase = ready ? 'playing' : 'buffering';
   }
 
+  /** The held pieces of the playing file at the times they hold (ADR 0012 "Seek bar"). */
   private updateDownloaded(t: Torrent) {
     const file = this.fileIndex === null ? undefined : t.files?.[this.fileIndex];
+    const player = this.player;
     const next =
-      file && t.bitfield
-        ? downloadedRanges(t.bitfield, t.pieceLength, file.offset, file.length)
+      file && t.bitfield && player
+        ? downloadedTimes(
+            downloadedBytes(t.bitfield, t.pieceLength, file.offset, file.length),
+            player.byteTimeIndex(),
+            file.length,
+            player.duration,
+          )
         : [];
     if (!sameRanges(next, this.downloaded)) this.downloaded = next;
   }

@@ -50,7 +50,8 @@ import { aheadWithin } from '../torrent/piece-window';
 import { ByteWindow, trackedSource, type ByteRange, type ReadRole } from './byte-window';
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
-import { readMkvHeader } from '../subtitles/mkv/header';
+import { readCuePoints, readMkvHeader } from '../subtitles/mkv/header';
+import type { ByteTimeIndex, ByteTimePoint } from './byte-time';
 import {
   doviConfigOf,
   dolbyVisionPlayback,
@@ -290,6 +291,8 @@ export class MsePlayer {
   private readonly bufferAhead: number;
   private switchGen = 0;
   private slowNoticed = false;
+  /** The container's index for the seek bar (`byteTimeIndex`), source times; null = none (yet). */
+  private containerIndex: (() => ByteTimeIndex | null) | null = null;
   /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
   private seekLimit: (() => number | null) | null = null;
   /** Element time playback was resumed at (`startAt`), null when it started from the beginning. */
@@ -521,6 +524,10 @@ export class MsePlayer {
         source.size,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
+      if (avi) player.containerIndex = () => avi.byteTimeIndex();
+      else if ((await input.getFormat()) instanceof mb.MatroskaInputFormat) {
+        void player.readMatroskaIndex(file);
+      }
       player.hdr = hdr;
       player.encoder = target;
       if (resumeAt !== null) {
@@ -570,6 +577,53 @@ export class MsePlayer {
    */
   windowed(file: ByteSource, role: Exclude<ReadRole, 'demux'>): ByteSource {
     return trackedSource(file, this.bytes, role);
+  }
+
+  /**
+   * Where media times sit in the file, element times, for the seek bar's downloaded layer (ADR
+   * 0012 "Seek bar"): the container's index (MKV Cues, AVI index), else what the reads learned,
+   * up to the end once every pipeline appended through it.
+   */
+  byteTimeIndex(): ByteTimeIndex | null {
+    if (this.destroyed) return null;
+    const toElement = (p: ByteTimePoint) => ({
+      byte: p.byte,
+      time: p.time - this.timeline.startTime,
+    });
+    const index = this.containerIndex?.();
+    if (index && index.points.length > 0) {
+      return { ...index, points: index.points.map(toElement) };
+    }
+    const points = [...this.bytes.points()];
+    const local = this.pipelines.filter((p) => !p.remote);
+    if (local.length > 0 && local.every((p) => p.done) && Number.isFinite(this.duration)) {
+      points.push({ byte: this.bytes.readEnd, time: this.duration });
+    }
+    return { points, whole: false };
+  }
+
+  /** Matroska Cues → `containerIndex`. Never fatal: without it the layer uses the reads. */
+  private async readMatroskaIndex(file: ByteSource) {
+    try {
+      const reader = new ByteReader(this.windowed(file, 'once'));
+      const header = await readMkvHeader(reader);
+      if (!header || this.destroyed) return;
+      const cues = await readCuePoints(reader, header);
+      if (cues.length === 0 || this.destroyed) return;
+      const lastCluster = Math.max(...cues.map((c) => c.cluster));
+      const after = [header.cuesPosition, header.attachmentsPosition].filter(
+        (p): p is number => p !== null && p > lastCluster,
+      );
+      const mediaEnd = Math.min(header.segmentEnd, ...after);
+      const index: ByteTimeIndex = {
+        points: cues.map((c) => ({ byte: c.cluster, time: c.time })),
+        whole: true,
+        mediaEnd,
+      };
+      this.containerIndex = () => index;
+    } catch (err) {
+      console.warn('seek bar: no Matroska index:', err);
+    }
   }
 
   private noteProduced() {
