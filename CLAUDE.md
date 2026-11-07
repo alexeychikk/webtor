@@ -43,7 +43,7 @@ pnpm test           # vitest unit tests (src/**/*.test.ts)
 pnpm test:e2e       # playwright: builds, serves on :4173, starts e2e fixture server (:9000, :8000)
                     #   and the relay stack (:9100, relay :7882; needs Go, first build is slow).
                     #   Projects: chromium runs every spec; firefox runs smoke.spec.ts, webkit smoke + seek-end + seek-tail + start-stress
-                    #   + piece-window + seek-downloaded
+                    #   + piece-window + seek-downloaded + seek-quick
                     #   (`--project=chromium` to skip them; `playwright install firefox webkit` once)
 pnpm format         # prettier (CI runs format:check)
 pnpm build          # → dist/
@@ -501,6 +501,14 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     (prints the log of every open that needed a reopen; `STRESS_FIXTURE`, `STRESS_WINDOWED=asc`).
     vbr.ts with 4 s ahead and the 64 KiB read cache hits this in ~1 open in 4 (main too), so
     `piece-window.spec.ts` plays it on WebKit without that cache.
+- **A decode error reopens the file** (ADR 0003 "Decode errors"): WebKit's GStreamer backend makes
+  one packet `avdec_h264` rejects fatal ("Failed to send data for decoding", seen after quick seek
+  streaks). `MsePlayer` `onDecodeError` → `reopenFile` at the playhead, counted by
+  `nextDecodeReopen` (≤ `MAX_REOPENS`; a fail again within `DECODE_SPOT_S` of the reopen is the
+  same spot). The element closes the MediaSource before its `error` event, so pipelines throw on
+  removed SourceBuffers first: `fail()` takes the decode path while `video.error` is DECODE (waits
+  ≤ 1 s for it on a closed MediaSource). `e2e/seek-quick.spec.ts`: quick streaks, and recovery from
+  an error raised on the element, with and without the MediaSource closed first.
 - **A seek during a restart always restarts** (`restarting`, `onSeeking`): until the running restart
   cleared the buffers, `sb.buffered` still shows the media it is about to remove, and a seek "into
   it" was left with nothing (a −5 s right after a +10 s stalled for good).

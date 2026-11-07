@@ -68,6 +68,7 @@ import {
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { hdrFormatOf, type HdrFormat } from './hdr';
 import { AAC_FRAME_SAMPLES, silentAacFrame } from './silence';
+import { seekTarget } from './seek';
 import {
   MAX_REMOTE_RESUMES,
   REMOTE_KEYFRAME_INTERVAL_S,
@@ -138,6 +139,10 @@ class StalePipeline extends Error {}
 const SEEK_DEBOUNCE_MS = 150;
 /** Bit rate of the silence after an audio track that ends before the video (`fillSilence`). */
 const SILENCE_BITRATE = 64_000;
+/** `MediaError.MEDIA_ERR_DECODE`. */
+const MEDIA_ERR_DECODE = 3;
+/** How long a failure after the MediaSource closed waits for the element's `error` event. */
+const ELEMENT_ERROR_WAIT_MS = 1000;
 /** A seek with its target buffered in every SourceBuffer is stuck after this long (`onStuckSeek`). */
 const STUCK_SEEK_MS = 4000;
 /**
@@ -275,6 +280,13 @@ export interface MsePlayerOptions {
    */
   onLostEnd?(t: number, play: boolean): void;
   /**
+   * The element failed to decode (`MEDIA_ERR_DECODE`) with the playhead or seek target at `t`. The
+   * element is dead then, so the owner opens the file again at `t` in a new MsePlayer. WebKit's
+   * GStreamer backend fails so after some quick seek streaks ("Failed to send data for decoding",
+   * ADR 0003 "Decode errors"). Asked at most once per player; without it the error fails it.
+   */
+  onDecodeError?(t: number): void;
+  /**
    * Bytes the piece store may hold (ADR 0012): the ahead target shrinks so that much media at the
    * file's mean rate fits (`aheadWithin`).
    */
@@ -299,6 +311,19 @@ export class MsePlayer {
    * it did, `sb.buffered` still shows the media it is about to remove.
    */
   private restarting = 0;
+  /** `onDecodeError` was asked (once per player). */
+  private decodeErrorAsked = false;
+  /** The element's time at its last `seeking` or `timeupdate`; null before either. */
+  private lastTime: number | null = null;
+  /**
+   * The target of the element's seek that has not completed: set as it is written (`seekTo`; a
+   * decode error can come before `seeking`), cleared by `seeked`.
+   */
+  private pendingSeek: number | null = null;
+  /** A failure came after the MediaSource closed and waits for the element's `error` (`fail`). */
+  private awaitingElementError = false;
+  /** `onError` was told (`report`). */
+  private reported = false;
   private readonly abort = new AbortController();
   private readonly bufferAhead: number;
   private switchGen = 0;
@@ -833,6 +858,7 @@ export class MsePlayer {
     this.seekTo = (t) => {
       this.endedAt = null;
       set.call(video, t);
+      this.pendingSeek = seekTarget(t, video.duration);
     };
     const lost = () =>
       endLost(this.endedAt, nativeEnded.call(video) as boolean, get.call(video) as number);
@@ -942,6 +968,19 @@ export class MsePlayer {
     }
     this.video.addEventListener('seeking', () => this.armStuckSeek(), { signal });
     this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
+    this.video.addEventListener(
+      'seeking',
+      () => (this.lastTime = this.pendingSeek ??= this.video.currentTime),
+      { signal },
+    );
+    this.video.addEventListener('seeked', () => (this.pendingSeek = null), { signal });
+    this.video.addEventListener(
+      'timeupdate',
+      () => {
+        if (!this.video.error) this.lastTime = this.video.currentTime;
+      },
+      { signal },
+    );
     this.video.addEventListener('loadedmetadata', () => this.jumpGap(), { signal });
     this.video.addEventListener(
       'waiting',
@@ -970,18 +1009,64 @@ export class MsePlayer {
       'error',
       () => {
         const e = this.video.error;
-        if (e)
-          this.fail(new PlaybackError('playback-failed', e.message || `media error ${e.code}`));
+        if (!e || this.recoverDecodeError()) return;
+        this.report(new PlaybackError('playback-failed', e.message || `media error ${e.code}`));
       },
       { signal },
     );
   }
 
+  /**
+   * Ends the playback with `err`, unless the element failed to decode: then `onDecodeError`
+   * reopens the file. The element closes the MediaSource as it fails (WebKit sets `error` first),
+   * so a pipeline reading a removed SourceBuffer gets here before the element's `error` event; a
+   * closed MediaSource without an element error yet leaves `err` to that event, for at most
+   * `ELEMENT_ERROR_WAIT_MS`.
+   */
   private fail(err: unknown) {
-    if (this.destroyed) return;
+    if (this.destroyed || this.recoverDecodeError() || this.awaitingElementError) return;
+    if (this.mediaSource.readyState === 'closed' && !this.video.error) {
+      this.awaitingElementError = true;
+      setTimeout(() => {
+        if (!this.video.error) this.report(err);
+      }, ELEMENT_ERROR_WAIT_MS);
+      return;
+    }
+    this.report(err);
+  }
+
+  /** Tells `onError` once. */
+  private report(err: unknown) {
+    if (this.destroyed || this.reported) return;
+    this.reported = true;
     this.opts.onError(
       err instanceof PlaybackError ? err : new PlaybackError('playback-failed', String(err)),
     );
+  }
+
+  /** The element failed to decode and `onDecodeError` takes it (once per player): true. */
+  private recoverDecodeError(): boolean {
+    const e = this.video.error;
+    if (e?.code !== MEDIA_ERR_DECODE || !this.opts.onDecodeError || this.decodeErrorAsked) {
+      return false;
+    }
+    this.decodeErrorAsked = true;
+    const t = this.playhead();
+    console.warn(`decode error at ${t.toFixed(2)} s:`, e.message);
+    this.opts.onDecodeError(t);
+    return true;
+  }
+
+  /**
+   * Where a reopen goes after a decode error. A failed WebKit element reads its last played time
+   * during a seek, and 0 if it started at a resume point (a reopen, whose first `timeupdate` can
+   * read 0 too): so the pending seek's target, else the first of the element's time, its last known
+   * one and the resume point that is past 0.
+   */
+  private playhead(): number {
+    if (this.pendingSeek !== null) return this.pendingSeek;
+    const known = [this.video.currentTime, this.lastTime, this.resumedAt];
+    return known.find((t): t is number => t !== null && t > 0) ?? 0;
   }
 
   private armStuckSeek() {

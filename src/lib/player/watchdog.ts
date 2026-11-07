@@ -167,3 +167,21 @@ export function nextReopen(count: number, recovered: boolean): number | null {
   const n = (recovered ? 0 : count) + 1;
   return n <= MAX_REOPENS ? n : null;
 }
+
+/** A decode error within this many seconds of the last reopen's start is the same spot again. */
+export const DECODE_SPOT_S = 5;
+
+/**
+ * The element failed to decode at `t` (`onDecodeError`): the number of this reopen in a row, or
+ * null when the open fails instead. Like `nextReopen`, except that a reopened player that failed
+ * again near where it was reopened (`at`, 0 = from the start; within `DECODE_SPOT_S`) did not
+ * recover: media that can't be decoded there would otherwise reopen forever.
+ */
+export function nextDecodeReopen(
+  count: number,
+  recovered: boolean,
+  at: number,
+  t: number,
+): number | null {
+  return nextReopen(count, recovered && Math.abs(t - at) > DECODE_SPOT_S);
+}

@@ -43,6 +43,7 @@ export default defineConfig({
         'start-stress.spec.ts',
         'piece-window.spec.ts',
         'seek-downloaded.spec.ts',
+        'seek-quick.spec.ts',
       ],
       use: { ...devices['Desktop Safari'] },
     },
