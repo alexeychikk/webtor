@@ -305,6 +305,8 @@ export class MsePlayer {
   private restarting = 0;
   /** `onDecodeError` was asked (once per player). */
   private decodeErrorAsked = false;
+  /** The element's time at its last `seeking` or `timeupdate`; null before either. */
+  private lastTime: number | null = null;
   /** A failure came after the MediaSource closed and waits for the element's `error` (`fail`). */
   private awaitingElementError = false;
   /** `onError` was told (`report`). */
@@ -922,6 +924,8 @@ export class MsePlayer {
     }
     this.video.addEventListener('seeking', () => this.armStuckSeek(), { signal });
     this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
+    for (const ev of ['seeking', 'timeupdate'])
+      this.video.addEventListener(ev, () => (this.lastTime = this.video.currentTime), { signal });
     this.video.addEventListener('loadedmetadata', () => this.jumpGap(), { signal });
     this.video.addEventListener(
       'waiting',
@@ -992,9 +996,19 @@ export class MsePlayer {
       return false;
     }
     this.decodeErrorAsked = true;
-    console.warn(`decode error at ${this.video.currentTime.toFixed(2)} s:`, e.message);
-    this.opts.onDecodeError(this.video.currentTime);
+    const t = this.playhead();
+    console.warn(`decode error at ${t.toFixed(2)} s:`, e.message);
+    this.opts.onDecodeError(t);
     return true;
+  }
+
+  /**
+   * The element's time. A failed WebKit element that started at a resume point (a reopen) reads 0,
+   * and the reopen would start over: then its last known time, or the resume point.
+   */
+  private playhead(): number {
+    const t = this.video.currentTime;
+    return t > 0 ? t : (this.lastTime ?? this.resumedAt ?? t);
   }
 
   private armStuckSeek() {
