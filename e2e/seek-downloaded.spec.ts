@@ -26,24 +26,15 @@ const seekTo = (page: Page, t: number) =>
  * Opens `fixture` and waits for it to play. `windowed`: the piece-window.spec.ts settings (small
  * demuxer cache, 4 s ahead); else the defaults.
  */
-async function open(
-  page: Page,
-  fixture = 'resume',
-  file = 'movie.mkv',
-  windowed = true,
-  smallCache = windowed,
-) {
-  await page.addInitScript(
-    ([windowed, smallCache]) => {
-      if (windowed) {
-        localStorage.setItem('webtor:buffer-ahead-s', '4');
-        localStorage.setItem('webtor:read-slack-bytes', '0');
-      }
-      if (smallCache) localStorage.setItem('webtor:read-cache-bytes', String(64 * 1024));
-      localStorage.setItem('webtor:subtitle-language', 'off');
-    },
-    [windowed, smallCache],
-  );
+async function open(page: Page, fixture = 'resume', file = 'movie.mkv', windowed = true) {
+  await page.addInitScript((windowed) => {
+    if (windowed) {
+      localStorage.setItem('webtor:buffer-ahead-s', '4');
+      localStorage.setItem('webtor:read-slack-bytes', '0');
+      localStorage.setItem('webtor:read-cache-bytes', String(64 * 1024));
+    }
+    localStorage.setItem('webtor:subtitle-language', 'off');
+  }, windowed);
   const magnet = await fixtureMagnet(fixture);
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect(page.getByTestId('status')).toContainText(file);
@@ -259,10 +250,12 @@ for (const file of ['vbr.ts', 'vbr.mp4'] as const) {
     page,
     browserName,
   }) => {
+    // vbr.ts with the small read cache trips WebKit's start flake (piece-window.spec.ts); without
+    // it the file is read whole and nothing behind the playhead is ever evicted.
+    test.skip(file === 'vbr.ts' && browserName === 'webkit', 'nothing evicted without the cache');
     test.setTimeout(90_000);
     const frames = await frameBytes(`e2e/fixtures/${file}`);
-    // vbr.ts with the small read cache trips WebKit's start flake (piece-window.spec.ts).
-    await open(page, file, file, true, !(file === 'vbr.ts' && browserName === 'webkit'));
+    await open(page, file, file);
     await seekTo(page, 13);
     await settle(page);
     const duration = await prop(page, 'duration');
