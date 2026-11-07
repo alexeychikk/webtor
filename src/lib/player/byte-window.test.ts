@@ -95,6 +95,30 @@ describe('ByteWindow', () => {
   });
 });
 
+describe('ByteWindow.points', () => {
+  it('samples the read cursor per fragment, numbering the runs by seek', () => {
+    const w = new ByteWindow();
+    play(w, 0, 1);
+    w.restart();
+    play(w, 5, 5);
+    expect(w.points()).toEqual([
+      { time: 0, byte: 2 * MiB, run: 0 },
+      { time: 1, byte: 4 * MiB, run: 0 },
+      { time: 5, byte: 12 * MiB, run: 1 },
+    ]);
+  });
+
+  it('adds the end at the furthest read ever once the pipelines appended through it', () => {
+    const w = new ByteWindow();
+    play(w, 0, 3);
+    w.restart();
+    w.read(2 * MiB, 3 * MiB)();
+    w.produced(1);
+    expect(w.points(10).at(-1)).toEqual({ time: 10, byte: 8 * MiB, run: 1 });
+    expect(new ByteWindow().points(10)).toEqual([]);
+  });
+});
+
 describe('trackedSource', () => {
   const bytes = new Uint8Array([1, 2, 3, 4]);
 

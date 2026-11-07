@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   downloadedTimes,
+  learnedPoints,
   mappingPoints,
   monotonePoints,
   timeAtByte,
@@ -218,5 +219,73 @@ describe('monotonePoints', () => {
       { byte: 50, time: 5 },
       { byte: 90, time: 10 },
     ]);
+  });
+});
+
+describe('learnedPoints', () => {
+  /** Samples at `times` with the read cursor at `byte` each, in run `run`. */
+  const at = (byte: number, times: number[], run = 0) => times.map((time) => ({ byte, time, run }));
+
+  it('keeps the latest time of samples at one cursor (the demuxer cache holds the data)', () => {
+    expect(learnedPoints([...at(100, [1, 2]), ...at(300, [3, 4, 5, 6])])).toEqual([
+      { byte: 100, time: 2 },
+      { byte: 300, time: 6 },
+    ]);
+  });
+
+  it('drops a later sample at a smaller byte within a run (a reader behind another)', () => {
+    expect(learnedPoints([...at(300, [3]), ...at(200, [4]), ...at(400, [5])])).toEqual([
+      { byte: 300, time: 3 },
+      { byte: 400, time: 5 },
+    ]);
+  });
+
+  it('prefers the newest run where runs disagree, keeps an older one’s that fit', () => {
+    // Run 0 played 0–30 s with 8 units of overshoot; run 1 (a seek back to 10 s) read 10–20 s with
+    // a bigger one. The older points around 10–20 s don't fit the newer and go.
+    const run0 = [5, 10, 15, 20, 25, 30].map((t) => ({ byte: t * 10 + 8, time: t, run: 0 }));
+    const run1 = [10, 15, 20].map((t) => ({ byte: t * 10 + 60, time: t, run: 1 }));
+    expect(learnedPoints([...run0, ...run1])).toEqual([
+      { byte: 58, time: 5 },
+      { byte: 160, time: 10 },
+      { byte: 210, time: 15 },
+      { byte: 260, time: 20 },
+      { byte: 308, time: 30 },
+    ]);
+  });
+
+  it('ignores non-finite samples and returns nothing for none', () => {
+    expect(learnedPoints([])).toEqual([]);
+    expect(learnedPoints([{ byte: NaN, time: 1, run: 0 }])).toEqual([]);
+  });
+
+  describe('drawn', () => {
+    /** A whole-file read up front (default prefetch): every sample has the cursor at the end. */
+    const wholeRead = (times: number[]) => at(LENGTH, times);
+    const drawLearned = (samples: ReturnType<typeof at>) =>
+      draw([{ start: 0, end: LENGTH }], { points: learnedPoints(samples), whole: false });
+
+    it('draws up to the furthest produced time when the cursor stopped (no empty layer)', () => {
+      const got = drawLearned(wholeRead([0, 2, 4, 6, 8, 10]));
+      expectRanges(got, [[0, 10]]);
+      expect(covers(got, 7)).toBe(true);
+    });
+
+    it('draws the whole file at the end even at the same cursor as the samples', () => {
+      expectRanges(drawLearned([...wholeRead([0, 2, 4]), ...wholeRead([DURATION])]), [
+        [0, DURATION],
+      ]);
+    });
+
+    it('covers the playhead after a seek whose reads stopped in the cache', () => {
+      // Seek to 40 s: the reads ran through 60 s at once, then the cache serves 40–60 s.
+      const samples = [
+        ...[0, 2, 4, 6].map((t) => ({ byte: byteAt(t + 8), time: t, run: 0 })),
+        ...at(byteAt(60), [40, 44, 50, 56, 60], 1),
+      ];
+      const got = draw(held(40, 60), { points: learnedPoints(samples), whole: false });
+      expect(covers(got, 45.7)).toBe(true);
+      expect(got[0]![0]).toBeLessThanOrEqual(40);
+    });
   });
 });

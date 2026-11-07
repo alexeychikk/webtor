@@ -91,16 +91,21 @@ byte (`MsePlayer.byteTimeIndex()`):
 - **AVI:** the video's keyframe offsets (`AviDemuxer.byteTimeIndex()`); whole once its index is
   complete, still growing during a `movi` scan.
 - **Anything else (MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
-  (fragment start time, read cursor) samples, plus (read end, duration) once every pipeline
-  appended through the end. The cursor is past its fragment's media, so these points place bytes
-  early, never late: the layer may start a little before the playhead, never after it.
+  (fragment start time, read cursor) samples, plus (furthest read ever, duration) once every
+  pipeline appended through the end. The cursor is past its fragment's media, so these points
+  place bytes early, never late: the layer may start a little before the playhead, never after it.
+  `learnedPoints` reduces them: once Mediabunny's cache holds the data the cursor stops while the
+  times go on, so of the samples at one byte the latest time counts (an index's point at a byte
+  keeps its earliest time instead); where a seek's new run disagrees with older samples, the
+  newest run wins.
 
 Byte 0 is time 0 (the header). Without a whole index, bytes past the last point are left out
 rather than guessed; with no points at all the layer is empty. Ranges re-map every tick, so
 evicted ones disappear and re-downloaded ones come back at their times after any seek.
 `byte-time.test.ts` covers the mapping; `e2e/seek-downloaded.spec.ts` (chromium + webkit) checks
 that the layer covers the playhead after keys, seek-bar clicks and drags, far jumps, touch
-skips and a resume, and that evicted ranges go.
+skips and a resume, and that evicted ranges go, through the Cues and without an index (`offset.ts`,
+`vbr.mp4`).
 
 ## Consequences
 

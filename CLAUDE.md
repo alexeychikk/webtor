@@ -409,6 +409,8 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   .torrent for any fixture (for upload tests).
 - `resume/` = `movie.mkv` (40 s 320×180; audio "English AAC" + "Russian AC3"; subtitles `embedded:4`
   "English", `embedded:5` "English SDH", `embedded:6` "Russian") + `extra.mkv` (→ sample.mkv).
+- `vbr.mp4`: 30 s 320×180 H.264 + AAC, faststart; 0–15 s noise (~93 % of the bytes), 15–30 s near-static
+  (the seek bar's downloaded layer without an index, `e2e/seek-downloaded.spec.ts`).
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the

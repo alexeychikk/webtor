@@ -175,4 +175,14 @@ node ../../scripts/make-dv-fixtures.mjs
   -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv \
   -c:a aac -b:a 48k -metadata:s:a:0 language=eng -metadata:s:a:0 title="English AAC" \
   hdr10-av1.mkv
-ls -l sample.mkv sidecar.en.srt offset.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv hdr10-av1.mkv
+# vbr.mp4: 30 s 320x180 H.264 + AAC, faststart: 0–15 s noise (~93 % of the bytes), 15–30 s a
+# near-static picture, for the seek bar's downloaded layer without a Matroska index
+# (e2e/seek-downloaded.spec.ts, ADR 0012 "Seek bar").
+"$FFMPEG" -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc2=size=320x180:rate=24:duration=15,noise=alls=30:allf=t" \
+  -f lavfi -i "testsrc2=size=320x180:rate=24:duration=15,hue=s=0,boxblur=8" \
+  -f lavfi -i sine=frequency=440:duration=30 \
+  -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -map 2:a \
+  -c:v libx264 -preset veryfast -g 48 -pix_fmt yuv420p -crf 32 -maxrate 600k -bufsize 1200k \
+  -c:a aac -b:a 32k -movflags +faststart vbr.mp4
+ls -l sample.mkv sidecar.en.srt offset.ts vbr.mp4 avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv hdr10-av1.mkv

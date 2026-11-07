@@ -1,12 +1,14 @@
 import { expect, test, type Page } from '@playwright/test';
 import { fixtureMagnet } from './support/fixtures';
 
-// The seek bar's downloaded layer is drawn in time, through the MKV Cues (ADR 0012 "Seek bar"):
-// wherever the playhead goes, the layer covers it once the bytes there are held, and the ranges the
-// piece window evicted disappear. e2e/fixtures/resume/movie.mkv (40 s) with the piece-window.spec.ts
-// settings, so the small fixture is read in pieces and evicted behind the playhead. WebKit gets its
-// quick seek streaks spaced out: GStreamer fails to decode after some (on main too), which is not
-// what this spec checks.
+// The seek bar's downloaded layer is drawn in time (ADR 0012 "Seek bar"): wherever the playhead
+// goes, the layer covers it once the bytes there are held, and the ranges the piece window evicted
+// disappear. Through the MKV Cues: e2e/fixtures/resume/movie.mkv (40 s) with the
+// piece-window.spec.ts settings, so the small fixture is read in pieces and evicted behind the
+// playhead. Without an index (points learned from the reads): offset.ts (MPEG-TS) and vbr.mp4 (30 s,
+// 93 % of the bytes in its first half), with the default demuxer cache too, which reads the file
+// at once. WebKit gets its quick seek streaks spaced out: GStreamer fails to decode after some (on
+// main too), which is not what this spec checks.
 
 const DURATION = 40;
 /** Seconds the layer may start after the playhead: a 1 s tick reads the playhead later. */
@@ -29,8 +31,9 @@ interface Layer {
 
 /** The playhead and the downloaded layer's children, read together. */
 function layer(page: Page): Promise<Layer> {
-  return page.evaluate((duration) => {
+  return page.evaluate(() => {
     const v = document.querySelector<HTMLVideoElement>('[data-testid="video"]')!;
+    const duration = v.duration;
     const children = document.querySelectorAll<HTMLElement>('[data-testid="seek-downloaded"] > *');
     return {
       at: v.currentTime,
@@ -42,7 +45,7 @@ function layer(page: Page): Promise<Layer> {
           ],
       ),
     };
-  }, DURATION);
+  });
 }
 
 /** Some range starts at or before the playhead and runs past it. */
@@ -65,16 +68,22 @@ async function expectEvicted(page: Page, from: number, to: number) {
     .toEqual([]);
 }
 
-async function open(page: Page) {
-  await page.addInitScript(() => {
-    localStorage.setItem('webtor:buffer-ahead-s', '4');
-    localStorage.setItem('webtor:read-slack-bytes', '0');
-    localStorage.setItem('webtor:read-cache-bytes', String(64 * 1024));
+/**
+ * Opens `fixture` and waits for it to play. `windowed`: the piece-window.spec.ts settings (small
+ * demuxer cache, 4 s ahead); else the defaults.
+ */
+async function open(page: Page, fixture = 'resume', file = 'movie.mkv', windowed = true) {
+  await page.addInitScript((windowed) => {
+    if (windowed) {
+      localStorage.setItem('webtor:buffer-ahead-s', '4');
+      localStorage.setItem('webtor:read-slack-bytes', '0');
+      localStorage.setItem('webtor:read-cache-bytes', String(64 * 1024));
+    }
     localStorage.setItem('webtor:subtitle-language', 'off');
-  });
-  const magnet = await fixtureMagnet('resume');
+  }, windowed);
+  const magnet = await fixtureMagnet(fixture);
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
-  await expect(page.getByTestId('status')).toContainText('movie.mkv');
+  await expect(page.getByTestId('status')).toContainText(file);
   await expect.poll(() => prop(page, 'currentTime'), { timeout: 30_000 }).toBeGreaterThan(0.5);
 }
 
@@ -217,6 +226,60 @@ test.describe('touch', () => {
     await expect.poll(() => prop(page, 'currentTime')).toBeLessThan(before - 3);
     await settle(page);
     await expectNoGap(page, 'centre −5 s');
+    await expect(page.getByTestId('error')).toHaveCount(0);
+  });
+});
+
+test.describe('without an index', () => {
+  test('MPEG-TS read at once: the layer covers the playhead and fills at the end', async ({
+    page,
+  }) => {
+    await open(page, 'offset.ts', 'offset.ts', false);
+    await expectNoGap(page, 'playing');
+    await expect.poll(() => prop(page, 'ended'), { timeout: 30_000 }).toBe(true);
+    await expect
+      .poll(async () => {
+        const { ranges } = await layer(page);
+        const duration = await prop(page, 'duration');
+        return ranges.length === 1 && ranges[0]![0] < 0.5 && ranges[0]![1] > duration - 0.5;
+      })
+      .toBe(true);
+  });
+
+  test('VBR MP4 read at once: the layer covers the playhead in the low-bitrate half', async ({
+    page,
+  }) => {
+    await open(page, 'vbr.mp4', 'vbr.mp4', false);
+    await expectNoGap(page, 'start');
+    await seekTo(page, 18);
+    await settle(page);
+    await expect.poll(() => prop(page, 'currentTime'), { timeout: 15_000 }).toBeGreaterThan(19);
+    await expectNoGap(page, 'after a seek to 18 s');
+    await seekTo(page, 4);
+    await settle(page);
+    await expectNoGap(page, 'back to 4 s');
+    await expect(page.getByTestId('error')).toHaveCount(0);
+  });
+
+  test('VBR MP4 read in pieces: the layer covers the playhead across seeks and evictions', async ({
+    page,
+  }) => {
+    await open(page, 'vbr.mp4', 'vbr.mp4');
+    await expectNoGap(page, 'start');
+    await page.keyboard.press('ArrowRight');
+    await settle(page);
+    await expectNoGap(page, '→');
+    await seekTo(page, 22);
+    await settle(page);
+    await expect.poll(() => prop(page, 'currentTime'), { timeout: 15_000 }).toBeGreaterThan(23);
+    await expectNoGap(page, 'far forward into the low-bitrate half');
+    await expectEvicted(page, 1, 10);
+    await seekTo(page, 3);
+    await settle(page);
+    await expectNoGap(page, 'far back into what was evicted');
+    await seekTo(page, 28.5);
+    await settle(page);
+    await expectNoGap(page, 'near the end');
     await expect(page.getByTestId('error')).toHaveCount(0);
   });
 });

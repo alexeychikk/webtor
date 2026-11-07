@@ -42,6 +42,55 @@ export function monotonePoints(points: readonly ByteTimePoint[]): ByteTimePoint[
   return out;
 }
 
+/** A point learned from the reads (`ByteWindow.points`): the media up to `time` lies before `byte`. */
+export interface LearnedPoint extends ByteTimePoint {
+  /** The pipelines' run it was learned in: a seek starts a new one. */
+  run: number;
+}
+
+/**
+ * One run's points in time order with bytes rising. Once Mediabunny's cache holds the data the read
+ * cursor stops while the times go on: of the samples at one byte the latest says the most (all
+ * that media lies before it), unlike an index, where the earliest time starts at the byte
+ * (`monotonePoints`). A later sample at a smaller byte (a pipeline reading behind another) is
+ * dropped.
+ */
+function runPoints(samples: readonly ByteTimePoint[]): ByteTimePoint[] {
+  const sorted = samples
+    .filter((p) => Number.isFinite(p.byte) && Number.isFinite(p.time))
+    .sort((a, b) => a.time - b.time || a.byte - b.byte);
+  const out: ByteTimePoint[] = [];
+  for (const p of sorted) {
+    const last = out[out.length - 1];
+    if (!last || p.byte > last.byte) out.push(p);
+    else if (p.byte === last.byte) out[out.length - 1] = p;
+  }
+  return out;
+}
+
+/**
+ * Points learned from the reads for `ByteTimeIndex.points`: times and bytes both rising. Each run's
+ * points are reduced by `runPoints`; where runs disagree (a seek back read the same media with
+ * another overshoot) the newest run's points win and an older one's that don't fit between them
+ * are left out.
+ */
+export function learnedPoints(samples: readonly LearnedPoint[]): ByteTimePoint[] {
+  const runs = [...new Set(samples.map((s) => s.run))].sort((a, b) => b - a);
+  const out: ByteTimePoint[] = [];
+  for (const run of runs) {
+    for (const p of runPoints(samples.filter((s) => s.run === run))) {
+      let i = 0;
+      while (i < out.length && out[i]!.time < p.time) i++;
+      const prev = out[i - 1];
+      const next = out[i];
+      if (next && !(next.time > p.time && next.byte > p.byte)) continue;
+      if (prev && !(prev.byte < p.byte)) continue;
+      out.splice(i, 0, { byte: p.byte, time: p.time });
+    }
+  }
+  return out;
+}
+
 /** The points `timeAtByte` interpolates between, times clamped to `[0, duration]`. */
 export function mappingPoints(
   index: ByteTimeIndex,

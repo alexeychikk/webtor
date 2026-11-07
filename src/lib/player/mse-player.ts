@@ -51,7 +51,7 @@ import { ByteWindow, trackedSource, type ByteRange, type ReadRole } from './byte
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readCuePoints, readMkvHeader } from '../subtitles/mkv/header';
-import type { ByteTimeIndex, ByteTimePoint } from './byte-time';
+import { learnedPoints, type ByteTimeIndex, type ByteTimePoint } from './byte-time';
 import {
   doviConfigOf,
   dolbyVisionPlayback,
@@ -599,12 +599,12 @@ export class MsePlayer {
     if (index && index.points.length > 0) {
       return { ...index, points: index.points.map(toElement) };
     }
-    const points = [...this.bytes.points()];
     const local = this.pipelines.filter((p) => !p.remote);
-    if (local.length > 0 && local.every((p) => p.done) && Number.isFinite(this.duration)) {
-      points.push({ byte: this.bytes.readEnd, time: this.duration });
-    }
-    return { points, whole: false };
+    const ended = local.length > 0 && local.every((p) => p.done) && Number.isFinite(this.duration);
+    return {
+      points: learnedPoints(this.bytes.points(ended ? this.duration : undefined)),
+      whole: false,
+    };
   }
 
   /** Matroska Cues → `containerIndex`. Never fatal: without it the layer uses the reads. */
