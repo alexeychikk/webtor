@@ -100,6 +100,8 @@ const WINDOW_BYTES = windowBudget(
 declare global {
   /** e2e: bytes the piece store held at the last tick (ADR 0012). */
   var __webtorStoredBytes: number | undefined;
+  /** e2e: the playing file's kept bytes `[start, end)` at the last tick; null = everything. */
+  var __webtorKeepRange: { start: number; end: number } | null | undefined;
 }
 const RELAY_STATS_MS = 2000;
 const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
@@ -955,6 +957,7 @@ export class PlayerController {
       evictPieces(t, { start: file.offset + keep.start, end: file.offset + keep.end });
     }
     globalThis.__webtorStoredBytes = storedBytes(t);
+    globalThis.__webtorKeepRange = keep || null;
   }
 
   private tick() {

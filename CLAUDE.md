@@ -171,7 +171,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
                                spinner, touch ±5 s (`centreState` is the pure rule)
   media-state.svelte.ts seek.ts   `<video>` state as runes; `downloadedBytes` (piece bitfield → file byte ranges)
   byte-time.ts                 seek bar's downloaded layer in time: byte ranges → element time through the
-                               MKV Cues / AVI keyframes / learned read points (ADR 0012 "Seek bar")
+                               MKV Cues / AVI keyframes / MP4 sample table (mp4-index.ts, Mediabunny internals) /
+                               learned read points (ADR 0012 "Seek bar")
   avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
@@ -242,7 +243,11 @@ docs/decisions/                ADRs
 - **Piece window (ADR 0012).** Pieces live only in memory (`MemoryChunkStore`; OPFS is cleared at
   start, never written). Every `tick` evicts the stored pieces outside `MsePlayer.keepRange()`
   (`ByteWindow`, `byte-window.ts`: 10 s behind the playhead to the reads since the last seek, ±16 MiB
-  slack) with `evictPieces` (client.ts: `_markUnverified`, so they're not "have" and a seek back
+  slack; the start only from fragments since the last seek or an earlier run that spans the start, else
+  the lowest read of the new pipelines (`pipelinesStart`: not the keyframe lookup's or the stopped
+  pipelines'), raised to the container index's keyframe there (`indexedByteBefore`), everything kept
+  during the keyframe lookup, and
+  `restart()` after `open`'s header reads) with `evictPieces` (client.ts: `_markUnverified`, so they're not "have" and a seek back
   re-downloads); reads in flight (`trackedSource`) and `_selections` are never evicted: a `done` file
   reads the store with no selection, and a missing piece destroys the stream. Every read of the
   playing file goes through the window: other readers (subtitle scan, MKV header, fonts) use
@@ -252,7 +257,8 @@ docs/decisions/                ADRs
   `torrent.downloaded`/`progress` drop on eviction: the starvation watchdog uses `verifiedBytes` (client.ts; `received` counts a failing web seed's protocol bytes). Small fixtures
   are read whole by Mediabunny's cache, so `e2e/piece-window.spec.ts` (chromium + webkit) sets
   `localStorage['webtor:read-cache-bytes']` (small `maxCacheSize`, no prefetch) and
-  `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes`.
+  `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes` and `__webtorKeepRange` (the kept
+  bytes at the last tick; null = all). Seek-bar layer assertions: `e2e/support/downloaded.ts`.
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
   `localStorage['webtor:sb-quota-bytes']` gives every SourceBuffer a Safari-like byte quota
@@ -410,7 +416,8 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
 - `resume/` = `movie.mkv` (40 s 320×180; audio "English AAC" + "Russian AC3"; subtitles `embedded:4`
   "English", `embedded:5` "English SDH", `embedded:6` "Russian") + `extra.mkv` (→ sample.mkv).
 - `vbr.mp4`: 30 s 320×180 H.264 + AAC, faststart; 0–15 s noise (~93 % of the bytes), 15–30 s near-static
-  (the seek bar's downloaded layer without an index, `e2e/seek-downloaded.spec.ts`).
+  (the seek bar's downloaded layer without an index, `e2e/seek-downloaded.spec.ts`). `vbr.ts`: the same in
+  MPEG-TS (first frame at ~1.46 s), for seeks without an index under the piece window.
 - `offset.ts`: 10 s 320×180 H.264 + AAC MPEG-TS whose first frame is at ~1.4 s. The player maps
   every file onto a 0-based element timeline (`src/lib/player/timeline.ts`): `timestampOffset =
 k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in front of the
@@ -488,7 +495,9 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     and GStreamer then fails a seek to `duration` ("No valid frames decoded before end of
     stream"); `endSnap` would have to cover that.
   - Stress check: `STRESS_OPENS=120 pnpm exec playwright test --project=webkit start-stress`
-    (prints the log of every open that needed a reopen).
+    (prints the log of every open that needed a reopen; `STRESS_FIXTURE`, `STRESS_WINDOWED=asc`).
+    vbr.ts with 4 s ahead and the 64 KiB read cache hits this in ~1 open in 4 (main too), so
+    `piece-window.spec.ts` plays it on WebKit without that cache.
 - **A seek during a restart always restarts** (`restarting`, `onSeeking`): until the running restart
   cleared the buffers, `sb.buffered` still shows the media it is about to remove, and a seek "into
   it" was left with nothing (a −5 s right after a +10 s stalled for good).

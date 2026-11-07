@@ -34,14 +34,39 @@ after a seek.
   - **Sampling.** `MsePlayer` wraps the file's `ByteSource` and records every demuxer read. Each
     fragment produced by a local pipeline gives a sample: (furthest `writtenTo`, end of the
     latest read).
-  - **Start.** The byte of the latest sample at least `KEEP_BEHIND_S` (10 s) behind the playhead,
-    minus `READ_AHEAD_SLACK` (16 MiB). Mediabunny's 'network' prefetch reads up to 8 MiB beyond
-    what it demuxed.
+  - **Start.** The byte of the latest sample of this run (since the last seek) at least
+    `KEEP_BEHIND_S` (10 s) behind the playhead, minus `READ_AHEAD_SLACK` (16 MiB). Mediabunny's
+    'network' prefetch reads up to 8 MiB beyond what it demuxed.
+    - Until this run has such a sample, the lowest read since the seek, or lower where an earlier
+      run that played through `KEEP_BEHIND_S` behind the playhead (it has samples on both sides of
+      that time) has a sample there. An earlier run's cursor can be far past its media (the demuxer
+      read ahead), so alone it never sets the start. It did, and after a far seek back or forward
+      the window began past the playhead's bytes: the pieces the pipelines were reading were
+      evicted, and seeks stalled (MPEG-TS never completed one). A run that ended before that time
+      says nothing of where its bytes are: after → then a far seek forward, the → run's last sample
+      held the start ~15 s behind the playhead until the end.
+    - Only the reads of this run's pipelines count (`pipelinesStart`, once the keyframe lookup is
+      done and the stopped pipelines' conversions are cancelled): they set the lowest read, and a
+      fragment is sampled only after one of them. The lookup probes the middle Cluster of a Matroska
+      file (all over an MPEG-TS file), and the stopped pipelines read on near the old playhead: a
+      new run's first fragment, served from the demuxer's cache, was sampled with the probe's
+      cursor, and after a further seek that run held the start ~8 s too low until the end. Until
+      the new pipelines read, the lowest read since the seek.
+    - The pipelines' conversions run their own keyframe lookup, so their lowest read can still be
+      such a probe. With a container index (MKV Cues, the MP4 sample table, an AVI index) the start
+      is at least the keyframe before the last one at or before `KEEP_BEHIND_S` behind the playhead
+      (`indexedByteBefore`; one more back for interleaved tracks), minus the slack, until this run
+      has a sample there.
+    - During the keyframe search, from 0: its probes jump all over the file, and shrinking the
+      window between its reads evicted the probes.
   - **End.** The furthest sample since the last seek (or the latest read, if further), plus the
     slack, capped at the furthest read.
     A one-off read far away, such as Matroska Cues at the end of the file, does not stretch the
     window. Before the first sample, the end is the furthest read.
-  - **Reset.** A seek (`restartAt`) resets the run.
+    Right after a seek the reads run ~10 s of media past the appends: Mediabunny's `packets()`
+    queue holds as many packets as were taken in the last second, and the start is a burst.
+  - **Reset.** A seek (`restartAt`) resets the run, and so does `MsePlayer.open` after the header
+    and duration reads, so a resume's window starts at its resume point from the first tick.
   - **Reads in flight are always inside** (`trackedSource` pins a read until its promise settles or
     its stream delivered its bytes, ends or is cancelled). Every read of the playing file goes
     through the window: the pipelines' (`demux`), the subtitle scan's (`scan`, via
@@ -90,7 +115,12 @@ byte (`MsePlayer.byteTimeIndex()`):
   the media (the Cues or Attachments after the last Cluster, else the Segment's end) = duration.
 - **AVI:** the video's keyframe offsets (`AviDemuxer.byteTimeIndex()`); whole once its index is
   complete, still growing during a `movi` scan.
-- **Anything else (MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
+- **MP4/MOV (not fragmented):** every video keyframe's sample offset and timestamp, from the
+  sample table Mediabunny parsed from `moov` (`mp4-index.ts`, its internal `IsobmffDemuxer` shape;
+  Mediabunny is pinned). The whole index, up to the end of the last video sample. The read cursor
+  runs seconds of media ahead of the fragment it sampled, so learned points drew a held range up to
+  ~5 s before its time, into a range already evicted (a flaky `seek-downloaded.spec.ts`).
+- **Anything else (fragmented MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
   (fragment start time, read cursor) samples, plus (furthest read ever, duration) once every
   pipeline appended through the end. The cursor is past its fragment's media, so these points
   place bytes early, never late: the layer may start a little before the playhead, never after it.
@@ -104,8 +134,8 @@ rather than guessed; with no points at all the layer is empty. Ranges re-map eve
 evicted ones disappear and re-downloaded ones come back at their times after any seek.
 `byte-time.test.ts` covers the mapping; `e2e/seek-downloaded.spec.ts` (chromium + webkit) checks
 that the layer covers the playhead after keys, seek-bar clicks and drags, far jumps, touch
-skips and a resume, and that evicted ranges go, through the Cues and without an index (`offset.ts`,
-`vbr.mp4`).
+skips and a resume, and that evicted ranges go, through the Cues, the MP4 sample table (`vbr.mp4`)
+and without an index (`offset.ts`).
 
 ## Consequences
 

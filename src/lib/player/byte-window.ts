@@ -45,6 +45,12 @@ export class ByteWindow {
   private run = 0;
   /** The furthest demuxer read ever. */
   private reached = 0;
+  /** The lowest demuxer read since the last seek; Infinity = none. */
+  private floor = Infinity;
+  /** The lowest demuxer read since the pipelines of this run started (`pipelinesStart`). */
+  private startedFloor = Infinity;
+  /** This run's pipelines started: the keyframe lookup is over. */
+  private started = false;
   /** Reads not finished yet: their pieces must stay, whatever the playhead. */
   private readonly pending = new Set<ByteRange>();
 
@@ -54,6 +60,8 @@ export class ByteWindow {
   read(start: number, end: number, role: ReadRole = 'demux'): () => void {
     if (role === 'demux') {
       this.cursor = end;
+      if (start < this.floor) this.floor = start;
+      if (start < this.startedFloor) this.startedFloor = start;
       if (end > this.frontier) this.frontier = end;
       if (end > this.reached) this.reached = end;
     } else if (role === 'scan' && end > this.scanned) this.scanned = end;
@@ -62,13 +70,32 @@ export class ByteWindow {
     return () => this.pending.delete(range);
   }
 
-  /** A seek restarted the pipelines: what they read before says nothing about the reads ahead. */
+  /**
+   * A seek restarted the pipelines (or they start after the header reads): what they read before
+   * says nothing about where the playhead's bytes are, nor about the reads ahead.
+   */
   restart() {
     this.frontier = 0;
     this.cursor = 0;
     this.sampled = 0;
     this.scanned = 0;
+    this.floor = Infinity;
+    this.startedFloor = Infinity;
+    this.started = false;
     this.run++;
+  }
+
+  /**
+   * This run's pipelines start: only their reads sample fragments and set the start from now on.
+   * The keyframe lookup's probes before (all over the file without an index, the middle Cluster of
+   * a Matroska file) and the stopped pipelines' last reads (near the old playhead) say nothing about
+   * where the new playhead's bytes are. Until they read (they may start from the demuxer's cache),
+   * the start is the lowest read since the seek.
+   */
+  pipelinesStart() {
+    this.cursor = 0;
+    this.startedFloor = Infinity;
+    this.started = true;
   }
 
   /** The pipelines produced media up to element time `time` (the furthest of them). */
@@ -95,20 +122,24 @@ export class ByteWindow {
 
   /**
    * Bytes to keep with the playhead at element time `t`; null = keep everything. The start comes
-   * from a fragment at least `KEEP_BEHIND_S` before `t`, lowered by the slack. The end comes from
-   * the demuxer's reads since the last seek: the furthest fragment's (or the latest read) plus the
-   * slack, or the furthest read before any fragment. A one-off read further on, like Matroska Cues
-   * at the end of the file, doesn't count. The subtitle scan's reach since the last seek does: the
-   * pipelines read those bytes soon. Reads still running are always inside: WebTorrent reads a
-   * piece it has from the store with no selection left on it, and a missing piece ends the stream.
+   * from a fragment of this run (since the last seek) at least `KEEP_BEHIND_S` before `t`, lowered
+   * by the slack. Until this run has one, from the lowest read since the seek (the playhead's own
+   * bytes, and the probes of a keyframe search), or lower where an earlier run that played through
+   * `t - KEEP_BEHIND_S` has a fragment there: an earlier run's read cursor can be far past its
+   * media, so alone it never sets the start, and a run that ended before that time (a far seek
+   * forward) says nothing of where its bytes are. A container's index (`indexed`: a byte no media
+   * from a time on lies before) raises that start: the new pipelines' first reads can be a
+   * keyframe lookup's probe further back. While
+   * the keyframe search runs (no fragment yet), from 0: its probes jump around the file. The
+   * end comes from the demuxer's reads since the last seek: the furthest fragment's (or the latest
+   * read) plus the slack, or the furthest read before any fragment. A one-off read further on, like
+   * Matroska Cues at the end of the file, doesn't count. The subtitle scan's reach since the last
+   * seek does: the pipelines read those bytes soon. Reads still running are always inside:
+   * WebTorrent reads a piece it has from the store with no selection left on it, and a missing
+   * piece ends the stream.
    */
-  keep(t: number): ByteRange | null {
-    const behind = t - KEEP_BEHIND_S;
-    let start = 0;
-    for (const s of this.samples) {
-      if (s.time > behind) break;
-      start = Math.max(0, s.byte - this.slack);
-    }
+  keep(t: number, indexed?: (time: number) => number): ByteRange | null {
+    let start = this.startAt(t - KEEP_BEHIND_S, indexed);
     let end = Infinity;
     if (this.sampled)
       end = Math.min(this.frontier, Math.max(this.sampled, this.cursor) + this.slack);
@@ -120,6 +151,30 @@ export class ByteWindow {
     }
     if (start === 0 && end === Infinity) return null;
     return { start: Math.min(start, end), end };
+  }
+
+  /** Where the bytes of element time `behind` start, at the latest (see `keep`). */
+  private startAt(behind: number, indexed?: (time: number) => number): number {
+    let current: Sample | undefined;
+    const earlier = new Map<number, Sample>();
+    const spanning = new Set<number>();
+    for (const s of this.samples) {
+      if (s.time > behind) {
+        if (s.run !== this.run) spanning.add(s.run);
+        continue;
+      }
+      if (s.run === this.run) current = s;
+      else earlier.set(s.run, s);
+    }
+    if (current) return Math.max(0, current.byte - this.slack);
+    if (!this.sampled && !this.started) return 0;
+    const floor = Number.isFinite(this.startedFloor) ? this.startedFloor : this.floor;
+    let start = Math.max(0, floor - this.slack);
+    for (const [run, s] of earlier) {
+      if (spanning.has(run)) start = Math.min(start, Math.max(0, s.byte - this.slack));
+    }
+    if (start === Infinity) start = 0;
+    return indexed ? Math.max(start, indexed(behind) - this.slack) : start;
   }
 }
 

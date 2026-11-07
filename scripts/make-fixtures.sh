@@ -185,4 +185,7 @@ node ../../scripts/make-dv-fixtures.mjs
   -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -map 2:a \
   -c:v libx264 -preset veryfast -g 48 -pix_fmt yuv420p -crf 32 -maxrate 600k -bufsize 1200k \
   -c:a aac -b:a 32k -movflags +faststart vbr.mp4
-ls -l sample.mkv sidecar.en.srt offset.ts vbr.mp4 avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv hdr10-av1.mkv
+# vbr.ts: vbr.mp4 in MPEG-TS (first frame at ~1.46 s), for seeks without an index under the piece
+# window (e2e/piece-window.spec.ts).
+"$FFMPEG" -hide_banner -loglevel error -y -i vbr.mp4 -map 0 -c copy -f mpegts vbr.ts
+ls -l sample.mkv sidecar.en.srt offset.ts vbr.mp4 vbr.ts avi-*.avi resume/*.mkv short-audio.mkv surround.mkv dolby-vision-*.mkv hdr10-av1.mkv

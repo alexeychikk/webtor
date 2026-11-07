@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   downloadedTimes,
+  indexedByteBefore,
   learnedPoints,
   mappingPoints,
   monotonePoints,
@@ -178,6 +179,27 @@ describe('downloadedTimes', () => {
     const got = draw(held(70, 90), learned);
     expect(covers(got, 80)).toBe(true);
     expect(got[0]![0]).toBeLessThanOrEqual(70);
+  });
+});
+
+describe('indexedByteBefore', () => {
+  const points = [
+    { byte: 3000, time: 6 },
+    { byte: 100, time: 0 },
+    { byte: 1000, time: 2 },
+    { byte: 2000, time: 4 },
+  ];
+
+  it('is the keyframe before the last at or before the time', () => {
+    expect(indexedByteBefore(points, 5)).toBe(1000);
+    expect(indexedByteBefore(points, 6)).toBe(2000);
+    expect(indexedByteBefore(points, 60)).toBe(2000);
+  });
+
+  it('is 0 before the second keyframe', () => {
+    expect(indexedByteBefore(points, 3)).toBe(100);
+    expect(indexedByteBefore(points, 1)).toBe(0);
+    expect(indexedByteBefore([], 10)).toBe(0);
   });
 });
 

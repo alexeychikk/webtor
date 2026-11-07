@@ -35,14 +35,108 @@ describe('ByteWindow', () => {
     expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 42 * MiB });
   });
 
-  it('after a seek keeps behind by the earlier samples and ahead by the new reads', () => {
+  it('after a seek keeps everything during the keyframe search, then from its lowest read', () => {
     const w = new ByteWindow(0);
     play(w, 0, 50);
     w.restart();
-    expect(w.keep(30)).toEqual({ start: 42 * MiB, end: Infinity });
+    expect(w.keep(30)).toBeNull();
+    w.read(900 * MiB, 901 * MiB)();
+    w.read(30 * MiB, 31 * MiB)();
+    expect(w.keep(30)).toEqual({ start: 0, end: 901 * MiB });
     play(w, 30, 35);
-    expect(w.keep(31)).toEqual({ start: 44 * MiB, end: 72 * MiB });
-    expect(w.keep(60)).toEqual({ start: 72 * MiB, end: 72 * MiB });
+    expect(w.keep(31)).toEqual({ start: 30 * MiB, end: 72 * MiB });
+    expect(w.keep(45)).toEqual({ start: 72 * MiB, end: 72 * MiB });
+  });
+
+  it('after a far seek keeps from the playhead, whatever the earlier cursor ran ahead to', () => {
+    const w = new ByteWindow(0);
+    // Before the seek the reads ran 30 s of media (60 MiB) ahead of each fragment.
+    for (let t = 0; t < 40; t++) {
+      w.read((t + 30) * 2 * MiB, (t + 31) * 2 * MiB)();
+      w.produced(t);
+    }
+    expect(w.keep(35)?.start).toBe(112 * MiB);
+    w.restart();
+    play(w, 40, 42);
+    expect(w.keep(40)).toEqual({ start: 80 * MiB, end: 86 * MiB });
+    play(w, 43, 60);
+    expect(w.keep(55)).toEqual({ start: 92 * MiB, end: 122 * MiB });
+  });
+
+  it('after a far seek forward ignores an earlier run that ended before the window', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 2);
+    w.restart();
+    play(w, 6, 8);
+    w.restart();
+    play(w, 22, 25);
+    expect(w.keep(23)).toEqual({ start: 44 * MiB, end: 52 * MiB });
+    expect(w.keep(30)).toEqual({ start: 44 * MiB, end: 52 * MiB });
+  });
+
+  it('after a short seek keeps the earlier run that played through the window', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 30);
+    w.restart();
+    play(w, 35, 36);
+    expect(w.keep(35)).toEqual({ start: 52 * MiB, end: 74 * MiB });
+  });
+
+  it('after a seek keeps from what the new pipelines read, not the lookup or the stopped ones', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 8);
+    w.restart();
+    // The stopped pipelines' last read, then the keyframe lookup's probe of the middle Cluster.
+    w.read(18 * MiB, 20 * MiB)();
+    w.read(30 * MiB, 31 * MiB)();
+    w.read(44 * MiB, 45 * MiB)();
+    expect(w.keep(22)).toEqual({ start: 0, end: 45 * MiB });
+    w.pipelinesStart();
+    // The new pipelines' first fragment came from the demuxer's cache: no read since they started.
+    w.produced(22);
+    expect(w.points().filter((p) => p.run === 1)).toEqual([]);
+    expect(w.keep(22)).toEqual({ start: 18 * MiB, end: 45 * MiB });
+    play(w, 22, 25);
+    expect(w.keep(23)).toEqual({ start: 44 * MiB, end: 52 * MiB });
+  });
+
+  it("raises the start to the container's index until this run has a fragment that far back", () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 20);
+    w.restart();
+    w.pipelinesStart();
+    // The new pipelines' own keyframe lookup probes the middle of the file first.
+    w.read(20 * MiB, 21 * MiB)();
+    play(w, 37, 38);
+    const indexed = (time: number) => 2 * MiB * Math.floor(time) - 2 * MiB;
+    expect(w.keep(37)).toEqual({ start: 20 * MiB, end: 78 * MiB });
+    expect(w.keep(37, indexed)).toEqual({ start: 52 * MiB, end: 78 * MiB });
+    play(w, 39, 50);
+    expect(w.keep(50, indexed)).toEqual({ start: 82 * MiB, end: 102 * MiB });
+  });
+
+  it('after a far seek back keeps from the new playhead, not the earlier run', () => {
+    const w = new ByteWindow(0);
+    play(w, 0, 100);
+    w.restart();
+    play(w, 20, 25);
+    expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 52 * MiB });
+    play(w, 26, 40);
+    expect(w.keep(40)).toEqual({ start: 62 * MiB, end: 82 * MiB });
+  });
+
+  it('after a resume keeps the window around the resume point from the first fragment', () => {
+    const w = new ByteWindow(0);
+    w.read(0, 1 * MiB)();
+    w.read(999 * MiB, 1000 * MiB)();
+    w.restart();
+    w.read(999 * MiB, 1000 * MiB)();
+    w.read(40 * MiB, 41 * MiB)();
+    play(w, 20, 20);
+    expect(w.keep(20)).toEqual({ start: 40 * MiB, end: 42 * MiB });
+    play(w, 21, 40);
+    expect(w.keep(30)).toEqual({ start: 42 * MiB, end: 82 * MiB });
+    expect(w.keep(35)).toEqual({ start: 52 * MiB, end: 82 * MiB });
   });
 
   it('ignores fragments before any read and non-finite times', () => {
@@ -80,7 +174,7 @@ describe('ByteWindow', () => {
     expect(w.keep(20)).toEqual({ start: 22 * MiB, end: 62 * MiB });
     w.restart();
     play(w, 30, 35);
-    expect(w.keep(35)).toEqual({ start: 42 * MiB, end: 72 * MiB });
+    expect(w.keep(35)).toEqual({ start: 60 * MiB, end: 72 * MiB });
   });
 
   it('pins a one-off read only while it runs', () => {
