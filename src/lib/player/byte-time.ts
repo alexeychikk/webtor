@@ -42,6 +42,18 @@ export function monotonePoints(points: readonly ByteTimePoint[]): ByteTimePoint[
   return out;
 }
 
+/**
+ * A file offset no media from element time `time` on lies before, by a container's index: the
+ * point one keyframe before the last at or before `time` (an interleaved track's samples can sit
+ * a little before a video keyframe's). 0 when the index has none.
+ */
+export function indexedByteBefore(points: readonly ByteTimePoint[], time: number): number {
+  const sorted = monotonePoints(points);
+  const after = sorted.findIndex((p) => p.time > time);
+  const last = (after === -1 ? sorted.length : after) - 1;
+  return last >= 1 ? sorted[last - 1]!.byte : 0;
+}
+
 /** A point learned from the reads (`ByteWindow.points`): the media up to `time` lies before `byte`. */
 export interface LearnedPoint extends ByteTimePoint {
   /** The pipelines' run it was learned in: a seek starts a new one. */

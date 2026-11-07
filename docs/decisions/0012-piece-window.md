@@ -38,13 +38,27 @@ after a seek.
     `KEEP_BEHIND_S` (10 s) behind the playhead, minus `READ_AHEAD_SLACK` (16 MiB). Mediabunny's
     'network' prefetch reads up to 8 MiB beyond what it demuxed.
     - Until this run has such a sample, the lowest read since the seek, or lower where an earlier
-      run's sample says so. An earlier run's cursor can be far past its media (the demuxer read
-      ahead), so alone it never sets the start. It did, and after a far seek back or forward the
-      window began past the playhead's bytes: the pieces the pipelines were reading were evicted,
-      and seeks stalled (MPEG-TS never completed one).
-    - Before this run's first fragment, from 0: a keyframe search (MPEG-TS without an index)
-      probes all over the file, and shrinking the window between its reads evicted the probes.
-      The probes since the seek then stay kept for `KEEP_BEHIND_S`.
+      run that played through `KEEP_BEHIND_S` behind the playhead (it has samples on both sides of
+      that time) has a sample there. An earlier run's cursor can be far past its media (the demuxer
+      read ahead), so alone it never sets the start. It did, and after a far seek back or forward
+      the window began past the playhead's bytes: the pieces the pipelines were reading were
+      evicted, and seeks stalled (MPEG-TS never completed one). A run that ended before that time
+      says nothing of where its bytes are: after → then a far seek forward, the → run's last sample
+      held the start ~15 s behind the playhead until the end.
+    - Only the reads of this run's pipelines count (`pipelinesStart`, once the keyframe lookup is
+      done and the stopped pipelines' conversions are cancelled): they set the lowest read, and a
+      fragment is sampled only after one of them. The lookup probes the middle Cluster of a Matroska
+      file (all over an MPEG-TS file), and the stopped pipelines read on near the old playhead: a
+      new run's first fragment, served from the demuxer's cache, was sampled with the probe's
+      cursor, and after a further seek that run held the start ~8 s too low until the end. Until
+      the new pipelines read, the lowest read since the seek.
+    - The pipelines' conversions run their own keyframe lookup, so their lowest read can still be
+      such a probe. With a container index (MKV Cues, the MP4 sample table, an AVI index) the start
+      is at least the keyframe before the last one at or before `KEEP_BEHIND_S` behind the playhead
+      (`indexedByteBefore`; one more back for interleaved tracks), minus the slack, until this run
+      has a sample there.
+    - During the keyframe search, from 0: its probes jump all over the file, and shrinking the
+      window between its reads evicted the probes.
   - **End.** The furthest sample since the last seek (or the latest read, if further), plus the
     slack, capped at the furthest read.
     A one-off read far away, such as Matroska Cues at the end of the file, does not stretch the

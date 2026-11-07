@@ -5,13 +5,15 @@ import { fixtureMagnet } from './support/fixtures';
  * Opt-in stress check of the start (CLAUDE.md "The start"): `STRESS_OPENS` fresh opens, each of
  * which must play past 1 s. Skipped unless `STRESS_OPENS` is set, e.g.
  * `STRESS_OPENS=120 pnpm exec playwright test --project=webkit start-stress`.
- * `STRESS_FIXTURE` picks the fixture (default sample.mkv). A failing open prints a log of the
+ * `STRESS_FIXTURE` picks the fixture (default sample.mkv); `STRESS_WINDOWED` adds settings of
+ * `e2e/piece-window.spec.ts`: `a` 4 s ahead, `s` no read slack, `c` the 64 KiB read cache (`asc` all). A failing open prints a log of the
  * element's events, its `currentTime` writes and the SourceBuffers' ranges; an open that needed
  * `onStuckSeek` (a second MediaSource) prints `REOPEN`. An open on one MediaSource must make at
  * most one seek (the gap jump) and no restart (no `SourceBuffer.remove`).
  */
 const OPENS = Number(process.env.STRESS_OPENS || 0);
 const FIXTURE = process.env.STRESS_FIXTURE || 'sample.mkv';
+const WINDOWED = process.env.STRESS_WINDOWED ?? '';
 
 declare global {
   interface Window {
@@ -23,6 +25,14 @@ test.describe('start stress', () => {
   test.skip(OPENS === 0, 'STRESS_OPENS not set');
   for (let i = 0; i < OPENS; i++) {
     test(`open ${i}`, async ({ page }) => {
+      if (WINDOWED) {
+        await page.addInitScript((w) => {
+          if (w.includes('a')) localStorage.setItem('webtor:buffer-ahead-s', '4');
+          if (w.includes('s')) localStorage.setItem('webtor:read-slack-bytes', '0');
+          if (w.includes('c')) localStorage.setItem('webtor:read-cache-bytes', String(64 * 1024));
+          localStorage.setItem('webtor:subtitle-language', 'off');
+        }, WINDOWED);
+      }
       await page.addInitScript(() => {
         window.__startLog = [];
         const t0 = performance.now();
@@ -103,6 +113,8 @@ test.describe('start stress', () => {
           rs: v.readyState,
           seeking: v.seeking,
           paused: v.paused,
+          keep: window.__webtorKeepRange,
+          stored: window.__webtorStoredBytes,
         }));
         console.log(`STALL open ${i}`, JSON.stringify(state), '\n' + (await startLog()).join('\n'));
         throw err;

@@ -243,7 +243,10 @@ docs/decisions/                ADRs
 - **Piece window (ADR 0012).** Pieces live only in memory (`MemoryChunkStore`; OPFS is cleared at
   start, never written). Every `tick` evicts the stored pieces outside `MsePlayer.keepRange()`
   (`ByteWindow`, `byte-window.ts`: 10 s behind the playhead to the reads since the last seek, ±16 MiB
-  slack; the start only from fragments since the last seek, everything kept until the first one, and
+  slack; the start only from fragments since the last seek or an earlier run that spans the start, else
+  the lowest read of the new pipelines (`pipelinesStart`: not the keyframe lookup's or the stopped
+  pipelines'), raised to the container index's keyframe there (`indexedByteBefore`), everything kept
+  during the keyframe lookup, and
   `restart()` after `open`'s header reads) with `evictPieces` (client.ts: `_markUnverified`, so they're not "have" and a seek back
   re-downloads); reads in flight (`trackedSource`) and `_selections` are never evicted: a `done` file
   reads the store with no selection, and a missing piece destroys the stream. Every read of the
@@ -492,7 +495,9 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     and GStreamer then fails a seek to `duration` ("No valid frames decoded before end of
     stream"); `endSnap` would have to cover that.
   - Stress check: `STRESS_OPENS=120 pnpm exec playwright test --project=webkit start-stress`
-    (prints the log of every open that needed a reopen).
+    (prints the log of every open that needed a reopen; `STRESS_FIXTURE`, `STRESS_WINDOWED=asc`).
+    vbr.ts with 4 s ahead and the 64 KiB read cache hits this in ~1 open in 4 (main too), so
+    `piece-window.spec.ts` plays it on WebKit without that cache.
 - **A seek during a restart always restarts** (`restarting`, `onSeeking`): until the running restart
   cleared the buffers, `sb.buffered` still shows the media it is about to remove, and a seek "into
   it" was left with nothing (a −5 s right after a +10 s stalled for good).

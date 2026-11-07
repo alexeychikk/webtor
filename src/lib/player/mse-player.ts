@@ -51,7 +51,12 @@ import { ByteWindow, trackedSource, type ByteRange, type ReadRole } from './byte
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readCuePoints, readMkvHeader } from '../subtitles/mkv/header';
-import { learnedPoints, type ByteTimeIndex, type ByteTimePoint } from './byte-time';
+import {
+  indexedByteBefore,
+  learnedPoints,
+  type ByteTimeIndex,
+  type ByteTimePoint,
+} from './byte-time';
 import { mp4TrackIndex } from './mp4-index';
 import {
   doviConfigOf,
@@ -502,6 +507,7 @@ export class MsePlayer {
       } else if (resumeAt !== null) {
         k = toSourceTime(tl, resumeAt);
       }
+      bytes.pipelinesStart();
 
       const mediaSource = new MS();
       if (managed) video.disableRemotePlayback = true;
@@ -579,7 +585,14 @@ export class MsePlayer {
    * the furthest read since the last seek; null = keep everything.
    */
   keepRange(): ByteRange | null {
-    return this.destroyed ? null : this.bytes.keep(this.video.currentTime);
+    if (this.destroyed) return null;
+    const index = this.containerIndex?.();
+    const points = index?.points.length ? index.points : null;
+    const startTime = this.timeline.startTime;
+    return this.bytes.keep(
+      this.video.currentTime,
+      points ? (time) => indexedByteBefore(points, time + startTime) : undefined,
+    );
   }
 
   /**
@@ -1200,12 +1213,14 @@ export class MsePlayer {
       const k = this.remote
         ? toSourceTime(this.timeline, t)
         : restartPoint(this.timeline, key?.timestamp);
+      const starts = await Promise.all(stopped.map(({ p }) => this.startOf(p, k)));
+      await Promise.all(stopped.map((s) => s.cancel));
+      if (gen !== this.seekGen || this.destroyed) return;
+      this.bytes.pipelinesStart();
       await Promise.all(
-        stopped.map(async ({ p, g, cancel }) => {
-          const start = await this.startOf(p, k);
-          await cancel;
+        stopped.map(async ({ p, g }, i) => {
           await this.resetBuffer(p);
-          if (g === p.gen && !this.destroyed) await this.startPipeline(p, start, g);
+          if (g === p.gen && !this.destroyed) await this.startPipeline(p, starts[i]!, g);
         }),
       );
     } catch (err) {
