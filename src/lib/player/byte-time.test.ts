@@ -7,6 +7,7 @@ import {
   timeAtByte,
   type ByteTimeIndex,
   type ByteTimePoint,
+  type LearnedPoint,
 } from './byte-time';
 import { downloadedBytes } from './seek';
 
@@ -259,6 +260,34 @@ describe('learnedPoints', () => {
     expect(learnedPoints([{ byte: NaN, time: 1, run: 0 }])).toEqual([]);
   });
 
+  it('gives the same points as a point-by-point insertion on ~10k samples over a few runs', () => {
+    // A long film learned over 4 runs (seeks back and forth), the cursor stopping now and then.
+    const samples: LearnedPoint[] = [];
+    let seed = 7;
+    const random = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+    const runs = [
+      { run: 0, from: 0, to: 3000 },
+      { run: 1, from: 2500, to: 6500 },
+      { run: 2, from: 1000, to: 2000 },
+      { run: 3, from: 5000, to: 6500 },
+    ];
+    for (const { run, from, to } of runs) {
+      const overshoot = 50_000 + run * 30_000;
+      for (let t = from; t < to; t += 1) {
+        const cursorStopped = random() < 0.2;
+        const byte = Math.round(t * 1_000_000 + (cursorStopped ? 0 : overshoot * random()));
+        samples.push({ byte, time: t, run });
+      }
+    }
+    expect(samples.length).toBeGreaterThan(9_000);
+    const got = learnedPoints(samples);
+    expect(got).toEqual(insertOneByOne(samples));
+    for (let i = 1; i < got.length; i++) {
+      expect(got[i]!.time).toBeGreaterThan(got[i - 1]!.time);
+      expect(got[i]!.byte).toBeGreaterThan(got[i - 1]!.byte);
+    }
+  });
+
   describe('drawn', () => {
     /** A whole-file read up front (default prefetch): every sample has the cursor at the end. */
     const wholeRead = (times: number[]) => at(LENGTH, times);
@@ -289,3 +318,22 @@ describe('learnedPoints', () => {
     });
   });
 });
+
+/** The reference for `learnedPoints`: each run's points inserted one by one, newest run first. */
+function insertOneByOne(samples: readonly LearnedPoint[]): ByteTimePoint[] {
+  const runs = [...new Set(samples.map((s) => s.run))].sort((a, b) => b - a);
+  const out: ByteTimePoint[] = [];
+  for (const run of runs) {
+    const points = learnedPoints(samples.filter((s) => s.run === run));
+    for (const p of points) {
+      let i = 0;
+      while (i < out.length && out[i]!.time < p.time) i++;
+      const prev = out[i - 1];
+      const next = out[i];
+      if (next && !(next.time > p.time && next.byte > p.byte)) continue;
+      if (prev && !(prev.byte < p.byte)) continue;
+      out.splice(i, 0, p);
+    }
+  }
+  return out;
+}

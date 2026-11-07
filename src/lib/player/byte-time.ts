@@ -75,19 +75,37 @@ function runPoints(samples: readonly ByteTimePoint[]): ByteTimePoint[] {
  * are left out.
  */
 export function learnedPoints(samples: readonly LearnedPoint[]): ByteTimePoint[] {
-  const runs = [...new Set(samples.map((s) => s.run))].sort((a, b) => b - a);
-  const out: ByteTimePoint[] = [];
-  for (const run of runs) {
-    for (const p of runPoints(samples.filter((s) => s.run === run))) {
-      let i = 0;
-      while (i < out.length && out[i]!.time < p.time) i++;
-      const prev = out[i - 1];
-      const next = out[i];
-      if (next && !(next.time > p.time && next.byte > p.byte)) continue;
-      if (prev && !(prev.byte < p.byte)) continue;
-      out.splice(i, 0, { byte: p.byte, time: p.time });
-    }
+  const byRun = new Map<number, LearnedPoint[]>();
+  for (const s of samples) {
+    const group = byRun.get(s.run);
+    if (group) group.push(s);
+    else byRun.set(s.run, [s]);
   }
+  const newestFirst = [...byRun.keys()].sort((a, b) => b - a);
+  let out: ByteTimePoint[] = [];
+  for (const run of newestFirst) out = mergeOlderRun(out, runPoints(byRun.get(run)!));
+  return out;
+}
+
+/**
+ * `kept` (newer runs' points) with the points of an older run that fit between them, in one pass
+ * over both (each in time order).
+ */
+function mergeOlderRun(
+  kept: readonly ByteTimePoint[],
+  older: readonly ByteTimePoint[],
+): ByteTimePoint[] {
+  const out: ByteTimePoint[] = [];
+  let i = 0;
+  for (const p of older) {
+    while (i < kept.length && kept[i]!.time < p.time) out.push(kept[i++]!);
+    const prev = out[out.length - 1];
+    const next = kept[i];
+    if (next && !(next.time > p.time && next.byte > p.byte)) continue;
+    if (prev && !(prev.byte < p.byte)) continue;
+    out.push({ byte: p.byte, time: p.time });
+  }
+  while (i < kept.length) out.push(kept[i++]!);
   return out;
 }
 
