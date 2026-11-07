@@ -172,7 +172,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
   media-state.svelte.ts seek.ts   `<video>` state as runes; `downloadedBytes` (piece bitfield → file byte ranges)
   byte-time.ts                 seek bar's downloaded layer in time: byte ranges → element time through the
                                MKV Cues / AVI keyframes / MP4 sample table (mp4-index.ts, Mediabunny internals) /
-                               learned read points (ADR 0012 "Seek bar")
+                               MPEG-TS packet offsets (packet-points.ts: the video track backing's packets'
+                               `sequenceNumber`) / learned read points (ADR 0012 "Seek bar")
   avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)
@@ -258,7 +259,9 @@ docs/decisions/                ADRs
   are read whole by Mediabunny's cache, so `e2e/piece-window.spec.ts` (chromium + webkit) sets
   `localStorage['webtor:read-cache-bytes']` (small `maxCacheSize`, no prefetch) and
   `['webtor:read-slack-bytes']`, and reads `window.__webtorStoredBytes` and `__webtorKeepRange` (the kept
-  bytes at the last tick; null = all). Seek-bar layer assertions: `e2e/support/downloaded.ts`.
+  bytes at the last tick; null = all). Seek-bar layer assertions: `e2e/support/downloaded.ts`
+  (`heldLayer` adds `window.__webtorHeldBytes`, the held byte ranges it was drawn from; the frames'
+  true offsets: `e2e/support/byte-truth.ts`).
 - e2e can shrink the 60 s back-pressure window with `localStorage['webtor:buffer-ahead-s']` (set it
   in `page.addInitScript`) so the 12 s fixture exercises back-pressure and seek restarts.
   `localStorage['webtor:sb-quota-bytes']` gives every SourceBuffer a Safari-like byte quota

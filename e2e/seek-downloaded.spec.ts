@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
-import { expectEvicted, expectNoGap, layer, TOLERANCE_S } from './support/downloaded';
+import { frameBytes, trueTimeAt } from './support/byte-truth';
+import { expectEvicted, expectNoGap, heldLayer, layer, TOLERANCE_S } from './support/downloaded';
 import { fixtureMagnet } from './support/fixtures';
 
 // The seek bar's downloaded layer is drawn in time (ADR 0012 "Seek bar"): wherever the playhead
@@ -238,3 +239,41 @@ test.describe('through the MP4 sample table', () => {
     await expect(page.getByTestId('error')).toHaveCount(0);
   });
 });
+
+// The held range behind the playhead starts where its first byte's media does (ADR 0012 "Seek
+// bar"): through the MP4 sample table, and through the MPEG-TS packets' positions, not the read
+// cursor, which runs seconds of media ahead of what was produced. The truth: every frame's offset
+// (e2e/support/byte-truth.ts). Measured every 0.5 s while playing on from a seek into the
+// uneven-bitrate fixtures, once the window evicted the start.
+for (const file of ['vbr.ts', 'vbr.mp4'] as const) {
+  test(`${file}: the held range behind the playhead starts at its time after a seek`, async ({
+    page,
+    browserName,
+  }) => {
+    // vbr.ts with the small read cache trips WebKit's start flake (piece-window.spec.ts); without
+    // it the file is read whole and nothing behind the playhead is ever evicted.
+    test.skip(file === 'vbr.ts' && browserName === 'webkit', 'nothing evicted without the cache');
+    test.setTimeout(90_000);
+    const frames = await frameBytes(`e2e/fixtures/${file}`);
+    await open(page, file, file);
+    await seekTo(page, 13);
+    await settle(page);
+    const duration = await prop(page, 'duration');
+    const errors: { at: number; drawn: number; truth: number }[] = [];
+    for (let i = 0; i < 60 && (await prop(page, 'currentTime')) < 26; i++) {
+      await page.waitForTimeout(500);
+      const { at, ranges, held } = await heldLayer(page);
+      const range = held.find(
+        (r) => r.start > 0 && trueTimeAt(frames, r.start, duration) <= at && r.end > at,
+      );
+      const drawn = ranges.find(([s, e]) => s <= at + TOLERANCE_S && e > at);
+      if (!range || !drawn) continue;
+      errors.push({ at, drawn: drawn[0], truth: trueTimeAt(frames, range.start, duration) });
+    }
+    expect(errors.length).toBeGreaterThan(3);
+    const off = (e: (typeof errors)[number]) => Math.abs(e.drawn - e.truth);
+    const worst = errors.reduce((a, b) => (off(b) > off(a) ? b : a));
+    expect(off(worst), JSON.stringify(worst)).toBeLessThan(1);
+    await expect(page.getByTestId('error')).toHaveCount(0);
+  });
+}

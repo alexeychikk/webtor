@@ -60,15 +60,15 @@ function timestampOf(track: Mp4Track, index: number): number | null {
 }
 
 /**
- * Each keyframe's file offset with its timestamp (source time), and where the track's last sample
- * ends (`mediaEnd`). Null when the table holds no sample (a fragmented file: its samples are in
- * the fragments).
+ * Each keyframe's (with `everySample`, each sample's) file offset with its timestamp (source
+ * time), and where the track's last sample ends (`mediaEnd`). Null when the table holds no sample
+ * (a fragmented file: its samples are in the fragments).
  */
-export function mp4ByteTimeIndex(track: Mp4Track): ByteTimeIndex | null {
+export function mp4ByteTimeIndex(track: Mp4Track, everySample = false): ByteTimeIndex | null {
   const { table } = track;
   const total = table.sampleTimingEntries.reduce((n, e) => Math.max(n, e.startIndex + e.count), 0);
   if (total === 0 || table.sampleSizes.length === 0 || !(track.timescale > 0)) return null;
-  const keys = table.keySampleIndices ? new Set(table.keySampleIndices) : null;
+  const keys = table.keySampleIndices && !everySample ? new Set(table.keySampleIndices) : null;
   const sizeOf = (i: number) => table.sampleSizes[table.sampleSizes.length === 1 ? 0 : i] ?? 0;
   const points: ByteTimePoint[] = [];
   let mediaEnd = 0;
@@ -96,7 +96,10 @@ export function mp4ByteTimeIndex(track: Mp4Track): ByteTimeIndex | null {
  * `mp4ByteTimeIndex` of an MP4/MOV video track opened by Mediabunny; null for another container,
  * a fragmented file, or internals that changed shape. Never throws.
  */
-export function mp4TrackIndex(videoTrack: InputVideoTrack): ByteTimeIndex | null {
+export function mp4TrackIndex(
+  videoTrack: InputVideoTrack,
+  everySample = false,
+): ByteTimeIndex | null {
   try {
     const internal = (
       videoTrack as unknown as {
@@ -113,11 +116,14 @@ export function mp4TrackIndex(videoTrack: InputVideoTrack): ByteTimeIndex | null
     const demuxer = internal?.demuxer;
     if (!internal || !demuxer || demuxer.isFragmented !== false) return null;
     if (typeof demuxer.getSampleTableForTrack !== 'function') return null;
-    return mp4ByteTimeIndex({
-      table: demuxer.getSampleTableForTrack(internal),
-      timescale: internal.timescale,
-      editListOffset: internal.editListOffset,
-    });
+    return mp4ByteTimeIndex(
+      {
+        table: demuxer.getSampleTableForTrack(internal),
+        timescale: internal.timescale,
+        editListOffset: internal.editListOffset,
+      },
+      everySample,
+    );
   } catch (err) {
     console.warn('seek bar: no MP4 index:', err);
     return null;

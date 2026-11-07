@@ -58,6 +58,7 @@ import {
   type ByteTimePoint,
 } from './byte-time';
 import { mp4TrackIndex } from './mp4-index';
+import { PacketPoints, tapPacketPositions } from './packet-points';
 import {
   doviConfigOf,
   dolbyVisionPlayback,
@@ -304,6 +305,8 @@ export class MsePlayer {
   private slowNoticed = false;
   /** The container's index for the seek bar (`byteTimeIndex`), source times; null = none (yet). */
   private containerIndex: (() => ByteTimeIndex | null) | null = null;
+  /** MPEG-TS: where the video packets sit in the file (`byteTimeIndex`), source times. */
+  private packetPoints: PacketPoints | null = null;
   /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
   private seekLimit: (() => number | null) | null = null;
   /** Element time playback was resumed at (`startAt`), null when it started from the beginning. */
@@ -538,9 +541,15 @@ export class MsePlayer {
         source.size,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
+      const format = await input.getFormat();
       if (avi) player.containerIndex = () => avi.byteTimeIndex();
-      else if ((await input.getFormat()) instanceof mb.MatroskaInputFormat) {
+      else if (format instanceof mb.MatroskaInputFormat) {
         void player.readMatroskaIndex(file);
+      } else if (format instanceof mb.MpegTsInputFormat) {
+        const packets = new PacketPoints();
+        if (tapPacketPositions(videoTrack, (byte, time, key) => packets.note(byte, time, key))) {
+          player.packetPoints = packets;
+        }
       } else {
         const index = mp4TrackIndex(videoTrack);
         if (index) player.containerIndex = () => index;
@@ -605,8 +614,9 @@ export class MsePlayer {
 
   /**
    * Where media times sit in the file, element times, for the seek bar's downloaded layer (ADR
-   * 0012 "Seek bar"): the container's index (MKV Cues, AVI index), else what the reads learned,
-   * up to the end once every pipeline appended through it.
+   * 0012 "Seek bar"): the container's index (MKV Cues, MP4 sample table, AVI index), else the
+   * MPEG-TS video packets' positions, else what the reads learned; the last two up to the end once
+   * every pipeline appended through it.
    */
   byteTimeIndex(): ByteTimeIndex | null {
     if (this.destroyed) return null;
@@ -620,6 +630,14 @@ export class MsePlayer {
     }
     const local = this.pipelines.filter((p) => !p.remote);
     const ended = local.length > 0 && local.every((p) => p.done) && Number.isFinite(this.duration);
+    const packets = this.packetPoints?.points();
+    if (packets && packets.length > 0) {
+      const points = packets.map(toElement);
+      if (ended && this.bytes.reached > 0) {
+        points.push({ byte: this.bytes.reached, time: this.duration });
+      }
+      return { points, whole: false };
+    }
     return {
       points: learnedPoints(this.bytes.points(ended ? this.duration : undefined)),
       whole: false,
