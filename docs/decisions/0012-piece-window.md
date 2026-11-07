@@ -120,7 +120,18 @@ byte (`MsePlayer.byteTimeIndex()`):
   Mediabunny is pinned). The whole index, up to the end of the last video sample. The read cursor
   runs seconds of media ahead of the fragment it sampled, so learned points drew a held range up to
   ~5 s before its time, into a range already evicted (a flaky `seek-downloaded.spec.ts`).
-- **Anything else (fragmented MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
+- **MPEG-TS:** where the video packets sit (`packet-points.ts`). Mediabunny numbers a TS packet
+  by the file offset of the TS packet its PES starts in (`sequenceNumber`), so `tapPacketPositions`
+  wraps the video track's backing (`getFirstPacket`, `getPacket`, `getNextPacket`, `getKeyPacket`,
+  `getNextKeyPacket`: the conversions, seeks and sinks all go through it) and `PacketPoints` keeps
+  one true (byte, time) point per 0.5 s of media plus every keyframe. Not whole: bytes past the
+  last packet seen are left out, and (furthest read ever, duration) closes it once every pipeline
+  appended through the end. The read cursor ran up to ~8 s of media ahead of the fragment it
+  sampled, so the start of a held range behind the playhead was drawn that early. Matroska and
+  fragmented MP4 number packets by their Cluster's or moof's offset plus an index: every block
+  of a Cluster lands on its start, which would draw bytes inside it late (at the next Cluster's
+  time), so they stay on the reads.
+- **Anything else (fragmented MP4, MKV without Cues):** what the reads learned, `ByteWindow`'s
   (fragment start time, read cursor) samples, plus (furthest read ever, duration) once every
   pipeline appended through the end. The cursor is past its fragment's media, so these points
   place bytes early, never late: the layer may start a little before the playhead, never after it.
@@ -135,7 +146,9 @@ evicted ones disappear and re-downloaded ones come back at their times after any
 `byte-time.test.ts` covers the mapping; `e2e/seek-downloaded.spec.ts` (chromium + webkit) checks
 that the layer covers the playhead after keys, seek-bar clicks and drags, far jumps, touch
 skips and a resume, and that evicted ranges go, through the Cues, the MP4 sample table (`vbr.mp4`)
-and without an index (`offset.ts`).
+and without an index (`offset.ts`); and that after a seek into `vbr.ts`/`vbr.mp4` the held range
+behind the playhead starts within 1 s of its first byte's true time (every frame's offset:
+`e2e/support/byte-truth.ts`, an own PES scan for TS; the held bytes in `window.__webtorHeldBytes`).
 
 ## Consequences
 

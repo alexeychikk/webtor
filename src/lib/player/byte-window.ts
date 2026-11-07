@@ -44,7 +44,7 @@ export class ByteWindow {
   /** Counts the seeks: the samples' `run`. */
   private run = 0;
   /** The furthest demuxer read ever. */
-  private reached = 0;
+  private furthest = 0;
   /** The lowest demuxer read since the last seek; Infinity = none. */
   private floor = Infinity;
   /** The lowest demuxer read since the pipelines of this run started (`pipelinesStart`). */
@@ -56,6 +56,11 @@ export class ByteWindow {
 
   constructor(private readonly slack = READ_AHEAD_SLACK) {}
 
+  /** The furthest demuxer read ever; 0 = none. */
+  get reached(): number {
+    return this.furthest;
+  }
+
   /** A read of `[start, end)` begins; call the returned function once it ended. */
   read(start: number, end: number, role: ReadRole = 'demux'): () => void {
     if (role === 'demux') {
@@ -63,7 +68,7 @@ export class ByteWindow {
       if (start < this.floor) this.floor = start;
       if (start < this.startedFloor) this.startedFloor = start;
       if (end > this.frontier) this.frontier = end;
-      if (end > this.reached) this.reached = end;
+      if (end > this.furthest) this.furthest = end;
     } else if (role === 'scan' && end > this.scanned) this.scanned = end;
     const range = { start, end };
     this.pending.add(range);
@@ -116,8 +121,8 @@ export class ByteWindow {
    * it (after a seek they may have read nothing new, the demuxer's cache had it).
    */
   points(endTime?: number): readonly LearnedPoint[] {
-    if (endTime === undefined || this.reached === 0) return this.samples;
-    return [...this.samples, { byte: this.reached, time: endTime, run: this.run }];
+    if (endTime === undefined || this.furthest === 0) return this.samples;
+    return [...this.samples, { byte: this.furthest, time: endTime, run: this.run }];
   }
 
   /**

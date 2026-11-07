@@ -49,3 +49,23 @@ export async function expectEvicted(page: Page, from: number, to: number) {
     })
     .toEqual([]);
 }
+
+/** The layer with the held byte ranges of the file it was drawn from, at the same tick. */
+export function heldLayer(page: Page): Promise<Layer & { held: { start: number; end: number }[] }> {
+  return page.evaluate(() => {
+    const v = document.querySelector<HTMLVideoElement>('[data-testid="video"]')!;
+    const duration = v.duration;
+    const children = document.querySelectorAll<HTMLElement>('[data-testid="seek-downloaded"] > *');
+    return {
+      at: v.currentTime,
+      held: [...(window.__webtorHeldBytes ?? [])],
+      ranges: [...children].map(
+        (c) =>
+          [Number(c.dataset.start) * duration, Number(c.dataset.end) * duration] as [
+            number,
+            number,
+          ],
+      ),
+    };
+  });
+}
