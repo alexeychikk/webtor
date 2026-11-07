@@ -87,6 +87,15 @@ export function seekVideo(video: HTMLVideoElement, t: number): boolean {
   return true;
 }
 
+/**
+ * Where a `currentTime` write goes: `t` within [0, duration], as the element clamps it. Read from
+ * the write, not back from the element: a WebKit element failing to decode reads 0 there.
+ */
+export function seekTarget(t: number, duration: number): number {
+  const end = Number.isFinite(duration) && duration > 0 ? duration : Infinity;
+  return Math.min(Math.max(0, t), end);
+}
+
 /** Where a reopen starts: null = from the beginning, near it (a seek is what got stuck there). */
 export function reopenAt(t: number): number | null {
   return t > 1 ? t : null;

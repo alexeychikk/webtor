@@ -5,6 +5,7 @@ import {
   pointerFraction,
   reopenAt,
   sameRanges,
+  seekTarget,
   seekWhileReopening,
   timeFractions,
 } from './seek';
@@ -126,5 +127,19 @@ describe('seekWhileReopening', () => {
     Object.defineProperty(video, 'currentTime', { configurable: true, get: () => 42 });
     release();
     expect(video.currentTime).toBe(42);
+  });
+});
+
+describe('seekTarget', () => {
+  it('is the written time, not what a failed element reads back', () => {
+    expect(seekTarget(21.5, 30)).toBe(21.5);
+  });
+  it('clamps to [0, duration] like the element', () => {
+    expect(seekTarget(-3, 30)).toBe(0);
+    expect(seekTarget(42, 30)).toBe(30);
+  });
+  it('keeps the time while the duration is unknown', () => {
+    expect(seekTarget(12, NaN)).toBe(12);
+    expect(seekTarget(12, Infinity)).toBe(12);
   });
 });

@@ -95,8 +95,10 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   "Playback failed (InvalidStateError…)". The failed element's `currentTime` is not where it was:
   during a seek it reads the last played time (a → streak to 20.5 s reopened at ~16 s), and an
   element reopened at a resume point reads 0 (it started over). The reopen goes to the target of a
-  seek still pending (`seeking` without `seeked`), else the first of the element's time, the last
-  `seeking`/`timeupdate` time and the resume point that is past 0 (`MsePlayer.playhead`). Seeks made while the file opens again
+  seek still pending (`seeking` without `seeked`), as written (`seekTarget`: read back from a failed
+  element it is 0, which reopened a → streak at the start), else the first of the element's time,
+  the last `seeking`/`timeupdate` time before the error and the resume point that is past 0
+  (`MsePlayer.playhead`). Seeks made while the file opens again
   (the rest of a key streak) move that target instead of being lost: until the new player reads
   where to start, the element's `currentTime` reads and writes it (`seekWhileReopening`).
 - **Video is never transcoded.** Copy when

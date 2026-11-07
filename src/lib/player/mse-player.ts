@@ -61,6 +61,7 @@ import {
 import { PlaybackError, type PlaybackErrorCode } from './errors';
 import { hdrFormatOf, type HdrFormat } from './hdr';
 import { AAC_FRAME_SAMPLES, silentAacFrame } from './silence';
+import { seekTarget } from './seek';
 import {
   MAX_REMOTE_RESUMES,
   REMOTE_KEYFRAME_INTERVAL_S,
@@ -820,7 +821,7 @@ export class MsePlayer {
     this.seekTo = (t) => {
       this.endedAt = null;
       set.call(video, t);
-      this.pendingSeek = get.call(video) as number;
+      this.pendingSeek = seekTarget(t, video.duration);
     };
     const lost = () =>
       endLost(this.endedAt, nativeEnded.call(video) as boolean, get.call(video) as number);
@@ -932,13 +933,17 @@ export class MsePlayer {
     this.video.addEventListener('seeked', () => this.disarmStuckSeek(), { signal });
     this.video.addEventListener(
       'seeking',
-      () => (this.lastTime = this.pendingSeek = this.video.currentTime),
+      () => (this.lastTime = this.pendingSeek ??= this.video.currentTime),
       { signal },
     );
     this.video.addEventListener('seeked', () => (this.pendingSeek = null), { signal });
-    this.video.addEventListener('timeupdate', () => (this.lastTime = this.video.currentTime), {
-      signal,
-    });
+    this.video.addEventListener(
+      'timeupdate',
+      () => {
+        if (!this.video.error) this.lastTime = this.video.currentTime;
+      },
+      { signal },
+    );
     this.video.addEventListener('loadedmetadata', () => this.jumpGap(), { signal });
     this.video.addEventListener(
       'waiting',
