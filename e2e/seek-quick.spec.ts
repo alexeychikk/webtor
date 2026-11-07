@@ -60,7 +60,8 @@ function decodeError(page: Page, on?: string): Promise<Raised | null> {
 
 /**
  * A → streak, then a decode error on the player that ran it. A real engine decode error can reopen
- * the file first (the reason for this spec); then the streak settles and goes again from further back.
+ * the file first (the reason for this spec); then the streak settles and goes again from 12 s (a ←
+ * streak from there could reach 0 s, CLAUDE.md "The start").
  */
 async function decodeErrorAfterStreak(page: Page) {
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -70,7 +71,7 @@ async function decodeErrorAfterStreak(page: Page) {
     const raised = await decodeError(page, src);
     if (raised) return { ...raised, before };
     await playsOn(page, `real reopen during streak ${attempt}`);
-    for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowLeft');
+    await video(page).evaluate((v: HTMLVideoElement) => (v.currentTime = 12));
     await playsOn(page, `back after streak ${attempt}`);
   }
   throw new Error('every streak reopened by itself before the decode error');
