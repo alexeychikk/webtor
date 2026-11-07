@@ -292,7 +292,7 @@ docs/decisions/                ADRs
   chip), `time`, `mute`, `volume` and `fullscreen` (the icon button, `aria-pressed`, `aria-label`
   "Fullscreen" / "Exit fullscreen"; absent without any fullscreen), `tooltip` (inside an icon button
   while shown), `centre` (`data-state` `loading|buffering|play|pause|replay|none`) with
-  `centre-button` and, on touch, `seek-back` / `seek-forward`, `seek-streak` (double-tap overlay),
+  `centre-button` and, on touch, `seek-back` / `seek-forward`, `seek-streak` (skip overlay: double-tap, ←/→, centre ±5 s),
   and `ass-canvas` (the JASSUB overlay; exists only while an ASS track is drawn styled). Read its pixels with `drawImage` onto a 2D canvas
   after a paused seek. The video carries `data-audio-codec` (Mediabunny codec fed to MSE: `aac`,
   `opus`…; empty when muted) and `data-audio-track` (the selected `AudioTrackInfo.id`). Polish
@@ -373,8 +373,12 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   the last doubles the step (10, 20, 40 s…, ≤ 5 min); the other side mid-streak starts a new 5 s
   streak there. A first side tap waits 300 ms before acting as a plain tap (no flicker); seek taps
   are summed and sent as one `currentTime` write `SEEK_COALESCE_MS` after the last; a side
-  double-tap's `dblclick` is ignored (the middle's still fullscreens). Overlay `seek-streak`
-  (`data-side` `back|forward`, `data-total` s). The screen has `touch-action: manipulation`.
+  double-tap's `dblclick` is ignored (the middle's still fullscreens). **Skip overlay**
+  `seek-streak` (`data-side` `back|forward`, `data-total` s, label "+15 s" / "−1 min 15 s",
+  `streakLabel`) shows every relative skip, controls shown or not: the double-tap streak's total,
+  and ←/→ (auto-repeat too) and the centre ±5 s buttons via `skip` → pure `onSkip`
+  (`seek-streak.ts`): same-way skips ≤ `SKIP_STREAK_MS` 1 s apart add up, the other way starts
+  again on its side; it fades after the window. Seek-bar and programmatic seeks show none. The screen has `touch-action: manipulation`.
   Hidden = opacity 0, then `visibility: hidden` (Playwright `toBeHidden`), no pointer events, `cursor: none`. No "Exit
   fullscreen" text anywhere (aria-label/tooltip only). Click on the picture = play/pause,
   double-click = fullscreen; while paused the centre button covers the middle, so e2e clicks the
