@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  downloadedRanges,
+  downloadedBytes,
   endSeekRedundant,
   pointerFraction,
   sameRanges,
@@ -14,34 +14,33 @@ const ranges = (...r: [number, number][]) => ({
   end: (i: number) => r[i]![1],
 });
 
-describe('downloadedRanges', () => {
-  it('maps whole pieces of a single-file torrent to fractions and merges neighbours', () => {
+const br = (...r: [number, number][]) => r.map(([start, end]) => ({ start, end }));
+
+describe('downloadedBytes', () => {
+  it('maps whole pieces of a single-file torrent to byte ranges and merges neighbours', () => {
     // 4 pieces of 100 bytes, file = the whole 400 bytes.
-    expect(downloadedRanges(bits(0, 1, 3), 100, 0, 400)).toEqual([
-      [0, 0.5],
-      [0.75, 1],
-    ]);
-    expect(downloadedRanges(bits(), 100, 0, 400)).toEqual([]);
-    expect(downloadedRanges(bits(0, 1, 2, 3), 100, 0, 400)).toEqual([[0, 1]]);
+    expect(downloadedBytes(bits(0, 1, 3), 100, 0, 400)).toEqual(br([0, 200], [300, 400]));
+    expect(downloadedBytes(bits(), 100, 0, 400)).toEqual([]);
+    expect(downloadedBytes(bits(0, 1, 2, 3), 100, 0, 400)).toEqual(br([0, 400]));
   });
 
-  it('cuts the pieces shared with neighbouring files to this file', () => {
+  it('cuts the pieces shared with neighbouring files to this file (offsets in the file)', () => {
     // File at bytes 150..350 of the torrent: pieces 1 (100..200), 2 (200..300), 3 (300..400).
-    expect(downloadedRanges(bits(1), 100, 150, 200)).toEqual([[0, 0.25]]);
-    expect(downloadedRanges(bits(3), 100, 150, 200)).toEqual([[0.75, 1]]);
-    expect(downloadedRanges(bits(1, 2, 3), 100, 150, 200)).toEqual([[0, 1]]);
+    expect(downloadedBytes(bits(1), 100, 150, 200)).toEqual(br([0, 50]));
+    expect(downloadedBytes(bits(3), 100, 150, 200)).toEqual(br([150, 200]));
+    expect(downloadedBytes(bits(1, 2, 3), 100, 150, 200)).toEqual(br([0, 200]));
     // Pieces of other files don't count.
-    expect(downloadedRanges(bits(0, 4), 100, 150, 200)).toEqual([]);
+    expect(downloadedBytes(bits(0, 4), 100, 150, 200)).toEqual([]);
   });
 
   it('handles a file inside one piece, and a short last piece', () => {
-    expect(downloadedRanges(bits(2), 100, 210, 30)).toEqual([[0, 1]]);
-    expect(downloadedRanges(bits(2), 100, 0, 250)).toEqual([[0.8, 1]]);
+    expect(downloadedBytes(bits(2), 100, 210, 30)).toEqual(br([0, 30]));
+    expect(downloadedBytes(bits(2), 100, 0, 250)).toEqual(br([200, 250]));
   });
 
   it('is empty for an empty file or a bad piece length', () => {
-    expect(downloadedRanges(bits(0), 100, 0, 0)).toEqual([]);
-    expect(downloadedRanges(bits(0), 0, 0, 100)).toEqual([]);
+    expect(downloadedBytes(bits(0), 100, 0, 0)).toEqual([]);
+    expect(downloadedBytes(bits(0), 0, 0, 100)).toEqual([]);
   });
 });
 

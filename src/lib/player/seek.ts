@@ -1,36 +1,38 @@
 /** Seek bar data (pure, see seek.test.ts): which parts of the file are downloaded and buffered. */
 import { END_SNAP_S, type Ranges } from './buffer';
+import type { ByteRange } from './byte-window';
 
 /** Parts of a file as fractions of its length (or duration), `[start, end)`, sorted, merged. */
 export type FractionRanges = readonly (readonly [number, number])[];
 
-/** What `downloadedRanges` reads of a torrent's piece bitfield (WebTorrent's `torrent.bitfield`). */
+/** What `downloadedBytes` reads of a torrent's piece bitfield (WebTorrent's `torrent.bitfield`). */
 export interface PieceBitfield {
   get(index: number): boolean;
 }
 
 /**
- * The downloaded (verified) pieces of one file of a torrent, as fractions of the file's bytes.
- * Pieces span file boundaries, so the first and last piece are cut to the file.
+ * The downloaded (verified) pieces of one file of a torrent, as byte ranges of the file
+ * (`[start, end)`, sorted, merged). Pieces span file boundaries, so the first and last piece are cut
+ * to the file. The seek bar places them in time with `downloadedTimes` (byte-time.ts).
  */
-export function downloadedRanges(
+export function downloadedBytes(
   bitfield: PieceBitfield,
   pieceLength: number,
   fileOffset: number,
   fileLength: number,
-): FractionRanges {
+): ByteRange[] {
   if (!(pieceLength > 0) || !(fileLength > 0)) return [];
   const fileEnd = fileOffset + fileLength;
   const first = Math.floor(fileOffset / pieceLength);
   const last = Math.floor((fileEnd - 1) / pieceLength);
-  const out: [number, number][] = [];
+  const out: ByteRange[] = [];
   for (let i = first; i <= last; i++) {
     if (!bitfield.get(i)) continue;
-    const start = (Math.max(i * pieceLength, fileOffset) - fileOffset) / fileLength;
-    const end = (Math.min((i + 1) * pieceLength, fileEnd) - fileOffset) / fileLength;
+    const start = Math.max(i * pieceLength, fileOffset) - fileOffset;
+    const end = Math.min((i + 1) * pieceLength, fileEnd) - fileOffset;
     const prev = out[out.length - 1];
-    if (prev && prev[1] >= start) prev[1] = end;
-    else out.push([start, end]);
+    if (prev && prev.end >= start) prev.end = end;
+    else out.push({ start, end });
   }
   return out;
 }

@@ -38,7 +38,7 @@
     media: MediaState;
     /** The playing file's name, in the top strip. */
     title: string | null;
-    /** Downloaded parts of the file (fractions), from the controller. */
+    /** Downloaded parts of the file (fractions of the duration), from the controller. */
     downloaded: FractionRanges;
     /** The player container is fullscreen. */
     fullscreen: boolean;
@@ -169,12 +169,24 @@
       <div class="layer track"></div>
       <div class="layer-set" data-testid="seek-downloaded">
         {#each downloaded as [s, e], i (i)}
-          <div class="layer downloaded" style:left={pct(s)} style:width={pct(e - s)}></div>
+          <div
+            class="layer downloaded"
+            style:left={pct(s)}
+            style:width={pct(e - s)}
+            data-start={s}
+            data-end={e}
+          ></div>
         {/each}
       </div>
       <div class="layer-set" data-testid="seek-buffered">
         {#each buffered as [s, e], i (i)}
-          <div class="layer buffered" style:left={pct(s)} style:width={pct(e - s)}></div>
+          <div
+            class="layer buffered"
+            style:left={pct(s)}
+            style:width={pct(e - s)}
+            data-start={s}
+            data-end={e}
+          ></div>
         {/each}
       </div>
       <div class="layer played" style:width={pct(fraction(shownTime))}></div>

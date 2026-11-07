@@ -4,6 +4,7 @@
  * dropped from the piece store and downloaded again when a seek goes back there.
  */
 
+import type { LearnedPoint } from './byte-time';
 import type { ByteSource } from './types';
 
 /** Media kept behind the playhead (s), for short seeks back without a download. */
@@ -27,12 +28,8 @@ export interface ByteRange {
  */
 export type ReadRole = 'demux' | 'scan' | 'once';
 
-interface Sample {
-  /** Element time of a fragment the pipelines produced. */
-  time: number;
-  /** Where the reads were then: the media at `time` lies before it (up to the read slack). */
-  byte: number;
-}
+/** A fragment's element time with the read cursor then: its media lies before it (up to the slack). */
+type Sample = LearnedPoint;
 
 export class ByteWindow {
   private samples: Sample[] = [];
@@ -44,6 +41,10 @@ export class ByteWindow {
   private sampled = 0;
   /** The furthest scan read since the last seek; 0 = none. */
   private scanned = 0;
+  /** Counts the seeks: the samples' `run`. */
+  private run = 0;
+  /** The furthest demuxer read ever. */
+  private reached = 0;
   /** Reads not finished yet: their pieces must stay, whatever the playhead. */
   private readonly pending = new Set<ByteRange>();
 
@@ -54,6 +55,7 @@ export class ByteWindow {
     if (role === 'demux') {
       this.cursor = end;
       if (end > this.frontier) this.frontier = end;
+      if (end > this.reached) this.reached = end;
     } else if (role === 'scan' && end > this.scanned) this.scanned = end;
     const range = { start, end };
     this.pending.add(range);
@@ -66,17 +68,29 @@ export class ByteWindow {
     this.cursor = 0;
     this.sampled = 0;
     this.scanned = 0;
+    this.run++;
   }
 
   /** The pipelines produced media up to element time `time` (the furthest of them). */
   produced(time: number) {
     if (!Number.isFinite(time) || this.cursor === 0) return;
-    const sample = { time, byte: this.cursor };
+    const sample = { time, byte: this.cursor, run: this.run };
     if (this.cursor > this.sampled) this.sampled = this.cursor;
     const i = this.samples.findIndex((s) => s.time >= time);
     if (i === -1) this.samples.push(sample);
     else if (this.samples[i]!.time === time) this.samples[i] = sample;
     else this.samples.splice(i, 0, sample);
+  }
+
+  /**
+   * What the reads tell of where media times sit (the seek bar's fallback without an index, ADR
+   * 0012): each fragment's start time with the read cursor then, which is past that media. With
+   * `endTime`, the pipelines appended through the end: the furthest read ever holds the media up to
+   * it (after a seek they may have read nothing new, the demuxer's cache had it).
+   */
+  points(endTime?: number): readonly LearnedPoint[] {
+    if (endTime === undefined || this.reached === 0) return this.samples;
+    return [...this.samples, { byte: this.reached, time: endTime, run: this.run }];
   }
 
   /**

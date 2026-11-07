@@ -50,7 +50,8 @@ import { aheadWithin } from '../torrent/piece-window';
 import { ByteWindow, trackedSource, type ByteRange, type ReadRole } from './byte-window';
 import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
-import { readMkvHeader } from '../subtitles/mkv/header';
+import { readCuePoints, readMkvHeader } from '../subtitles/mkv/header';
+import { learnedPoints, type ByteTimeIndex, type ByteTimePoint } from './byte-time';
 import {
   doviConfigOf,
   dolbyVisionPlayback,
@@ -286,10 +287,17 @@ export class MsePlayer {
   /** Runs `checkStuckSeek` while the element is seeking; null once `onStuckSeek` was asked. */
   private stuckSeekTimer: ReturnType<typeof setTimeout> | undefined | null;
   private seekGen = 0;
+  /**
+   * `seekGen` of a restart still clearing the buffers and starting its pipelines; 0 = none. Until
+   * it did, `sb.buffered` still shows the media it is about to remove.
+   */
+  private restarting = 0;
   private readonly abort = new AbortController();
   private readonly bufferAhead: number;
   private switchGen = 0;
   private slowNoticed = false;
+  /** The container's index for the seek bar (`byteTimeIndex`), source times; null = none (yet). */
+  private containerIndex: (() => ByteTimeIndex | null) | null = null;
   /** AVI without an index (ADR 0007 §1): the last source time a seek can reach, null = anywhere. */
   private seekLimit: (() => number | null) | null = null;
   /** Element time playback was resumed at (`startAt`), null when it started from the beginning. */
@@ -521,6 +529,10 @@ export class MsePlayer {
         source.size,
       );
       if (avi?.indexMode === 'scan') player.seekLimit = () => avi.seekLimit();
+      if (avi) player.containerIndex = () => avi.byteTimeIndex();
+      else if ((await input.getFormat()) instanceof mb.MatroskaInputFormat) {
+        void player.readMatroskaIndex(file);
+      }
       player.hdr = hdr;
       player.encoder = target;
       if (resumeAt !== null) {
@@ -570,6 +582,53 @@ export class MsePlayer {
    */
   windowed(file: ByteSource, role: Exclude<ReadRole, 'demux'>): ByteSource {
     return trackedSource(file, this.bytes, role);
+  }
+
+  /**
+   * Where media times sit in the file, element times, for the seek bar's downloaded layer (ADR
+   * 0012 "Seek bar"): the container's index (MKV Cues, AVI index), else what the reads learned,
+   * up to the end once every pipeline appended through it.
+   */
+  byteTimeIndex(): ByteTimeIndex | null {
+    if (this.destroyed) return null;
+    const toElement = (p: ByteTimePoint) => ({
+      byte: p.byte,
+      time: p.time - this.timeline.startTime,
+    });
+    const index = this.containerIndex?.();
+    if (index && index.points.length > 0) {
+      return { ...index, points: index.points.map(toElement) };
+    }
+    const local = this.pipelines.filter((p) => !p.remote);
+    const ended = local.length > 0 && local.every((p) => p.done) && Number.isFinite(this.duration);
+    return {
+      points: learnedPoints(this.bytes.points(ended ? this.duration : undefined)),
+      whole: false,
+    };
+  }
+
+  /** Matroska Cues → `containerIndex`. Never fatal: without it the layer uses the reads. */
+  private async readMatroskaIndex(file: ByteSource) {
+    try {
+      const reader = new ByteReader(this.windowed(file, 'once'));
+      const header = await readMkvHeader(reader);
+      if (!header || this.destroyed) return;
+      const cues = await readCuePoints(reader, header);
+      if (cues.length === 0 || this.destroyed) return;
+      const lastCluster = Math.max(...cues.map((c) => c.cluster));
+      const after = [header.cuesPosition, header.attachmentsPosition].filter(
+        (p): p is number => p !== null && p > lastCluster,
+      );
+      const mediaEnd = Math.min(header.segmentEnd, ...after);
+      const index: ByteTimeIndex = {
+        points: cues.map((c) => ({ byte: c.cluster, time: c.time })),
+        whole: true,
+        mediaEnd,
+      };
+      this.containerIndex = () => index;
+    } catch (err) {
+      console.warn('seek bar: no Matroska index:', err);
+    }
   }
 
   private noteProduced() {
@@ -1005,7 +1064,10 @@ export class MsePlayer {
     this.opts.onNotice?.('relay-transcode-slow');
   }
 
-  /** Seek: nothing to do if the target is buffered everywhere, else restart at the keyframe before it. */
+  /**
+   * Seek: nothing to do if the target is buffered everywhere (and no restart is about to clear the
+   * buffers), else restart at the keyframe before it.
+   */
   private onSeeking() {
     this.reopen();
     const t = this.video.currentTime;
@@ -1028,12 +1090,12 @@ export class MsePlayer {
       this.video.currentTime = snap;
       return;
     }
-    if (!this.seekNeedsRestart(t)) return void this.maybeEndOfStream();
+    if (!this.restarting && !this.seekNeedsRestart(t)) return void this.maybeEndOfStream();
     clearTimeout(this.seekTimer);
     this.seekTimer = setTimeout(() => {
       // The appends this seek woke may have reached the end meanwhile (see `seekNeedsRestart`).
       const now = this.video.currentTime;
-      if (!this.appendedToEnd(now)) void this.restartAt(now);
+      if (this.restarting || !this.appendedToEnd(now)) void this.restartAt(now);
       else this.maybeEndOfStream();
     }, SEEK_DEBOUNCE_MS);
   }
@@ -1115,6 +1177,7 @@ export class MsePlayer {
   /** `t` is element time; the keyframe lookup and trim work in source time. */
   private async restartAt(t: number) {
     const gen = ++this.seekGen;
+    this.restarting = gen;
     this.bytes.restart();
     // Stop the old pipelines first so their reads stop competing with the keyframe lookup.
     const stopped = this.pipelines.map((p) => ({ p, ...this.stopPipeline(p) }));
@@ -1141,6 +1204,8 @@ export class MsePlayer {
       );
     } catch (err) {
       if (gen === this.seekGen) this.fail(err);
+    } finally {
+      if (this.restarting === gen) this.restarting = 0;
     }
   }
 

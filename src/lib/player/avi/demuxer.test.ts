@@ -161,6 +161,40 @@ describe('AVI demuxer through Mediabunny (internals guard)', () => {
     indexed.dispose();
   });
 
+  it('gives the keyframe positions for the seek bar: from idx1 and from the movi scan', async () => {
+    const indexedSource = memorySource(fixture('avi-h264-mp3.avi'));
+    const indexedFormat = createAviFormat(mb, indexedSource);
+    const indexed = new mb.Input({
+      formats: [indexedFormat],
+      source: new mb.CustomSource({ getSize: () => indexedSource.size, read: indexedSource.read }),
+    });
+    await indexed.getPrimaryVideoTrack();
+    const whole = indexedFormat.demuxer!.byteTimeIndex()!;
+    expect(whole.whole).toBe(true);
+    expect(whole.points.length).toBeGreaterThan(2);
+    expect(whole.points[0]!.time).toBe(0);
+    for (let i = 1; i < whole.points.length; i++) {
+      expect(whole.points[i]!.byte).toBeGreaterThan(whole.points[i - 1]!.byte);
+      expect(whole.points[i]!.time).toBeGreaterThan(whole.points[i - 1]!.time);
+    }
+    expect(whole.points[whole.points.length - 1]!.time).toBeLessThan(12);
+    expect(whole.points[whole.points.length - 1]!.byte).toBeLessThan(indexedSource.size);
+
+    const source = memorySource(fixture('avi-h264-noidx.avi'));
+    const format = createAviFormat(mb, source);
+    const input = new mb.Input({
+      formats: [format],
+      source: new mb.CustomSource({ getSize: () => source.size, read: source.read }),
+    });
+    const video = (await input.getPrimaryVideoTrack())!;
+    await allPackets(video);
+    const scanned = format.demuxer!.byteTimeIndex()!;
+    expect(scanned.whole).toBe(true);
+    expect(scanned.points.map((p) => p.time)).toEqual(whole.points.map((p) => p.time));
+    input.dispose();
+    indexed.dispose();
+  });
+
   it('rejects a RIFF AVI without movie data with a PlaybackError', async () => {
     const bytes = fixture('avi-h264-mp3.avi').slice(0, 8192);
     const input = openInput(bytes);
