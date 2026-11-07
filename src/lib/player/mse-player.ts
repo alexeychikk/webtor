@@ -133,6 +133,8 @@ const SEEK_DEBOUNCE_MS = 150;
 const SILENCE_BITRATE = 64_000;
 /** `MediaError.MEDIA_ERR_DECODE`. */
 const MEDIA_ERR_DECODE = 3;
+/** How long a failure after the MediaSource closed waits for the element's `error` event. */
+const ELEMENT_ERROR_WAIT_MS = 1000;
 /** A seek with its target buffered in every SourceBuffer is stuck after this long (`onStuckSeek`). */
 const STUCK_SEEK_MS = 4000;
 /**
@@ -303,6 +305,10 @@ export class MsePlayer {
   private restarting = 0;
   /** `onDecodeError` was asked (once per player). */
   private decodeErrorAsked = false;
+  /** A failure came after the MediaSource closed and waits for the element's `error` (`fail`). */
+  private awaitingElementError = false;
+  /** `onError` was told (`report`). */
+  private reported = false;
   private readonly abort = new AbortController();
   private readonly bufferAhead: number;
   private switchGen = 0;
@@ -944,23 +950,51 @@ export class MsePlayer {
       'error',
       () => {
         const e = this.video.error;
-        if (!e || this.destroyed) return;
-        if (e.code === MEDIA_ERR_DECODE && this.opts.onDecodeError && !this.decodeErrorAsked) {
-          this.decodeErrorAsked = true;
-          console.warn(`decode error at ${this.video.currentTime.toFixed(2)} s:`, e.message);
-          return this.opts.onDecodeError(this.video.currentTime);
-        }
-        this.fail(new PlaybackError('playback-failed', e.message || `media error ${e.code}`));
+        if (!e || this.recoverDecodeError()) return;
+        this.report(new PlaybackError('playback-failed', e.message || `media error ${e.code}`));
       },
       { signal },
     );
   }
 
+  /**
+   * Ends the playback with `err`, unless the element failed to decode: then `onDecodeError`
+   * reopens the file. The element closes the MediaSource as it fails (WebKit sets `error` first),
+   * so a pipeline reading a removed SourceBuffer gets here before the element's `error` event; a
+   * closed MediaSource without an element error yet leaves `err` to that event, for at most
+   * `ELEMENT_ERROR_WAIT_MS`.
+   */
   private fail(err: unknown) {
-    if (this.destroyed) return;
+    if (this.destroyed || this.recoverDecodeError() || this.awaitingElementError) return;
+    if (this.mediaSource.readyState === 'closed' && !this.video.error) {
+      this.awaitingElementError = true;
+      setTimeout(() => {
+        if (!this.video.error) this.report(err);
+      }, ELEMENT_ERROR_WAIT_MS);
+      return;
+    }
+    this.report(err);
+  }
+
+  /** Tells `onError` once. */
+  private report(err: unknown) {
+    if (this.destroyed || this.reported) return;
+    this.reported = true;
     this.opts.onError(
       err instanceof PlaybackError ? err : new PlaybackError('playback-failed', String(err)),
     );
+  }
+
+  /** The element failed to decode and `onDecodeError` takes it (once per player): true. */
+  private recoverDecodeError(): boolean {
+    const e = this.video.error;
+    if (e?.code !== MEDIA_ERR_DECODE || !this.opts.onDecodeError || this.decodeErrorAsked) {
+      return false;
+    }
+    this.decodeErrorAsked = true;
+    console.warn(`decode error at ${this.video.currentTime.toFixed(2)} s:`, e.message);
+    this.opts.onDecodeError(this.video.currentTime);
+    return true;
   }
 
   private armStuckSeek() {

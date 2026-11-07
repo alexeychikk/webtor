@@ -493,7 +493,10 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   one packet `avdec_h264` rejects fatal ("Failed to send data for decoding", seen after quick seek
   streaks). `MsePlayer` `onDecodeError` → `reopenFile` at the playhead, counted by
   `nextDecodeReopen` (≤ `MAX_REOPENS`; a fail again within `DECODE_SPOT_S` of the reopen is the
-  same spot). `e2e/seek-quick.spec.ts`: quick streaks, and recovery from an error raised on the element.
+  same spot). The element closes the MediaSource before its `error` event, so pipelines throw on
+  removed SourceBuffers first: `fail()` takes the decode path while `video.error` is DECODE (waits
+  ≤ 1 s for it on a closed MediaSource). `e2e/seek-quick.spec.ts`: quick streaks, and recovery from
+  an error raised on the element, with and without the MediaSource closed first.
 - **A seek during a restart always restarts** (`restarting`, `onSeeking`): until the running restart
   cleared the buffers, `sb.buffered` still shows the media it is about to remove, and a seek "into
   it" was left with nothing (a −5 s right after a +10 s stalled for good).

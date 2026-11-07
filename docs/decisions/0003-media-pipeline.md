@@ -86,7 +86,13 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   playhead or seek target in a new MsePlayer, like a stuck seek (`reopenFile`): at most
   `MAX_REOPENS` in a row, and a reopened player that fails again within `DECODE_SPOT_S` (5 s) of
   where it was reopened did not recover (`nextDecodeReopen`), so media that can't be decoded ends
-  in the error card instead of reopening forever.
+  in the error card instead of reopening forever. The element sets `error`, then closes the
+  MediaSource (its SourceBuffers are removed) and only then queues its `error` event, so a pipeline
+  reading `sb.buffered` or appending there throws `InvalidStateError` first: every failure
+  (`MsePlayer.fail`) takes the decode path while `video.error` is `MEDIA_ERR_DECODE`, and one on a
+  closed MediaSource without an element error waits up to 1 s for it. QA's sandbox WebKit raised the
+  error in ~4 opens of 5 (some with no seek at all), and before this every one ended in
+  "Playback failed (InvalidStateError…)".
 - **Video is never transcoded.** Copy when
   `MediaSource.isTypeSupported('video/mp4; codecs="' + await track.getCodecParameterString() + '"')`.
   Otherwise show `unsupported-video-codec`. Real-time software video encoding in a tab is not viable.

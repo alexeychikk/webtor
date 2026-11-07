@@ -6,7 +6,9 @@ import { fixtureMagnet } from './support/fixtures';
 // GStreamer backend sometimes failed one with a fatal "Failed to send data for decoding": WebKit
 // sets its decoders' `max-errors` to 0, so one packet avdec_h264 rejects is a MediaError DECODE
 // (ADR 0003 "Decode errors"). The player then opens the file again where it was. That error can't be
-// provoked on purpose, so the recovery tests raise one on the element.
+// provoked on purpose, so the recovery tests raise one on the element. A real one sets the error,
+// then closes the MediaSource, and the pipelines hit the removed SourceBuffers before the element's
+// `error` event: `failingDecode` plays that order.
 
 const video = (page: Page) => page.getByTestId('video');
 const prop = <K extends keyof HTMLVideoElement>(page: Page, k: K) =>
@@ -49,6 +51,44 @@ function decodeError(page: Page): Promise<{ src: string; at: number }> {
   });
 }
 
+/** Keeps the page's MediaSource in `window.__mediaSource` for `failingDecode`. */
+function keepMediaSource(page: Page) {
+  return page.addInitScript(() => {
+    for (const MS of [window.MediaSource, window.ManagedMediaSource]) {
+      const add = MS?.prototype.addSourceBuffer;
+      if (!MS || !add) continue;
+      MS.prototype.addSourceBuffer = function (this: MediaSource, type: string) {
+        (window as unknown as { __mediaSource: MediaSource }).__mediaSource = this;
+        return add.call(this, type);
+      };
+    }
+  });
+}
+
+/**
+ * Fails like WebKit's decode error: `error` set and the SourceBuffers removed, so the pipelines
+ * fail on them, with no `error` event (it comes later, if at all). A new `src` clears the error.
+ */
+function failingDecode(page: Page): Promise<{ at: number }> {
+  return video(page).evaluate((v: HTMLVideoElement) => {
+    const at = v.currentTime;
+    Object.defineProperty(v, 'error', {
+      configurable: true,
+      get: () => ({ code: 3, message: 'Failed to send data for decoding' }),
+    });
+    const src = v.src;
+    const reopened = new MutationObserver(() => {
+      if (v.src === src) return;
+      reopened.disconnect();
+      Reflect.deleteProperty(v, 'error');
+    });
+    reopened.observe(v, { attributeFilter: ['src'] });
+    const ms = (window as unknown as { __mediaSource: MediaSource }).__mediaSource;
+    for (const sb of [...ms.sourceBuffers]) ms.removeSourceBuffer(sb);
+    return { at };
+  });
+}
+
 test('quick seek streaks play on', async ({ page }) => {
   await open(page);
   for (let r = 0; r < 4; r++) {
@@ -82,6 +122,18 @@ test('a decode error during a streak opens the file again at the seek target', a
   const again = await decodeError(page);
   await expect.poll(() => prop(page, 'src')).not.toBe(again.src);
   await playsOn(page, 'after the second reopen');
+});
+
+test('a decode error that closes the MediaSource first opens the file again', async ({ page }) => {
+  await keepMediaSource(page);
+  await open(page);
+  await expect.poll(() => prop(page, 'currentTime'), { timeout: 30_000 }).toBeGreaterThan(8);
+  const src = await prop(page, 'src');
+  const { at } = await failingDecode(page);
+  await expect.poll(() => prop(page, 'src')).not.toBe(src);
+  await playsOn(page, 'after the reopen');
+  expect(await prop(page, 'currentTime')).toBeGreaterThan(at - 3);
+  expect(await prop(page, 'paused')).toBe(false);
 });
 
 test('decode errors again and again at one spot end in the error card', async ({ page }) => {
