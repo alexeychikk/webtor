@@ -1,17 +1,17 @@
 import { expect, test, type Page } from '@playwright/test';
+import { frameBytes, trueTimeAt } from './support/byte-truth';
+import { expectEvicted, expectNoGap, heldLayer, layer, TOLERANCE_S } from './support/downloaded';
 import { fixtureMagnet } from './support/fixtures';
 
 // The seek bar's downloaded layer is drawn in time (ADR 0012 "Seek bar"): wherever the playhead
 // goes, the layer covers it once the bytes there are held, and the ranges the piece window evicted
 // disappear. Through the MKV Cues: e2e/fixtures/resume/movie.mkv (40 s) with the
 // piece-window.spec.ts settings, so the small fixture is read in pieces and evicted behind the
-// playhead. Without an index (points learned from the reads): offset.ts (MPEG-TS) and vbr.mp4 (30 s,
-// 93 % of the bytes in its first half), with the default demuxer cache too, which reads the file
-// at once.
+// playhead. Through the MP4 sample table: vbr.mp4 (30 s, 93 % of the bytes in its first half).
+// Without an index (points learned from the reads): offset.ts (MPEG-TS). Both with the default
+// demuxer cache too, which reads the file at once.
 
 const DURATION = 40;
-/** Seconds the layer may start after the playhead: a 1 s tick reads the playhead later. */
-const TOLERANCE_S = 0.5;
 
 const video = (page: Page) => page.getByTestId('video');
 const prop = <K extends keyof HTMLVideoElement>(page: Page, k: K) =>
@@ -20,52 +20,6 @@ const seekTo = (page: Page, t: number) =>
   video(page).evaluate((v: HTMLVideoElement, to) => {
     v.currentTime = to;
   }, t);
-
-interface Layer {
-  /** Playhead, s. */
-  at: number;
-  /** Downloaded ranges in s, in drawing order. */
-  ranges: [number, number][];
-}
-
-/** The playhead and the downloaded layer's children, read together. */
-function layer(page: Page): Promise<Layer> {
-  return page.evaluate(() => {
-    const v = document.querySelector<HTMLVideoElement>('[data-testid="video"]')!;
-    const duration = v.duration;
-    const children = document.querySelectorAll<HTMLElement>('[data-testid="seek-downloaded"] > *');
-    return {
-      at: v.currentTime,
-      ranges: [...children].map(
-        (c) =>
-          [Number(c.dataset.start) * duration, Number(c.dataset.end) * duration] as [
-            number,
-            number,
-          ],
-      ),
-    };
-  });
-}
-
-/** Some range starts at or before the playhead and runs past it. */
-const covers = ({ at, ranges }: Layer) => ranges.some(([s, e]) => s <= at + TOLERANCE_S && e > at);
-
-/** The layer covers the playhead (no gap) once the bytes there are held. */
-async function expectNoGap(page: Page, what: string) {
-  await expect
-    .poll(async () => covers(await layer(page)), { message: what, timeout: 15_000 })
-    .toBe(true);
-}
-
-/** No drawn range overlaps `[from, to]` s: the window evicted those pieces. */
-async function expectEvicted(page: Page, from: number, to: number) {
-  await expect
-    .poll(async () => (await layer(page)).ranges.filter(([s, e]) => s < to && e > from), {
-      message: `${from}–${to} s evicted`,
-      timeout: 15_000,
-    })
-    .toEqual([]);
-}
 
 /**
  * Opens `fixture` and waits for it to play. `windowed`: the piece-window.spec.ts settings (small
@@ -239,7 +193,9 @@ test.describe('without an index', () => {
       })
       .toBe(true);
   });
+});
 
+test.describe('through the MP4 sample table', () => {
   test('VBR MP4 read at once: the layer covers the playhead in the low-bitrate half', async ({
     page,
   }) => {
@@ -277,3 +233,41 @@ test.describe('without an index', () => {
     await expect(page.getByTestId('error')).toHaveCount(0);
   });
 });
+
+// The held range behind the playhead starts where its first byte's media does (ADR 0012 "Seek
+// bar"): through the MP4 sample table, and through the MPEG-TS packets' positions, not the read
+// cursor, which runs seconds of media ahead of what was produced. The truth: every frame's offset
+// (e2e/support/byte-truth.ts). Measured every 0.5 s while playing on from a seek into the
+// uneven-bitrate fixtures, once the window evicted the start.
+for (const file of ['vbr.ts', 'vbr.mp4'] as const) {
+  test(`${file}: the held range behind the playhead starts at its time after a seek`, async ({
+    page,
+    browserName,
+  }) => {
+    // vbr.ts with the small read cache trips WebKit's start flake (piece-window.spec.ts); without
+    // it the file is read whole and nothing behind the playhead is ever evicted.
+    test.skip(file === 'vbr.ts' && browserName === 'webkit', 'nothing evicted without the cache');
+    test.setTimeout(90_000);
+    const frames = await frameBytes(`e2e/fixtures/${file}`);
+    await open(page, file, file);
+    await seekTo(page, 13);
+    await settle(page);
+    const duration = await prop(page, 'duration');
+    const errors: { at: number; drawn: number; truth: number }[] = [];
+    for (let i = 0; i < 60 && (await prop(page, 'currentTime')) < 26; i++) {
+      await page.waitForTimeout(500);
+      const { at, ranges, held } = await heldLayer(page);
+      const range = held.find(
+        (r) => r.start > 0 && trueTimeAt(frames, r.start, duration) <= at && r.end > at,
+      );
+      const drawn = ranges.find(([s, e]) => s <= at + TOLERANCE_S && e > at);
+      if (!range || !drawn) continue;
+      errors.push({ at, drawn: drawn[0], truth: trueTimeAt(frames, range.start, duration) });
+    }
+    expect(errors.length).toBeGreaterThan(3);
+    const off = (e: (typeof errors)[number]) => Math.abs(e.drawn - e.truth);
+    const worst = errors.reduce((a, b) => (off(b) > off(a) ? b : a));
+    expect(off(worst), JSON.stringify(worst)).toBeLessThan(1);
+    await expect(page.getByTestId('error')).toHaveCount(0);
+  });
+}

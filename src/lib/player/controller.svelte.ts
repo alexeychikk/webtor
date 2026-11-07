@@ -107,6 +107,10 @@ const WINDOW_BYTES = windowBudget(
 declare global {
   /** e2e: bytes the piece store held at the last tick (ADR 0012). */
   var __webtorStoredBytes: number | undefined;
+  /** e2e: the playing file's kept bytes `[start, end)` at the last tick; null = everything. */
+  var __webtorKeepRange: { start: number; end: number } | null | undefined;
+  /** e2e: the held byte ranges of the playing file the seek bar's layer was drawn from. */
+  var __webtorHeldBytes: readonly { start: number; end: number }[] | undefined;
 }
 const RELAY_STATS_MS = 2000;
 const NO_STATS: TorrentStats = { numPeers: 0, downloadSpeed: 0, uploadSpeed: 0, progress: 0 };
@@ -958,15 +962,15 @@ export class PlayerController {
   private updateDownloaded(t: Torrent) {
     const file = this.fileIndex === null ? undefined : t.files?.[this.fileIndex];
     const player = this.player;
-    const next =
+    const held =
       file && t.bitfield && player
-        ? downloadedTimes(
-            downloadedBytes(t.bitfield, t.pieceLength, file.offset, file.length),
-            player.byteTimeIndex(),
-            file.length,
-            player.duration,
-          )
+        ? downloadedBytes(t.bitfield, t.pieceLength, file.offset, file.length)
         : [];
+    const next =
+      file && player
+        ? downloadedTimes(held, player.byteTimeIndex(), file.length, player.duration)
+        : [];
+    globalThis.__webtorHeldBytes = held;
     if (!sameRanges(next, this.downloaded)) this.downloaded = next;
   }
 
@@ -978,6 +982,7 @@ export class PlayerController {
       evictPieces(t, { start: file.offset + keep.start, end: file.offset + keep.end });
     }
     globalThis.__webtorStoredBytes = storedBytes(t);
+    globalThis.__webtorKeepRange = keep || null;
   }
 
   private tick() {
