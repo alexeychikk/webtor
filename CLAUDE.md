@@ -443,7 +443,12 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
   - A seek into the last `END_SNAP_S` (0.25 s, counted from where the video ends if that is
     earlier), short of `duration`, goes back to its start (`endSnap`): GStreamer drops every frame
     of a segment past the last frame's start, then errors at the EOS. A seek to `duration` (or
-    past it) stays and just ends the video.
+    past it) stays and just ends the video. The snap applies as the seek is written (`snapToEnd` in
+    the `currentTime` accessor): a seek into the last frame, then the snap from its `seeking`, on a
+    MediaSource just reopened after `ended`, never completed.
+  - No `endOfStream()` while a seek is queued (written, its `seeking` not run yet: `seekQueued`),
+    and while seeking only within `EOS_AHEAD_S` of the end: GStreamer failed the queued seek
+    ("Failed to push buffer", the reopen's `updateend` ending it under the snap) or left it pending.
   - Our controls (keys, double-tap, centre ±5 s, seek bar) go through `seekVideo`, which skips a
     seek to the end while the video is there already (`endSeekRedundant`: ended, last moment,
     seeking there). A script setting `currentTime` to the end again and again can still hit it.
@@ -501,6 +506,9 @@ k − startTime`, seeks look up the keyframe at `t + startTime`. Small holes in 
     (prints the log of every open that needed a reopen; `STRESS_FIXTURE`, `STRESS_WINDOWED=asc`).
     vbr.ts with 4 s ahead and the 64 KiB read cache hits this in ~1 open in 4 (main too), so
     `piece-window.spec.ts` plays it on WebKit without that cache.
+  - Its web process can also hang for good (main thread asleep on a lock, ADR 0003 "Web process
+    hangs"): no script answers, so nothing recovers. `onLivePage` (`e2e/seek-downloaded.spec.ts`)
+    re-runs a test's steps once on a new page when the page stopped answering.
 - **A decode error reopens the file** (ADR 0003 "Decode errors"): WebKit's GStreamer backend makes
   one packet `avdec_h264` rejects fatal ("Failed to send data for decoding", seen after quick seek
   streaks). `MsePlayer` `onDecodeError` → `reopenFile` at the playhead, counted by

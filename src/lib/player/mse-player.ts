@@ -22,6 +22,7 @@ import {
   BUFFER_AHEAD_S,
   endLost,
   endSnap,
+  EOS_AHEAD_S,
   endOfStreamIn,
   bufferedToEnd,
   END_SLACK_S,
@@ -833,6 +834,11 @@ export class MsePlayer {
   private seekTo: (t: number) => void = (t) => void (this.video.currentTime = t);
   /** `endOfStream()` went out and the element hasn't ended since (`holdSeek`). */
   private ending = false;
+  /**
+   * A seek was written and its `seeking` event has not run yet: no `endOfStream()` until it has.
+   * WebKit's GStreamer backend fails the queued seek ("Failed to push buffer").
+   */
+  private seekQueued = false;
   /** A seek held until the element ends (`holdSeek`): its target, and whether to play on. */
   private heldSeek: { t: number; play: boolean } | null = null;
   private heldSeekTimer: ReturnType<typeof setTimeout> | undefined;
@@ -859,6 +865,7 @@ export class MsePlayer {
       this.endedAt = null;
       set.call(video, t);
       this.pendingSeek = seekTarget(t, video.duration);
+      this.seekQueued = video.seeking;
     };
     const lost = () =>
       endLost(this.endedAt, nativeEnded.call(video) as boolean, get.call(video) as number);
@@ -868,6 +875,7 @@ export class MsePlayer {
       get: () => (lost() ? this.endedAt! : (get.call(video) as number)),
       set: (t: number) => {
         if (lost()) return this.recoverLostEnd(t, false);
+        t = this.snapToEnd(t) ?? t;
         if (this.holdSeek(t)) return;
         this.reopen();
         this.seekTo(t);
@@ -974,6 +982,9 @@ export class MsePlayer {
       { signal },
     );
     this.video.addEventListener('seeked', () => (this.pendingSeek = null), { signal });
+    for (const ev of ['seeked', 'emptied']) {
+      this.video.addEventListener(ev, () => (this.seekQueued = false), { signal });
+    }
     this.video.addEventListener(
       'timeupdate',
       () => {
@@ -1191,6 +1202,7 @@ export class MsePlayer {
    * buffers), else restart at the keyframe before it.
    */
   private onSeeking() {
+    this.seekQueued = false;
     this.reopen();
     const t = this.video.currentTime;
     const initial = this.initialSeek;
@@ -1205,8 +1217,7 @@ export class MsePlayer {
         return;
       }
     }
-    // (Not with a seek limit: it would clamp the snapped seek back, and so on.)
-    const snap = limit == null ? endSnap(t, this.video.duration, this.videoEnd()) : null;
+    const snap = this.snapToEnd(t);
     if (snap !== null) {
       // This fires `seeking` again, a moment before the end.
       this.video.currentTime = snap;
@@ -1220,6 +1231,12 @@ export class MsePlayer {
       if (this.restarting || !this.appendedToEnd(now)) void this.restartAt(now);
       else this.maybeEndOfStream();
     }, SEEK_DEBOUNCE_MS);
+  }
+
+  /** `endSnap` for a seek to `t`; not with a seek limit: it would clamp the snapped seek back. */
+  private snapToEnd(t: number): number | null {
+    if (this.seekLimit?.() != null) return null;
+    return endSnap(t, this.video.duration, this.videoEnd());
   }
 
   /** Where the video's last frame ends, once its pipeline appended through the end; else NaN. */
@@ -1809,15 +1826,17 @@ export class MsePlayer {
 
   /**
    * Ends the MediaSource once every pipeline appended through the end and the playhead reached the
-   * end of the buffered media (within `lead`): a stall there (`waiting`) or a seek there. While
-   * playing, `armEndOfStream` ends it a moment before instead. Not as soon as the appends are done:
-   * WebKit's GStreamer backend then drains the EOS through its decoder before the end, and any seek
-   * made after that fails ("No valid frames decoded before end of stream") or freezes. See CLAUDE.md.
+   * end of the buffered media: a stall there (`waiting`) or a seek there (while seeking, only within
+   * `EOS_AHEAD_S`: GStreamer could leave a seek before that pending for good). While playing,
+   * `armEndOfStream` ends it a moment before instead. Not as soon as the appends are done: WebKit's
+   * GStreamer backend then drains the EOS through its decoder before the end, and any seek made
+   * after that fails ("No valid frames decoded before end of stream") or freezes. See CLAUDE.md.
    */
-  private maybeEndOfStream(lead?: number) {
+  private maybeEndOfStream() {
     if (!this.canEndStream()) return;
     const ranges = this.pipelines.map((p) => p.sb.buffered);
-    if (!atBufferedEnd(ranges, this.video.currentTime, lead)) return;
+    const v = this.video;
+    if (!atBufferedEnd(ranges, v.currentTime, v.seeking ? EOS_AHEAD_S : undefined)) return;
     this.endStream();
   }
 
@@ -1854,6 +1873,7 @@ export class MsePlayer {
   private canEndStream(): boolean {
     return (
       !this.destroyed &&
+      !this.seekQueued &&
       this.pipelines.every((p) => p.done && !p.sb.updating) &&
       this.mediaSource.readyState === 'open'
     );

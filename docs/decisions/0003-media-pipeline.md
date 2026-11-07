@@ -101,6 +101,23 @@ TorrentFile ──ByteSource──▶ Mediabunny Input (CustomSource, ALL_FORMAT
   (`MsePlayer.playhead`). Seeks made while the file opens again
   (the rest of a key streak) move that target instead of being lost: until the new player reads
   where to start, the element's `currentTime` reads and writes it (`seekWhileReopening`).
+- **Seeks at the end (2026-11-07).** WebKit's GStreamer backend failed a seek queued while the
+  MediaSource got `endOfStream()` ("Failed to push buffer", a MediaError and the error card): a seek
+  into the last frame of an ended video reopened the MediaSource (`reopen`), `endSnap` then moved it
+  back from its `seeking`, and the reopen's `updateend` ended the stream under that queued seek.
+  Without the `endOfStream()`, that pair of seeks still never completed. So the snap applies as the
+  seek is written, `endOfStream()` waits for a written seek's `seeking` (`seekQueued`), and while
+  seeking it ends the stream only within `EOS_AHEAD_S` of the end. `e2e/seek-end.spec.ts` "duration −
+  0.05 s" failed 10 runs in 20 with two workers before, 20/20 after (WebKit 2370).
+- **Web process hangs (2026-11-07): engine-only, not recoverable in the page.** In ~1 run in 20–40
+  of `e2e/seek-downloaded.spec.ts` "VBR MP4 read in pieces" on Playwright WebKit (2370, WPE,
+  GStreamer; two workers), the page stops answering: `page.evaluate` never returns, at the start
+  (playhead on the gap-jump target) or after a seek (`seeking` stays true, then nothing answers).
+  `/proc` then shows the WPEWebProcess main thread asleep in `futex_do_wait` with no CPU time for
+  seconds: a lock in the engine, not a script loop (a loop would spin), so no player code runs to
+  recover. The test re-runs its steps once on a page of a new context when the page stopped
+  answering (`onLivePage`); any other failure still fails it. Not seen on Chromium; Safari plays
+  through AVFoundation, not this path.
 - **Video is never transcoded.** Copy when
   `MediaSource.isTypeSupported('video/mp4; codecs="' + await track.getCodecParameterString() + '"')`.
   Otherwise show `unsupported-video-codec`. Real-time software video encoding in a tab is not viable.

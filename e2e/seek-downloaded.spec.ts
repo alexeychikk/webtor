@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 import { frameBytes, trueTimeAt } from './support/byte-truth';
 import { expectEvicted, expectNoGap, heldLayer, layer, TOLERANCE_S } from './support/downloaded';
 import { fixtureMagnet } from './support/fixtures';
@@ -38,6 +38,51 @@ async function open(page: Page, fixture = 'resume', file = 'movie.mkv', windowed
   await page.goto(`./#magnet=${encodeURIComponent(magnet)}`);
   await expect(page.getByTestId('status')).toContainText(file);
   await expect.poll(() => prop(page, 'currentTime'), { timeout: 30_000 }).toBeGreaterThan(0.5);
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** The page runs a script within `ms`: false once its web process hung. */
+const answers = (page: Page, ms = 5000) =>
+  Promise.race([page.evaluate(() => true).catch(() => true), sleep(ms).then(() => false)]);
+
+/** Rejects once the page stops answering (checked every 2 s), else resolves once `done()`. */
+async function hung(page: Page, done: () => boolean): Promise<void> {
+  while (!done()) {
+    await sleep(2000);
+    if (!done() && !(await answers(page))) throw new Error('the page stopped answering');
+  }
+}
+
+/**
+ * Runs `steps` on `page`, and once more on a page of a new context if WebKit's web process hung
+ * meanwhile: its main thread then sleeps on a lock for good (ADR 0003 "Web process hangs"), so no
+ * script runs and no player can recover. Any other failure fails the test.
+ */
+async function onLivePage(page: Page, browser: Browser, steps: (page: Page) => Promise<void>) {
+  let done = false;
+  try {
+    const run = steps(page);
+    run.catch(() => {});
+    await Promise.race([run, hung(page, () => done)]).finally(() => (done = true));
+  } catch (err) {
+    if (await answers(page)) throw err;
+    test.info().annotations.push({ type: 'web process hung', description: String(err) });
+    const { viewport, userAgent, deviceScaleFactor, hasTouch, isMobile } = test.info().project.use;
+    const context = await browser.newContext({
+      baseURL: test.info().project.use.baseURL,
+      viewport,
+      userAgent,
+      deviceScaleFactor,
+      hasTouch,
+      isMobile,
+    });
+    try {
+      await steps(await context.newPage());
+    } finally {
+      await context.close();
+    }
+  }
 }
 
 async function settle(page: Page) {
@@ -213,24 +258,28 @@ test.describe('through the MP4 sample table', () => {
 
   test('VBR MP4 read in pieces: the layer covers the playhead across seeks and evictions', async ({
     page,
+    browser,
   }) => {
-    await open(page, 'vbr.mp4', 'vbr.mp4');
-    await expectNoGap(page, 'start');
-    await page.keyboard.press('ArrowRight');
-    await settle(page);
-    await expectNoGap(page, '→');
-    await seekTo(page, 22);
-    await settle(page);
-    await expect.poll(() => prop(page, 'currentTime'), { timeout: 15_000 }).toBeGreaterThan(23);
-    await expectNoGap(page, 'far forward into the low-bitrate half');
-    await expectEvicted(page, 1, 10);
-    await seekTo(page, 3);
-    await settle(page);
-    await expectNoGap(page, 'far back into what was evicted');
-    await seekTo(page, 28.5);
-    await settle(page);
-    await expectNoGap(page, 'near the end');
-    await expect(page.getByTestId('error')).toHaveCount(0);
+    test.setTimeout(150_000);
+    await onLivePage(page, browser, async (page) => {
+      await open(page, 'vbr.mp4', 'vbr.mp4');
+      await expectNoGap(page, 'start');
+      await page.keyboard.press('ArrowRight');
+      await settle(page);
+      await expectNoGap(page, '→');
+      await seekTo(page, 22);
+      await settle(page);
+      await expect.poll(() => prop(page, 'currentTime'), { timeout: 15_000 }).toBeGreaterThan(23);
+      await expectNoGap(page, 'far forward into the low-bitrate half');
+      await expectEvicted(page, 1, 10);
+      await seekTo(page, 3);
+      await settle(page);
+      await expectNoGap(page, 'far back into what was evicted');
+      await seekTo(page, 28.5);
+      await settle(page);
+      await expectNoGap(page, 'near the end');
+      await expect(page.getByTestId('error')).toHaveCount(0);
+    });
   });
 });
 
