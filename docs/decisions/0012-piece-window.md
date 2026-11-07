@@ -49,6 +49,8 @@ after a seek.
     slack, capped at the furthest read.
     A one-off read far away, such as Matroska Cues at the end of the file, does not stretch the
     window. Before the first sample, the end is the furthest read.
+    Right after a seek the reads run ~10 s of media past the appends: Mediabunny's `packets()`
+    queue holds as many packets as were taken in the last second, and the start is a burst.
   - **Reset.** A seek (`restartAt`) resets the run, and so does `MsePlayer.open` after the header
     and duration reads, so a resume's window starts at its resume point from the first tick.
   - **Reads in flight are always inside** (`trackedSource` pins a read until its promise settles or
@@ -99,7 +101,12 @@ byte (`MsePlayer.byteTimeIndex()`):
   the media (the Cues or Attachments after the last Cluster, else the Segment's end) = duration.
 - **AVI:** the video's keyframe offsets (`AviDemuxer.byteTimeIndex()`); whole once its index is
   complete, still growing during a `movi` scan.
-- **Anything else (MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
+- **MP4/MOV (not fragmented):** every video keyframe's sample offset and timestamp, from the
+  sample table Mediabunny parsed from `moov` (`mp4-index.ts`, its internal `IsobmffDemuxer` shape;
+  Mediabunny is pinned). The whole index, up to the end of the last video sample. The read cursor
+  runs seconds of media ahead of the fragment it sampled, so learned points drew a held range up to
+  ~5 s before its time, into a range already evicted (a flaky `seek-downloaded.spec.ts`).
+- **Anything else (fragmented MP4, MPEG-TS, MKV without Cues):** what the reads learned, `ByteWindow`'s
   (fragment start time, read cursor) samples, plus (furthest read ever, duration) once every
   pipeline appended through the end. The cursor is past its fragment's media, so these points
   place bytes early, never late: the layer may start a little before the playhead, never after it.
@@ -113,8 +120,8 @@ rather than guessed; with no points at all the layer is empty. Ranges re-map eve
 evicted ones disappear and re-downloaded ones come back at their times after any seek.
 `byte-time.test.ts` covers the mapping; `e2e/seek-downloaded.spec.ts` (chromium + webkit) checks
 that the layer covers the playhead after keys, seek-bar clicks and drags, far jumps, touch
-skips and a resume, and that evicted ranges go, through the Cues and without an index (`offset.ts`,
-`vbr.mp4`).
+skips and a resume, and that evicted ranges go, through the Cues, the MP4 sample table (`vbr.mp4`)
+and without an index (`offset.ts`).
 
 ## Consequences
 

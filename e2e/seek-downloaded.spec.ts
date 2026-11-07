@@ -6,9 +6,9 @@ import { fixtureMagnet } from './support/fixtures';
 // goes, the layer covers it once the bytes there are held, and the ranges the piece window evicted
 // disappear. Through the MKV Cues: e2e/fixtures/resume/movie.mkv (40 s) with the
 // piece-window.spec.ts settings, so the small fixture is read in pieces and evicted behind the
-// playhead. Without an index (points learned from the reads): offset.ts (MPEG-TS) and vbr.mp4 (30 s,
-// 93 % of the bytes in its first half), with the default demuxer cache too, which reads the file
-// at once. WebKit gets its quick seek streaks spaced out: GStreamer fails to decode after some (on
+// playhead. Through the MP4 sample table: vbr.mp4 (30 s, 93 % of the bytes in its first half).
+// Without an index (points learned from the reads): offset.ts (MPEG-TS). Both with the default
+// demuxer cache too, which reads the file at once. WebKit gets its quick seek streaks spaced out: GStreamer fails to decode after some (on
 // main too), which is not what this spec checks.
 
 const DURATION = 40;
@@ -198,7 +198,9 @@ test.describe('without an index', () => {
       })
       .toBe(true);
   });
+});
 
+test.describe('through the MP4 sample table', () => {
   test('VBR MP4 read at once: the layer covers the playhead in the low-bitrate half', async ({
     page,
   }) => {

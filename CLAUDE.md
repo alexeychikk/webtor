@@ -171,7 +171,8 @@ src/lib/player/                MSE session, Mediabunny conversions, codec decisi
                                spinner, touch ±5 s (`centreState` is the pure rule)
   media-state.svelte.ts seek.ts   `<video>` state as runes; `downloadedBytes` (piece bitfield → file byte ranges)
   byte-time.ts                 seek bar's downloaded layer in time: byte ranges → element time through the
-                               MKV Cues / AVI keyframes / learned read points (ADR 0012 "Seek bar")
+                               MKV Cues / AVI keyframes / MP4 sample table (mp4-index.ts, Mediabunny internals) /
+                               learned read points (ADR 0012 "Seek bar")
   avi/                         AVI demuxer (ADR 0007): `createAviFormat` = Mediabunny `InputFormat` subclass
                                on its internal demuxer/track-backing API; riff.ts (hdrl, idx1), h264.ts (POC → PTS),
                                audio.ts (re-framing MP3/AC-3/DTS/PCM/AAC), fourcc.ts (codec names for `video-needs-relay`)

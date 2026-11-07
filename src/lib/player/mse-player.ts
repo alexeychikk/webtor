@@ -52,6 +52,7 @@ import { stereoDownmixer } from './downmix';
 import { ByteReader } from '../subtitles/mkv/reader';
 import { readCuePoints, readMkvHeader } from '../subtitles/mkv/header';
 import { learnedPoints, type ByteTimeIndex, type ByteTimePoint } from './byte-time';
+import { mp4TrackIndex } from './mp4-index';
 import {
   doviConfigOf,
   dolbyVisionPlayback,
@@ -534,6 +535,9 @@ export class MsePlayer {
       if (avi) player.containerIndex = () => avi.byteTimeIndex();
       else if ((await input.getFormat()) instanceof mb.MatroskaInputFormat) {
         void player.readMatroskaIndex(file);
+      } else {
+        const index = mp4TrackIndex(videoTrack);
+        if (index) player.containerIndex = () => index;
       }
       player.hdr = hdr;
       player.encoder = target;

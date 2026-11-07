@@ -4,7 +4,7 @@ import { covers, expectEvicted, expectNoGap, layer } from './support/downloaded'
 import { fixtureMagnet } from './support/fixtures';
 
 // e2e/fixtures/resume/movie.mkv: 40 s, the largest file of the `resume` torrent (ADR 0012).
-// vbr.mp4 / vbr.ts: 30 s, 93 % of the bytes in the first 15 s; no index (MPEG-TS seeks probe).
+// vbr.mp4 / vbr.ts: 30 s, 93 % of the bytes in the first 15 s; vbr.ts has no index (seeks probe).
 
 const video = (page: Page) => page.getByTestId('video');
 const currentTime = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.currentTime);
@@ -117,9 +117,11 @@ async function expectPlaysOn(page: Page, what: string, checkLayer: boolean) {
 }
 
 // `far`: the seek target (s); `ahead`: media past what plays after the seek back, held before.
+// After a seek Mediabunny's packet queue holds what was taken in the last second of the burst, so
+// the reads run ~10 s past the appends; vbr.mp4's sparse tail is ~2.6 s per 16 KiB piece.
 for (const [fixture, file, far, ahead] of [
   ['resume', 'movie.mkv', 30, [31, 34]],
-  ['vbr.mp4', 'vbr.mp4', 13, [20, 25]],
+  ['vbr.mp4', 'vbr.mp4', 13, [27, 30]],
   ['vbr.ts', 'vbr.ts', 13, [20, 25]],
 ] as const) {
   test(`${file}: far seeks complete, play on and keep the bytes at the playhead`, async ({
