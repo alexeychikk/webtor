@@ -218,7 +218,10 @@ docs/decisions/                ADRs
 - Svelte 5 runes only (`$state`, `$derived`, `$effect`, `$props`); shared reactive state in
   `*.svelte.ts` modules, no Svelte 4 stores. Components in PascalCase, modules in kebab-case.
 - Import WebTorrent as `import WebTorrent from 'webtorrent/dist/webtorrent.min.js'` (prebuilt browser
-  ESM; no Node polyfills). Never import `webtorrent` bare in browser code.
+  ESM; no Node polyfills). Never import `webtorrent` bare in browser code. **WebTorrent is pinned
+  exactly** (no `^`): `request-cancel.ts` patches its internals (`WebConn.httpRequest` starting its
+  fetch synchronously, the bundle's captured `self.fetch`, `Wire.requests`/`cancel`, `_selections`).
+  An upgrade re-checks those internals and keeps `e2e/switch-file.spec.ts` green.
 - **Mediabunny is pinned exactly** (`mediabunny`, `@mediabunny/*` at the same version, no `^`): the AVI
   demuxer implements internals. Upgrade all together and keep `src/lib/player/avi/demuxer.test.ts` green.
 - AVI scope: H.264 video (non-H.264 → `video-needs-relay`, naming the format). Indexes (`avi/index.ts`):
