@@ -624,9 +624,13 @@ func TestFarReadNotStarvedByPrefetch(t *testing.T) {
 	res = get(t, base+"/webseed/", fmt.Sprintf("bytes=0-%d", piece-1))
 	_, _ = io.Copy(io.Discard, res.Body)
 	res.Body.Close()
+	e := onlyEntry(h.srv)
+	const windowPieces = 12 << 20 / piece
+	waitFor(t, func() bool { return windowOf(h.srv, e) == pieceRange{1, 1 + windowPieces} }, 5*time.Second, "the prefetch window after the first read")
 	// Let the window's requests pile up in the seeder's queue, as they do while the page parses the
-	// header it just got.
+	// header it just got, and let the rate limit of re-requests pass (a slow first read nudges).
 	time.Sleep(time.Second)
+	waitFor(t, func() bool { return nudgeAllowed(h.srv, e) }, 5*time.Second, "the re-request rate limit")
 
 	start := time.Now()
 	res = get(t, base+"/webseed/", fmt.Sprintf("bytes=%d-%d", size-piece, size-1))
@@ -634,13 +638,47 @@ func TestFarReadNotStarvedByPrefetch(t *testing.T) {
 	res.Body.Close()
 	took := time.Since(start)
 	if !bytes.Equal(body, content[size-piece:]) {
-		t.Fatalf("last piece: %d bytes", len(body))
+		t.Fatalf("last piece: %d bytes after %v\n%s", len(body), took, h.logs.String())
 	}
-	// The 12 MiB window takes 6 s at 2 MiB/s; the last piece alone an eighth of a second.
-	t.Logf("last piece in %v", took)
-	if took > 2*time.Second {
-		t.Errorf("last piece took %v: it waited for the prefetch window", took)
+	// At 2 MiB/s, ~1 s of the window (8 pieces) downloads before the far read; one that waits behind
+	// the queued window requests comes after 20+. Judged by the pieces, not the time: a loaded
+	// machine stalls a read on its own.
+	done := completePieces(e.t, 1, 1+windowPieces)
+	t.Logf("last piece in %v, %d of %d window pieces complete", took, done, windowPieces)
+	if done > windowPieces/4 {
+		t.Errorf("last piece took %v and came after %d of %d window pieces: it waited for the prefetch window", took, done, windowPieces)
 	}
+}
+
+func onlyEntry(s *Server) *entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.torrents {
+		return e
+	}
+	return nil
+}
+
+func windowOf(s *Server, e *entry) pieceRange {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return e.window
+}
+
+func nudgeAllowed(s *Server, e *entry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Since(e.lastNudge) >= stallCheck
+}
+
+func completePieces(t *torrent.Torrent, begin, end int) int {
+	n := 0
+	for i := begin; i < end; i++ {
+		if t.PieceState(i).Complete {
+			n++
+		}
+	}
+	return n
 }
 
 // TestStarvedReadHoldsWindow: a read that waited behind the window drops it, and the window stays
@@ -658,23 +696,16 @@ func TestStarvedReadHoldsWindow(t *testing.T) {
 		res.Body.Close()
 	}
 	read("bytes=0-262143")
-	var e *entry
+	e := onlyEntry(h.srv)
+	// The window moves in the handler's defer, after the body went out.
+	waitFor(t, func() bool { return windowOf(h.srv, e) == pieceRange{1, 9} }, 5*time.Second, "the window after the first read")
+	// A first read that stalled nudged: the re-request rate limit isn't what this test is about.
 	h.srv.mu.Lock()
-	for _, x := range h.srv.torrents {
-		e = x
-	}
-	window := func() pieceRange {
-		h.srv.mu.Lock()
-		defer h.srv.mu.Unlock()
-		return e.window
-	}
+	e.lastNudge = time.Time{}
 	h.srv.mu.Unlock()
-	if w := window(); w != (pieceRange{1, 9}) {
-		t.Fatalf("window after the first read: %v", w)
-	}
 	h.srv.unstarve(e)
 	read("bytes=262144-524287")
-	if w := window(); w != (pieceRange{}) {
+	if w := windowOf(h.srv, e); w != (pieceRange{}) {
 		t.Errorf("window while held: %v", w)
 	}
 	if !strings.Contains(h.logs.String(), "waits behind the prefetch window") {

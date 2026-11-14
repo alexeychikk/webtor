@@ -840,7 +840,8 @@ func (s *Server) cancelWindowLocked(e *entry) {
 }
 
 // rerequest cancels every request of the torrent so the client makes them again in priority order,
-// at most once per stallCheck.
+// at most once per stallCheck. Its log line is throttled per reason, so a stall nudge doesn't hide a
+// starved read.
 func (s *Server) rerequest(e *entry, why string) {
 	s.mu.Lock()
 	if s.torrents[e.ih] != e || time.Since(e.lastNudge) < stallCheck {
@@ -852,7 +853,7 @@ func (s *Server) rerequest(e *entry, why string) {
 	st := e.t.Stats()
 	s.diag.event(e.ih, "nudge", "why", why, "connected", st.ActivePeers, "seeders", st.ConnectedSeeders,
 		"usefulChunks", st.ChunksReadUseful.Int64())
-	if ok, suppressed := s.throttle.allow("nudge "+e.ih.HexString(), e.lastNudge); ok {
+	if ok, suppressed := s.throttle.allow(why+" "+e.ih.HexString(), e.lastNudge); ok {
 		s.log.Info(why, "infohash", e.ih.HexString(), "suppressed", suppressed)
 	}
 	// Only cancelling every request unsticks it (just recomputing requests doesn't); in the browser
