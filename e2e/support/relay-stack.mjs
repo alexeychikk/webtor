@@ -4,18 +4,20 @@
 //   tcp-seeder   seeds a copy of e2e/fixtures/sample.mkv over TCP on 127.0.0.1 only (no DHT, no
 //                trackers, no WebRTC); its magnet has just xt=, dn= and x.pe= (no xs=, no ws=)
 //   tcp-seeder   the same for e2e/fixtures/avi-xvid-ac3.avi (video only the relay can convert)
+//   tcp-seeder   the same for the e2e/fixtures/multi-file directory (a multi-file torrent)
 //   webtor-relay http://127.0.0.1:7882/<RELAY_TOKEN>, no DHT, no default trackers; it converts
 //                video when it finds ffmpeg (WEBTOR_RELAY_FFMPEG or PATH, ADR 0007)
 //   webtor-relay http://127.0.0.1:7883/<RELAY_TOKEN>, the same with -no-transcode
 //   http://127.0.0.1:9100/magnet                   the sample.mkv seeder's magnet
 //   http://127.0.0.1:9100/avi-magnet               the avi-xvid-ac3.avi seeder's magnet
+//   http://127.0.0.1:9100/multi-file-magnet        the multi-file seeder's magnet
 //   http://127.0.0.1:9100/relay-url                the relay URL
 //   http://127.0.0.1:9100/no-transcode-relay-url   the -no-transcode relay's URL
 //
 // Both Go commands are built once (`go build`, cached by Go) and run as direct children, so killing
 // this process tree stops them.
 import { spawn, execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -62,10 +64,18 @@ function start(name, args, pattern) {
 
 // Seed from a copy: anacrolix keeps its piece-completion db next to the data, and every file in
 // e2e/fixtures is served by the fixture server.
+// A directory is copied file by file (its symlinks resolved) and seeded as a multi-file torrent.
 const seed = (name) => {
-  mkdirSync(join(work, 'seed', name), { recursive: true });
-  copyFileSync(join(FIXTURES, name), join(work, 'seed', name, name));
-  return start('tcp-seeder', [join(work, 'seed', name, name)], /^(magnet:\?\S+)/);
+  const from = join(FIXTURES, name);
+  const to = join(work, 'seed', name, name);
+  if (statSync(from).isDirectory()) {
+    mkdirSync(to, { recursive: true });
+    for (const file of readdirSync(from)) copyFileSync(join(from, file), join(to, file));
+  } else {
+    mkdirSync(join(work, 'seed', name), { recursive: true });
+    copyFileSync(from, to);
+  }
+  return start('tcp-seeder', [to], /^(magnet:\?\S+)/);
 };
 const relay = (addr, dir, ...extra) =>
   start(
@@ -87,6 +97,7 @@ const relay = (addr, dir, ...extra) =>
   );
 const magnet = await seed('sample.mkv');
 const aviMagnet = await seed('avi-xvid-ac3.avi');
+const multiFileMagnet = await seed('multi-file');
 const relayUrl = await relay(RELAY_ADDR, 'relay');
 const noTranscodeRelayUrl = await relay(
   NO_TRANSCODE_RELAY_ADDR,
@@ -99,6 +110,7 @@ createServer((req, res) => {
   const body = {
     '/magnet': magnet,
     '/avi-magnet': aviMagnet,
+    '/multi-file-magnet': multiFileMagnet,
     '/relay-url': relayUrl,
     '/no-transcode-relay-url': noTranscodeRelayUrl,
   }[req.url ?? ''];

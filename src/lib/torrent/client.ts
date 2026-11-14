@@ -6,18 +6,21 @@ import type WebTorrentType from 'webtorrent/dist/webtorrent.min.js';
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
 import { clearOpfs, MemoryChunkStore, storeOf } from './memory-store';
 import { piecesToEvict } from './piece-window';
+import { trackWebSeed, withAbortableFetch } from './request-cancel';
 import { announceList, prepareTorrentId } from './trackers';
 
 let clientPromise: Promise<WebTorrentType> | null = null;
 
 function getClient(): Promise<WebTorrentType> {
-  clientPromise ??= import('webtorrent/dist/webtorrent.min.js').then(({ default: WebTorrent }) => {
-    void clearOpfs();
-    const client = new WebTorrent();
-    // Per-torrent errors arrive on the torrent; the rest (e.g. a tracker going away) is not fatal.
-    client.on('error', (err) => console.warn('webtorrent:', err));
-    return client;
-  });
+  clientPromise ??= withAbortableFetch(() => import('webtorrent/dist/webtorrent.min.js')).then(
+    ({ default: WebTorrent }) => {
+      void clearOpfs();
+      const client = new WebTorrent();
+      // Per-torrent errors arrive on the torrent; the rest (e.g. a tracker going away) is not fatal.
+      client.on('error', (err) => console.warn('webtorrent:', err));
+      return client;
+    },
+  );
   return clientPromise;
 }
 
@@ -80,7 +83,7 @@ async function addTorrentId(
   // race the deletion of its store.
   await Promise.all([...client.torrents.map((t) => destroyTorrent(t)), ...destroying]);
   if (isStale?.()) return null;
-  return client.add(torrentId, {
+  const torrent = client.add(torrentId, {
     // The bounded window (ADR 0012), already in memory: no extra piece cache in front of it.
     store: MemoryChunkStore,
     storeCacheSlots: 0,
@@ -91,6 +94,8 @@ async function addTorrentId(
     // Nothing is downloaded until the media pipeline reads a byte range (file.stream).
     deselect: true,
   });
+  torrent.on('wire', trackWebSeed);
+  return torrent;
 }
 
 /**

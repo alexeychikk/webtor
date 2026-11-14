@@ -37,6 +37,25 @@ describe('pickVideoFile', () => {
     expect(pickVideoFile(files, 3)).toMatchObject({ ok: true, file: { index: 0 } });
     expect(pickVideoFile(files, 9)).toMatchObject({ ok: true, file: { index: 0 } });
   });
+  it('picks the first episode of a series, even when a later one is the largest', () => {
+    const files = [f('Show 10.mkv', 1100), f('Show 02.mkv', 1000), f('Show 01.mkv', 900)];
+    expect(pickVideoFile(files)).toMatchObject({ ok: true, file: { index: 2 } });
+    const naturalOrder = [f('E10.mkv', 1000), f('E2.mkv', 1000), f('E1.mkv', 1000)];
+    expect(pickVideoFile(naturalOrder)).toMatchObject({ ok: true, file: { index: 2 } });
+  });
+  it('picks the movie, not its samples or extras (at least twice the second largest)', () => {
+    const files = [f('a-extras.mkv', 450), f('b-sample.mkv', 30), f('movie.mkv', 900)];
+    expect(pickVideoFile(files)).toMatchObject({ ok: true, file: { index: 2 } });
+  });
+  it('prefers #file= over the series rule', () => {
+    const files = [f('E1.mkv', 900), f('E2.mkv', 1000), f('E3.mkv', 950)];
+    expect(pickVideoFile(files, 2)).toMatchObject({ ok: true, file: { index: 2 } });
+    expect(pickVideoFile(files)).toMatchObject({ ok: true, file: { index: 0 } });
+  });
+  it('lists only playable videos for the series rule', () => {
+    const files = [f('a.wmv', 1000), f('b.mkv', 900), f('c.mkv', 800)];
+    expect(pickVideoFile(files)).toMatchObject({ ok: true, file: { index: 1 } });
+  });
   it('reports an unsupported container when only those exist', () => {
     expect(pickVideoFile([f('a.wmv', 1), f('a.nfo', 1)])).toEqual({
       ok: false,

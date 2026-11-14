@@ -276,10 +276,19 @@ docs/decisions/                ADRs
 - Icons live in `public/` (`favicon.svg` = the header mark; PNGs rendered by `scripts/make-icons.mjs`),
   linked from `index.html` with root paths that Vite rewrites to the relative base.
 - **Files.** `#magnet=<encoded>&file=<n>`: `n` is the index into `torrent.files` of the file playing
-  (`readFileFromHash`; an unplayable or missing `n` falls back to the largest playable video). The
-  hash follows the controller (`magnet`, `fileIndex`) with `replaceState`. `controller.selectFile(n)`
+  (`readFileFromHash`; an unplayable or missing `n` falls back to the default video). The default
+  (`pickVideoFile`) is the largest playable video, unless it is under `SERIES_SIZE_RATIO` (2×) the
+  second largest: a series, which opens its first episode in `listVideoFiles` (natural path) order.
+  The hash follows the controller (`magnet`, `fileIndex`) with `replaceState`. `controller.selectFile(n)`
   destroys the MsePlayer and subtitle sources and opens a new one on the same torrent; after a fatal
-  error it reloads the torrent on that file. An opened/dropped `.torrent` (`TorrentInput` =
+  error it reloads the torrent on that file. Every read of the open file goes through its
+  `closableSource` (byte-source.ts), closed with the file: a pending read (demuxer, Cues index,
+  subtitle header or scan) keeps its WebTorrent selection. WebTorrent never takes a sent piece
+  request back, and a slow web seed has one slot, so `cancelUnwantedRequests` (request-cancel.ts; at
+  the switch and every `tick`) cancels the requests outside every selection and aborts their web seed
+  fetches (`withAbortableFetch` wraps the `fetch` the bundle captures, `trackWebSeed` patches
+  `WebConn.httpRequest`; checked against 3.0.21). Without them the new file's header waited up to the
+  60 s fetch timeout ("stuck in metadata"). e2e: `e2e/switch-file.spec.ts`. An opened/dropped `.torrent` (`TorrentInput` =
   `Uint8Array`) goes straight to WebTorrent (no relay); its `magnetURI` then goes into the hash.
 - **File inputs carry no `accept`.** iOS/iPadOS turns an `accept` list into UTIs and greys out
   every file that matches none; `.torrent`, `.srt`, `.ass`, `.ssa` have no system UTI there, so a
@@ -417,7 +426,7 @@ activity`: any move, key or touch shows them for `hideDelay` (`auto-hide.ts`: `H
   largest) + `extras.wmv` (fake, unsupported) + `readme.txt`. `<FIXTURE_BASE>/<name>.torrent` is the
   .torrent for any fixture (for upload tests).
 - `resume/` = `movie.mkv` (40 s 320×180; audio "English AAC" + "Russian AC3"; subtitles `embedded:4`
-  "English", `embedded:5` "English SDH", `embedded:6` "Russian") + `extra.mkv` (→ sample.mkv).
+  "English", `embedded:5` "English SDH", `embedded:6` "Russian") + `trailer.mkv` (→ sample.mkv).
 - `vbr.mp4`: 30 s 320×180 H.264 + AAC, faststart; 0–15 s noise (~93 % of the bytes), 15–30 s near-static
   (the seek bar's downloaded layer without an index, `e2e/seek-downloaded.spec.ts`). `vbr.ts`: the same in
   MPEG-TS (first frame at ~1.46 s), for seeks without an index under the piece window.
@@ -542,7 +551,8 @@ urlList: [webseed]})`; `/stats` is polled every 2 s and merged into the peer cou
   `relay-served`). Relay torrents get `maxWebConns` `RELAY_WEB_CONNS` (16, ADR 0006 "Throughput").
   No relay set = the original path, untouched. Never log or show the relay URL: the token is a password.
 - Relay e2e: `relayStack()` (e2e/support/fixtures.ts) returns magnets that only a TCP seeder on
-  loopback has (no `xs=`/`ws=`): `magnet` (sample.mkv), `aviMagnet` (avi-xvid-ac3.avi), plus
+  loopback has (no `xs=`/`ws=`): `magnet` (sample.mkv), `aviMagnet` (avi-xvid-ac3.avi),
+  `multiFileMagnet` (the `multi-file/` directory), plus
   `relayUrl` (a webtor-relay that reaches it) and `noTranscodeRelayUrl` (same, `-no-transcode`)
   (`e2e/support/relay-stack.mjs`, builds both Go commands). The relays find ffmpeg through
   `WEBTOR_RELAY_FFMPEG` or `PATH`; without it the conversion spec skips. Relay test hooks:

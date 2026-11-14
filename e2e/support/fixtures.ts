@@ -15,13 +15,15 @@ export const RELAY_STACK_BASE = 'http://127.0.0.1:9100';
 
 /**
  * The relay stack (e2e/support/relay-stack.mjs): magnets only TCP seeders on loopback have (no
- * `xs=`, no `ws=`, no WebRTC peers) — `magnet` for sample.mkv, `aviMagnet` for avi-xvid-ac3.avi —
+ * `xs=`, no `ws=`, no WebRTC peers) — `magnet` for sample.mkv, `aviMagnet` for avi-xvid-ac3.avi,
+ * `multiFileMagnet` for the multi-file directory —
  * and the URL of a webtor-relay that can reach them. `relayUrl` converts video when the stack found
  * ffmpeg (`WEBTOR_RELAY_FFMPEG` or PATH); `noTranscodeRelayUrl` runs with `-no-transcode`.
  */
 export async function relayStack(): Promise<{
   magnet: string;
   aviMagnet: string;
+  multiFileMagnet: string;
   relayUrl: string;
   noTranscodeRelayUrl: string;
 }> {
@@ -33,6 +35,7 @@ export async function relayStack(): Promise<{
   return {
     magnet: await get('/magnet'),
     aviMagnet: await get('/avi-magnet'),
+    multiFileMagnet: await get('/multi-file-magnet'),
     relayUrl: await get('/relay-url'),
     noTranscodeRelayUrl: await get('/no-transcode-relay-url'),
   };

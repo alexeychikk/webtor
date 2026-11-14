@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { fixtureMagnet } from './support/fixtures';
 
 // Double-tap seeking on touch (src/lib/player/touch-seek.ts) on e2e/fixtures/resume/movie.mkv
-// (40 s, the largest file of the torrent, so it opens first).
+// (40 s, first in the torrent's list, so it opens first).
 
 test.use({ hasTouch: true });
 

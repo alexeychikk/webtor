@@ -618,12 +618,17 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 	// a lower priority, so the next request (WebTorrent asks piece by piece) usually finds its data
 	// already here. The window moves only after the read: its chunks are requested from the peers
 	// first, and anacrolix never takes a sent request back for a more urgent one (on a slow swarm
-	// the range waited behind the whole window). A read away from the window drops it at once.
+	// the range waited behind the whole window). A read away from the window drops it at once. A read
+	// the page gave up on (it switched files or seeked away) leaves the window alone.
 	start, end := RangeStart(r.Header.Get("Range")), RangeEnd(r.Header.Get("Range"), f.Length())
 	ra := s.readaheadFor(e)
 	s.leaveWindow(e, f, start, end)
 	if end < f.Length() {
-		defer s.prefetchFrom(e, f, end, ra)
+		defer func() {
+			if r.Context().Err() == nil {
+				s.prefetchFrom(e, f, end, ra)
+			}
+		}()
 	}
 	rd := f.NewReader()
 	defer rd.Close()

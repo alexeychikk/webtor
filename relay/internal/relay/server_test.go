@@ -681,3 +681,56 @@ func TestStarvedReadHoldsWindow(t *testing.T) {
 		t.Errorf("no log of the starved read:\n%s", h.logs.String())
 	}
 }
+
+// TestAbandonedReadKeepsWindowOff: a read the page aborts (a file switch, a seek away) doesn't move
+// the prefetch window after it, so the swarm isn't kept busy with a file nobody reads.
+func TestAbandonedReadKeepsWindowOff(t *testing.T) {
+	const size, piece, rate = 8 << 20, 256 << 10, 64 << 10
+	dir := t.TempDir()
+	path := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(path, randomBytes(size), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := seedtest.StartWith(path, seedtest.Options{PieceLength: piece, UploadRate: rate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(seed.Close)
+	h := newHarness(t, Options{MetadataTimeout: 20 * time.Second, Readahead: 2 << 20})
+	base := h.torrentURL(seed.InfoHash)
+	res := get(t, base+"/metainfo?x.pe="+seed.Addr, "")
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/webseed/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", 4*piece, 5*piece-1))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if res, err := http.DefaultClient.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+
+	var e *entry
+	h.srv.mu.Lock()
+	for _, x := range h.srv.torrents {
+		e = x
+	}
+	h.srv.mu.Unlock()
+	waitFor(t, func() bool { return strings.Contains(h.logs.String(), fmt.Sprintf("bytes=%d-", 4*piece)) }, 5*time.Second, "the aborted read to end")
+	h.srv.mu.Lock()
+	w := e.window
+	h.srv.mu.Unlock()
+	if w != (pieceRange{}) {
+		t.Errorf("window after an aborted read: %v", w)
+	}
+}
