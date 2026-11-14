@@ -104,7 +104,7 @@ for audio in mp3 ac3; do
 done
 # resume/: a two-video torrent for the per-video watch state (resume, remembered tracks).
 # movie.mkv: 40 s 320x180 H.264 · audio eng AAC (default) + rus AC-3 · two English SRT tracks
-# ("English", "English SDH") and one Russian; extra.mkv is sample.mkv (symlink).
+# ("English", "English SDH") and one Russian; trailer.mkv is sample.mkv (symlink).
 mkdir -p resume
 srt() { # $1 = text prefix: one 1 s cue every 2 s
   for i in $(seq 0 19); do
@@ -130,7 +130,7 @@ srt 'Русский' > "$tmp/ru.srt"
   -metadata:s:s:2 language=rus -metadata:s:s:2 title="Russian" \
   -disposition:a:0 default \
   resume/movie.mkv
-ln -sfn ../sample.mkv resume/extra.mkv
+ln -sfn ../sample.mkv resume/trailer.mkv
 # short-audio.mkv: 12 s 320x180 H.264 whose two audio tracks ("English AAC", copied; "Russian AC3",
 # transcoded) end at 6 s, for seeks into the audio-less tail (e2e/seek-tail.spec.ts).
 "$FFMPEG" -hide_banner -loglevel error -y \

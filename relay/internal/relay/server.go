@@ -618,12 +618,17 @@ func (s *Server) handleWebseed(w http.ResponseWriter, r *http.Request) {
 	// a lower priority, so the next request (WebTorrent asks piece by piece) usually finds its data
 	// already here. The window moves only after the read: its chunks are requested from the peers
 	// first, and anacrolix never takes a sent request back for a more urgent one (on a slow swarm
-	// the range waited behind the whole window). A read away from the window drops it at once.
+	// the range waited behind the whole window). A read away from the window drops it at once. A read
+	// the page gave up on (it switched files or seeked away) leaves the window alone.
 	start, end := RangeStart(r.Header.Get("Range")), RangeEnd(r.Header.Get("Range"), f.Length())
 	ra := s.readaheadFor(e)
 	s.leaveWindow(e, f, start, end)
 	if end < f.Length() {
-		defer s.prefetchFrom(e, f, end, ra)
+		defer func() {
+			if r.Context().Err() == nil {
+				s.prefetchFrom(e, f, end, ra)
+			}
+		}()
 	}
 	rd := f.NewReader()
 	defer rd.Close()
@@ -835,7 +840,8 @@ func (s *Server) cancelWindowLocked(e *entry) {
 }
 
 // rerequest cancels every request of the torrent so the client makes them again in priority order,
-// at most once per stallCheck.
+// at most once per stallCheck. Its log line is throttled per reason, so a stall nudge doesn't hide a
+// starved read.
 func (s *Server) rerequest(e *entry, why string) {
 	s.mu.Lock()
 	if s.torrents[e.ih] != e || time.Since(e.lastNudge) < stallCheck {
@@ -847,7 +853,7 @@ func (s *Server) rerequest(e *entry, why string) {
 	st := e.t.Stats()
 	s.diag.event(e.ih, "nudge", "why", why, "connected", st.ActivePeers, "seeders", st.ConnectedSeeders,
 		"usefulChunks", st.ChunksReadUseful.Int64())
-	if ok, suppressed := s.throttle.allow("nudge "+e.ih.HexString(), e.lastNudge); ok {
+	if ok, suppressed := s.throttle.allow(why+" "+e.ih.HexString(), e.lastNudge); ok {
 		s.log.Info(why, "infohash", e.ih.HexString(), "suppressed", suppressed)
 	}
 	// Only cancelling every request unsticks it (just recomputing requests doesn't); in the browser

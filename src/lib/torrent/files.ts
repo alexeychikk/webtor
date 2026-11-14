@@ -40,8 +40,16 @@ export type VideoFilePick =
   | { ok: false; code: 'no-playable-file' | 'unsupported-container' };
 
 /**
+ * A series when the largest playable video is under this many times the second largest: its
+ * episodes are about the same size, so the first in the list plays. Else the largest (a movie with
+ * samples or extras).
+ */
+export const SERIES_SIZE_RATIO = 2;
+
+/**
  * The file to play: `preferred` (an index into `files`, e.g. from `#file=`) when it is a playable
- * video, else the largest playable one. Tells "only WMV/FLV/…" apart from "no video at all".
+ * video; else the first playable video in list order (`listVideoFiles`) for a series
+ * (`SERIES_SIZE_RATIO`), the largest one otherwise. Tells "only WMV/FLV/…" apart from "no video".
  */
 export function pickVideoFile(
   files: readonly FileLike[],
@@ -58,16 +66,14 @@ export function pickVideoFile(
   ) {
     return { ok: true, file: entry(preferred) };
   }
-  let best: number | null = null;
-  let sawUnsupported = false;
-  files.forEach((f, index) => {
-    const kind = classifyFile(f.name);
-    if (kind === 'unsupported') sawUnsupported = true;
-    if (kind !== 'playable' || (best !== null && files[best]!.length >= f.length)) return;
-    best = index;
-  });
-  if (best !== null) return { ok: true, file: entry(best) };
-  return { ok: false, code: sawUnsupported ? 'unsupported-container' : 'no-playable-file' };
+  const playable = listVideoFiles(files).filter((f) => f.kind === 'playable');
+  if (!playable.length) {
+    const sawUnsupported = files.some((f) => classifyFile(f.name) === 'unsupported');
+    return { ok: false, code: sawUnsupported ? 'unsupported-container' : 'no-playable-file' };
+  }
+  const [largest, second] = [...playable].sort((a, b) => b.length - a.length || a.index - b.index);
+  const series = second !== undefined && largest!.length < SERIES_SIZE_RATIO * second.length;
+  return { ok: true, file: entry(series ? playable[0]!.index : largest!.index) };
 }
 
 export interface VideoFileListEntry extends VideoFileEntry {

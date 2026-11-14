@@ -2,8 +2,8 @@ import { expect, test, type Page } from '@playwright/test';
 import { FIXTURE_BASE, fixtureMagnet } from './support/fixtures';
 import { openMenu } from './support/player';
 
-// Watch history (docs/decisions/0011). e2e/fixtures/resume = movie.mkv (40 s, the largest, opens
-// first) + extra.mkv (sample.mkv, 12 s): a multi-file torrent. sample.mkv alone is single-file.
+// Watch history (docs/decisions/0011). e2e/fixtures/resume = movie.mkv (40 s, first in the list, opens
+// first) + trailer.mkv (sample.mkv, 12 s): a multi-file torrent. sample.mkv alone is single-file.
 
 const video = (page: Page) => page.getByTestId('video');
 const currentTime = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.currentTime);
@@ -77,8 +77,8 @@ test('picking an entry while another video plays switches to it; a finished one 
   await watchMovieTo20(page);
   // Another file of the same torrent, played to its end.
   await openMenu(page, 'files-button');
-  await page.getByTestId('file').filter({ hasText: 'extra.mkv' }).click();
-  await expect(page.getByTestId('status')).toContainText('extra.mkv');
+  await page.getByTestId('file').filter({ hasText: 'trailer.mkv' }).click();
+  await expect(page.getByTestId('status')).toContainText('trailer.mkv');
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(0.5);
   await seekTo(page, 10.5);
   await expect
@@ -96,7 +96,7 @@ test('picking an entry while another video plays switches to it; a finished one 
   // Single-file: the file name only, no second line.
   await expect(first.locator('.file')).toHaveCount(0);
   await expect(second).toHaveAttribute('data-state', 'watched');
-  await expect(second).toContainText('extra.mkv');
+  await expect(second).toContainText('trailer.mkv');
   await expect(second).toContainText('Watched');
   await expect(third).toContainText('movie.mkv');
 
@@ -106,8 +106,8 @@ test('picking an entry while another video plays switches to it; a finished one 
 
   // The same torrent's other file: a file switch; the watched one starts over.
   await openHistory(page);
-  await entries(page).filter({ hasText: 'extra.mkv' }).click();
-  await expect(page.getByTestId('status')).toContainText('extra.mkv');
+  await entries(page).filter({ hasText: 'trailer.mkv' }).click();
+  await expect(page.getByTestId('status')).toContainText('trailer.mkv');
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(0.3);
   expect(await currentTime(page)).toBeLessThan(5);
   await expect(page.getByTestId('error')).toHaveCount(0);

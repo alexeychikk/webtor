@@ -4,7 +4,7 @@
  * `selectFile()` swaps the file within the same torrent (a fresh MsePlayer, same torrent).
  */
 import type { Torrent } from 'webtorrent/dist/webtorrent.min.js';
-import { torrentByteSource } from '../torrent/byte-source';
+import { closableSource, torrentByteSource, type ClosableSource } from '../torrent/byte-source';
 import {
   addRelayTorrent,
   addTorrent,
@@ -15,6 +15,7 @@ import {
   verifiedBytes,
 } from '../torrent/client';
 import { windowBudget } from '../torrent/piece-window';
+import { cancelUnwantedRequests } from '../torrent/request-cancel';
 import {
   listSubtitleFiles,
   listVideoFiles,
@@ -172,6 +173,8 @@ export class PlayerController {
   private input: TorrentInput | null = null;
   private torrent: Torrent | null = null;
   private player: MsePlayer | null = null;
+  /** The open file's byte source: closed with the file, so its pending reads let go. */
+  private source: ClosableSource | null = null;
   private embedded: EmbeddedSubtitleScan | null = null;
   private video: HTMLVideoElement | null = null;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -235,6 +238,7 @@ export class PlayerController {
     if (index === this.fileIndex) return;
     const run = ++this.run;
     this.closeFile();
+    setTimeout(() => cancelUnwantedRequests(torrent), 0);
     this.forgotten = null;
     this.phase = 'metadata';
     this.starvedFor = 0;
@@ -370,7 +374,8 @@ export class PlayerController {
       return new Uint8Array(await sidecar.arrayBuffer());
     });
 
-    const source = torrentByteSource(file);
+    const source = closableSource(torrentByteSource(file));
+    this.source = source;
     // A reopened player that completed a seek or played on ends the row of reopens (`nextReopen`).
     let recovered = false;
     let player: MsePlayer;
@@ -420,10 +425,15 @@ export class PlayerController {
     } catch (err) {
       if (run === this.run) {
         this.fail(err instanceof PlaybackError ? err : new PlaybackError('playback-failed'));
+      } else {
+        source.close();
       }
       return;
     }
-    if (run !== this.run) return player.destroy();
+    if (run !== this.run) {
+      source.close();
+      return player.destroy();
+    }
     this.player = player;
     this.notices = [...this.notices, ...player.notices];
     this.audioTracks = player.audioTracks;
@@ -527,10 +537,17 @@ export class PlayerController {
     this.player = null;
     this.embedded?.destroy();
     this.embedded = null;
+    this.closeSource();
     this.subtitles.reset();
     this.fileName = null;
     this.resetFileState();
     this.notices = this.notices.filter((n) => TORRENT_NOTICES.includes(n));
+  }
+
+  /** Takes back every read of the open file still waiting for pieces. */
+  private closeSource() {
+    this.source?.close();
+    this.source = null;
   }
 
   private resetFileState() {
@@ -688,6 +705,7 @@ export class PlayerController {
     this.player = null;
     this.embedded?.destroy();
     this.embedded = null;
+    this.closeSource();
     this.subtitles.reset();
     this.watch = null;
     const torrent = this.torrent;
@@ -719,6 +737,7 @@ export class PlayerController {
     this.player = null;
     this.embedded?.destroy();
     this.embedded = null;
+    this.closeSource();
     this.subtitles.reset();
     clearInterval(this.timer);
     this.stopRelay();
@@ -1000,6 +1019,7 @@ export class PlayerController {
     const webSeeds = t.wires.filter((w) => w.type === 'webSeed').length;
     this.stats = mergeRelayStats(stats, webSeeds, this.relayStats);
     this.evictOutsideWindow(t);
+    cancelUnwantedRequests(t);
     this.updateDownloaded(t);
     this.buffer = this.player?.bufferInfo() ?? null;
     const waitingForData = this.phase === 'metadata' || this.phase === 'buffering';

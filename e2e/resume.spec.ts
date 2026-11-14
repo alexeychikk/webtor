@@ -3,8 +3,8 @@ import { fixtureMagnet } from './support/fixtures';
 import { closeMenu, openMenu, selectAudio, selectSubtitle, wakeControls } from './support/player';
 
 // e2e/fixtures/resume: movie.mkv (40 s; audio "English AAC" default + "Russian AC3"; subtitles
-// embedded:4 "English", embedded:5 "English SDH", embedded:6 "Russian") and extra.mkv (sample.mkv,
-// 12 s). movie.mkv is the largest, so it opens first.
+// embedded:4 "English", embedded:5 "English SDH", embedded:6 "Russian") and trailer.mkv (sample.mkv,
+// 12 s). movie.mkv is first in the list, so it opens first (pickVideoFile).
 
 const video = (page: Page) => page.getByTestId('video');
 const currentTime = (page: Page) => video(page).evaluate((v: HTMLVideoElement) => v.currentTime);
@@ -90,7 +90,7 @@ test('subtitles turned off stay off after a reload', async ({ page }) => {
   await closeMenu(page);
   await expect(page.getByTestId('subtitles')).toHaveAttribute('data-value', '');
   // A video never opened before still follows the language preference.
-  await pickFile(page, 'extra.mkv');
+  await pickFile(page, 'trailer.mkv');
   await expect(page.getByTestId('subtitles')).toHaveAttribute('data-value', 'embedded:4');
 });
 
@@ -99,7 +99,7 @@ test('each video of a torrent resumes on its own; a finished one starts over', a
   await seekTo(page, 20);
   await expect.poll(() => currentTime(page), { timeout: 20_000 }).toBeGreaterThan(20.5);
 
-  await pickFile(page, 'extra.mkv');
+  await pickFile(page, 'trailer.mkv');
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(0.5);
   expect(await currentTime(page)).toBeLessThan(5);
   await expect(resumeToast(page)).toHaveCount(0);
@@ -111,7 +111,7 @@ test('each video of a torrent resumes on its own; a finished one starts over', a
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(20.5);
   await expect(resumeToast(page)).toContainText(/Resumed at 0:2\d/);
 
-  await pickFile(page, 'extra.mkv');
+  await pickFile(page, 'trailer.mkv');
   await expect.poll(() => currentTime(page), { timeout: 30_000 }).toBeGreaterThan(0.5);
   expect(await currentTime(page)).toBeLessThan(5);
   await expect(resumeToast(page)).toHaveCount(0);

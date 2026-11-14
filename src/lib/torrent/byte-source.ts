@@ -32,3 +32,64 @@ export function torrentByteSource(file: TorrentFile): ByteSource {
     },
   };
 }
+
+/** A `ByteSource` whose reads can all be taken back at once. */
+export interface ClosableSource extends ByteSource {
+  /** Cancels every stream in flight (its pieces are deselected) and fails every later read. */
+  close(): void;
+}
+
+/**
+ * `source` for one open of a file: closing it cancels the reads still waiting for pieces (the
+ * demuxer's, the subtitle and index readers'), so WebTorrent drops their selections and the next
+ * file's reads get the peers.
+ */
+export function closableSource(source: ByteSource): ClosableSource {
+  const open = new Set<{ reader: ReadableStreamDefaultReader<Uint8Array>; fail(): void }>();
+  let closed = false;
+  const closedError = () => new Error('the file was closed');
+  return {
+    size: source.size,
+    read(start, end) {
+      if (closed) return Promise.reject(closedError());
+      const result = source.read(start, end);
+      if (!(result instanceof ReadableStream)) return result;
+      const reader = result.getReader();
+      let entry: { reader: ReadableStreamDefaultReader<Uint8Array>; fail(): void };
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          entry = { reader, fail: () => controller.error(closedError()) };
+          open.add(entry);
+        },
+        async pull(controller) {
+          try {
+            const { value, done } = await reader.read();
+            if (closed) return;
+            if (done) {
+              open.delete(entry);
+              controller.close();
+            } else {
+              controller.enqueue(value);
+            }
+          } catch (err) {
+            open.delete(entry);
+            if (!closed) controller.error(err);
+          }
+        },
+        cancel(reason) {
+          open.delete(entry);
+          return reader.cancel(reason);
+        },
+      });
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const { reader, fail } of open) {
+        fail();
+        void reader.cancel().catch(() => {});
+      }
+      open.clear();
+    },
+  };
+}

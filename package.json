@@ -25,7 +25,7 @@
     "@mediabunny/dts": "1.61.6",
     "jassub": "^2.5.21",
     "mediabunny": "1.61.6",
-    "webtorrent": "^3.0.21"
+    "webtorrent": "3.0.21"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
